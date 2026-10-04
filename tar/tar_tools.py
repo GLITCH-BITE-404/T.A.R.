@@ -317,6 +317,44 @@ _EVERYTHING = ("everything", "all", "all windows", "all apps", "everything else"
                "everything but tar", "everything except tar", "all but tar")
 
 
+def a_close_tab(args):
+    """Close only the browser TABS whose title matches q -- never the window."""
+    q = (args.get("q") or args.get("what") or args.get("title") or "").strip().lower()
+    q = re.sub(r"\b(the|tab|tabs|all|of|my)\b", " ", q).strip()
+    if not q:
+        return "close which tab? (part of its title)"
+    if not shutil.which("wtype"):
+        return "wtype isn't installed"
+    closed = 0
+    for w in [w for w in _clients() if _is_browser(w)]:
+        addr = w["address"]
+        sh(["hyprctl", "dispatch", "focuswindow", "address:" + addr])
+        time.sleep(0.25)
+        seen = set()
+        for _ in range(40):                 # walk the tabs with Ctrl+Tab
+            cur = next((c for c in _clients() if c["address"] == addr), None)
+            if not cur:
+                break                       # the window closed (its last tab went)
+            title = (cur.get("title") or "")
+            if q in title.lower():
+                sh(["wtype", "-M", "ctrl", "-k", "w", "-m", "ctrl"])
+                closed += 1
+                time.sleep(0.35)
+                seen.clear()
+                continue
+            if title in seen:
+                break                       # full circle: no more matching tabs
+            seen.add(title)
+            sh(["wtype", "-M", "ctrl", "-k", "Tab", "-m", "ctrl"])
+            time.sleep(0.25)
+    left = [c for c in _clients() if _is_browser(c) and q in (c.get("title") or "").lower()]
+    if not closed:
+        return "no open tab with %r in its title" % q
+    return "closed %d tab%s matching %r -- %s" % (
+        closed, "" if closed == 1 else "s", q,
+        "VERIFIED: none left" if not left else "NOT VERIFIED: one still shows")
+
+
 def a_closewin(args):
     what = (args.get("what") or "").strip().lower()
     if what in _EVERYTHING:
@@ -349,6 +387,13 @@ def a_closewin(args):
         return "no app window to close"
     if w is False:
         return "no window matching %r" % (args.get("what") or args.get("q"))
+    if _is_browser(w):
+        # a browser window holds MANY tabs -- closing it to close one tab is
+        # how T.A.R. once wiped the user's whole Chrome
+        stop = needs_confirm("closewin", args, "close the WHOLE %s window with all its tabs "
+                             "(%r) -- to close just a tab use close_tab" % (_label(w), (w.get("title") or "")[:40]))
+        if stop:
+            return stop
     sh(["hyprctl", "dispatch", "closewindow", "address:" + w["address"]])
     return "closed " + _label(w)
 
@@ -522,6 +567,10 @@ def a_open(args):
                   flags=re.I).strip()
     # "classroom on my student chrome account" -> that Chrome profile
     prof = resolve_profile(args.get("profile")) if args.get("profile") else None
+    if args.get("profile") and not prof:
+        return ("no Chrome profile matching %r. profiles: %s" % (
+            args.get("profile"), ", ".join(p["name"] + (" (school/managed)" if p["managed"] else "")
+                                           for p in chrome_profiles()) or "none found"))
     mp = re.search(r"\s+(?:on|in|with|using|from)\s+(?:my\s+|the\s+)?([\w-]+(?:\s+[\w-]+)?)\s+"
                    r"(?:chrome\s+)?(?:account|profile|user)$", what, flags=re.I)
     if mp:
@@ -567,10 +616,7 @@ def a_open(args):
 
     if re.match(r"^(https?://|www\.)", low):
         url = what if low.startswith("http") else "https://" + what
-        b = (want_browser if want_browser and shutil.which(want_browser)
-             else preferred_browser())
-        sh([b, url] if b else ["xdg-open", url], detach=True)
-        return "opening " + url[:60]
+        return open_url(url, prof, want_browser)
 
     # "open downloads" -> the (Hebrew-named) XDG folder
     xd = xdg_dir(low)
@@ -580,23 +626,17 @@ def a_open(args):
 
     # "open youtube" is a website, not a binary
     site = SITES.get(low) or SITES.get(re.sub(r"\.com$", "", low))
-    if prof and (site or re.match(r"^(https?://|www\.)", low)):
-        url = site or (what if low.startswith("http") else "https://" + what)
-        sh(_profile_argv(prof, url), detach=True)
-        return "opening %s in the %r Chrome profile" % (url.split("//")[1].rstrip("/"), prof["name"])
+    if prof and site:
+        return open_url(site, prof, want_browser)
     if prof and not site:
-        # unknown site name: search it inside that profile
-        sh(_profile_argv(prof, "https://duckduckgo.com/?q=" + urlquote("\\" + what)), detach=True)
-        return "opening %r in the %r Chrome profile" % (what, prof["name"])
+        # unknown site name: jump to it inside that profile
+        return open_url("https://duckduckgo.com/?q=" + urlquote("\\" + what), prof, want_browser)
     if site and _already_open(low):
         w = _already_open(low)
         sh(["hyprctl", "dispatch", "focuswindow", "address:" + w["address"]])
         return "already open (%r) -- switched to it -- VERIFIED" % (w.get("title") or "")[:50]
     if site:
-        b = (want_browser if want_browser and shutil.which(want_browser)
-             else preferred_browser())
-        sh([b, site] if b else ["xdg-open", site], detach=True)
-        return "opening %s in %s" % (site.split("//")[1].rstrip("/"), b or "the browser")
+        return open_url(site, None, want_browser)
 
     path = os.path.expanduser(what)
     if os.path.exists(path):
@@ -1020,9 +1060,16 @@ def resolve_profile(want):
     """'student' / 'school' -> the managed profile, 'main' -> Default, or a name."""
     raw = re.sub(r"[\u200e\u200f\u202a-\u202e]", "", (want or "")).strip().lower()
     profs = chrome_profiles()
-    for p in profs:                         # the display name exactly as given
-        if raw and raw in (p["name"].lower(), p["given"].lower(), p["dir"].lower()):
+    for p in profs:                         # a profile's own NAME / folder
+        if raw and raw in (p["name"].lower(), p["dir"].lower()):
             return p
+    # a PERSON's name ("Rephael" / "רפאל") is on several profiles (the school
+    # account belongs to the same person) -> it means the everyday account,
+    # unless they also said school/student/work
+    if raw and not re.search(r"\b(student|school|work|class|edu|learning)\b", raw):
+        hits = [p for p in profs if p["given"] and p["given"].lower() in raw]
+        if hits:
+            return next((p for p in hits if not p["managed"]), None) or main_profile() or hits[0]
     want = re.sub(r"\b(my|the|chrome|google|account|profile|user)\b", " ", raw).strip()
     if not want:
         return None
@@ -1040,6 +1087,29 @@ def resolve_profile(want):
 
 def _profile_argv(prof, url):
     return [prof["browser"], "--profile-directory=" + prof["dir"], url]
+
+
+def main_profile():
+    """The user's everyday account: config `chrome_profile`, else Default."""
+    want = (cfg().get("chrome_profile") or "").strip()
+    profs = chrome_profiles()
+    return (next((p for p in profs if p["dir"] == want or p["name"] == want), None) if want
+            else None) or next((p for p in profs if p["dir"] == "Default"), None)
+
+
+def open_url(url, prof=None, want_browser=None):
+    """Open a URL. In Chrome it ALWAYS goes to an explicit profile -- the one
+    asked for, else the main account -- so a fresh Chrome start can't land in
+    whatever profile happened to be used last."""
+    b = (want_browser if want_browser and shutil.which(want_browser) else preferred_browser())
+    if b and ("chrome" in b or "chromium" in b):
+        prof = prof or main_profile()
+        if prof:
+            sh(_profile_argv(prof, url), detach=True)
+            return "opened %s in the %r Chrome profile%s" % (
+                url[:70], prof["name"], " (school)" if prof["managed"] else " (main)" if prof["dir"] == "Default" else "")
+    sh([b, url] if b else ["xdg-open", url], detach=True)
+    return "opened %s in %s" % (url[:70], b or "the browser")
 
 
 def _already_open(q):
@@ -1080,10 +1150,8 @@ def a_web(args):
         if str(args.get("lucky", "")).lower() in ("1", "true", "yes"):
             q = "\\" + q
         url = "https://duckduckgo.com/?q=" + urlquote(q)
+    return open_url(url, prof)
     browser = preferred_browser()
-    if prof:
-        sh(_profile_argv(prof, url), detach=True)
-        return "opened %s in the %r Chrome profile" % (url[:70], prof["name"])
     if browser:
         sh([browser, url], detach=True)
     else:
@@ -2649,7 +2717,12 @@ ACTIONS = {
                    [r"^maximi[sz]e$", r"^fill the screen$"]),
     "float":      (a_float, "toggle floating", [r"^(?:toggle )?float(?:ing)?$"]),
     "center":     (a_center, "center the window", [r"^cent(?:er|re)(?: it)?$"]),
-    "closewin":   (a_closewin, "close an app window: what=kitty/firefox/... or "
+    "close_tab":  (a_close_tab, "close browser TABS whose title contains q= (e.g. q='cookie "
+                                "clicker'). Use this for tabs -- NEVER close a browser window "
+                                "to get rid of a tab.",
+                   [r"^close (?:all )?(?:of )?(?:the |my )?(?P<q>.+?) tabs?$"]),
+    "closewin":   (a_closewin, "close an app window (a browser window = ALL its tabs; use "
+                               "close_tab for tabs): what=kitty/firefox/... or "
                                "what=them for everything YOU opened, "
                                "what=everything for EVERY window except T.A.R. "
                                "(\"close everything but tar\"), or "

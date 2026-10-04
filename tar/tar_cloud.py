@@ -293,6 +293,12 @@ SYSTEM = (
     "name what you see. Typing into "
     "a field -> type_into. Scrolling -> scroll with what=<window>. Never fake "
     "a click with key presses. 'ask claude ...' -> ask_claude.\n"
+    "LANGUAGE: reply in the language of the user's LATEST message -- English "
+    "unless they wrote in Hebrew. Hebrew names in the context don't change that.\n"
+    "TABS vs WINDOWS: to close tabs use close_tab. NEVER close a browser window "
+    "or kill the browser to get rid of a tab -- that destroys every other tab.\n"
+    "PROFILES: only say something opened in a profile if the action result "
+    "says 'in the <name> Chrome profile'.\n"
     "ALWAYS TRY: tools get installed and things change during a chat. If the "
     "user asks for something, call the action again -- never just repeat an "
     "earlier failure or 'I can't' from the conversation.\n"
@@ -350,10 +356,11 @@ def live_status():
         profs = []
     if profs:
         lines.append("Chrome profiles (use profile=<name> on open/web): " + ", ".join(
-            "%s%s" % (p["name"] or p["dir"],
+            "%r%s" % (p["name"] or p["dir"],
                       " = school/student account (managed)" if p["managed"]
-                      else (" = main account (%s)" % p["given"] if p["dir"] == "Default" and p["given"] else ""))
-            for p in profs))
+                      else (" = MAIN/normal account, the user calls it '%s' -- used by default"
+                            % p["given"] if p["dir"] == "Default" else ""))
+            for p in profs) + ". 'Rephael'/'my normal account'/'main' -> profile='main'.")
     out = "\n\nLIVE STATUS (checked just now -- this is the truth; ignore any "
     out += "older message or action result in this chat that says otherwise):\n- "
     return out + "\n- ".join(lines)
@@ -491,6 +498,11 @@ def gemini_call(key, model, body):
             if e.code == 429 and attempt == 0:
                 emit("info", v="Gemini rate limit — waiting a moment")
                 time.sleep(15)
+                continue
+            if e.code in (500, 502, 503, 504) and attempt == 0:
+                # "model is experiencing high demand" -- usually gone in seconds
+                emit("info", v="Gemini is busy — retrying")
+                time.sleep(4)
                 continue
             try:
                 detail = json.loads(detail)["error"]["message"]
@@ -652,7 +664,7 @@ def chat_gemini(message, model, max_turns=10):
             act = act or "?"
             if act in T.ACTIONS or act in T.UI_ACTIONS:
                 acted.append(act)       # malformed calls don't count as "did something"
-            B.act_log(act, payload.get("args") or {}, out)
+            B.act_log(act, _a or {}, out)
             emit("acted", action=act, args=payload.get("args") or {},
                  v=out, direct=False)
             results.append({"functionResponse": {
