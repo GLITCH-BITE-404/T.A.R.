@@ -26,7 +26,8 @@ check_deps() {
     done
     # tool -> what it powers
     local opt=(
-        "wtype:typing / key presses"       "grim:screenshots"
+        "wlrctl:clicking / scrolling (AUR)" "wtype:typing / key presses"
+        "grim:screenshots"
         "slurp:region select"              "playerctl:media control"
         "pactl:volume"                     "brightnessctl:brightness"
         "nmcli:wifi"                       "bluetoothctl:bluetooth"

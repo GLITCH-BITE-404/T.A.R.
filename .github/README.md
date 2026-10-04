@@ -72,6 +72,7 @@ tells you what's missing:
 
 | Tool | Used for |
 |---|---|
+| `wlrctl` (AUR) | clicking, scrolling and dragging on screen |
 | `wtype` | typing and key presses |
 | `grim`, `slurp` | screenshots |
 | `playerctl` | media control |
@@ -91,7 +92,9 @@ On Arch (Quickshell may need the AUR, e.g. `yay -S quickshell`):
 ```sh
 sudo pacman -S quickshell hyprland python jq wtype grim slurp playerctl \
   brightnessctl networkmanager bluez-utils libnotify curl trash-cli fd \
-  libqalculate wf-recorder hyprsunset hyprpicker cliphist tesseract ffmpeg
+  libqalculate wf-recorder hyprsunset hyprpicker cliphist tesseract \
+  tesseract-data-eng ffmpeg
+yay -S wlrctl      # clicking (AUR)
 ```
 
 ## Install

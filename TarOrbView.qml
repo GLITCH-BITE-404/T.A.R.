@@ -49,7 +49,8 @@ Item {
     signal readAloudRequested(string text)
     signal chatModeRequested()
     signal consoleRequested()
-    signal setupRequested()
+    signal setupRequested()      // a LOCKED feature was clicked
+    signal settingsRequested()   // plain SETUP button
     signal historyRequested()
     signal closeRequested()
     signal stopRequested()
@@ -627,7 +628,7 @@ Item {
             theme: view.theme; accent: view.accent; scaleFn: view.hostScale
             glyph: "\u{f0493}"
             label: "SETUP"
-            onClicked: view.setupRequested()
+            onClicked: view.settingsRequested()
         }
     }
 

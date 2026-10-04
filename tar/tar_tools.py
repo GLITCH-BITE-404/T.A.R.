@@ -811,6 +811,27 @@ def _away_from_tar(args):
     return None
 
 
+# What the user actually wrote recently -- set by the cloud backend before it
+# runs tools. Personal info may only be typed if the user supplied it.
+USER_SAID = ""
+_SENSITIVE_FIELD = re.compile(
+    r"\b(e-?mail|password|passcode|pass ?word|pin|login|log in|sign ?in|user ?name|"
+    r"account|phone|address|card|cvv|cvc|iban|ssn|social security|otp|2fa|code)\b", re.I)
+_PERSONAL_TEXT = re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+|\+?\d[\d\s-]{7,}\d")
+
+
+def _personal_guard(text, target=""):
+    """Refuse to type personal info the user didn't give us."""
+    supplied = text.strip() and text.strip().lower() in (USER_SAID or "").lower()
+    if supplied:
+        return None
+    if _SENSITIVE_FIELD.search(target or "") or _PERSONAL_TEXT.search(text or ""):
+        return ("refused: that's personal info (%s) and the user never told you "
+                "what it is. Ask them for the exact text -- never guess emails, "
+                "passwords, usernames or numbers." % (target or "email/phone"))
+    return None
+
+
 def a_type(args):
     """Type text into whatever window has focus."""
     txt = args.get("text") or args.get("what") or ""
@@ -818,6 +839,9 @@ def a_type(args):
         return "type what?"
     if not shutil.which("wtype"):
         return "wtype isn't installed"
+    stop = _personal_guard(txt, args.get("into") or args.get("field") or "")
+    if stop:
+        return stop
     err = _away_from_tar(args)
     if err:
         return err
@@ -1656,6 +1680,14 @@ def a_click_on(args):
     target = (args.get("target") or args.get("what") or "").strip()
     if not target:
         return "click on what?"
+    # "that thing in the top right" names nothing -- clicking a guess is how
+    # you hit the wrong button. Make the model look first.
+    vague = re.sub(r"\b(the|a|an|that|this|it|thing|stuff|one|button|icon|spot|"
+                   r"in|on|at|of|top|bottom|left|right|middle|center|centre|corner|"
+                   r"upper|lower|side|there|here)\b", " ", target.lower()).strip()
+    if not vague:
+        return ("too vague to click safely (%r). Use look first to see what's "
+                "there, then click_on its actual label." % target)
     if not _pointer_ok():
         return _NO_POINTER
     if _RISKY_CLICK.search(target):
@@ -1720,6 +1752,9 @@ def a_type_into(args):
     text = args.get("text") or ""
     if not text:
         return "type what?"
+    stop = _personal_guard(text, args.get("target") or args.get("field") or "")
+    if stop:
+        return stop
     clicked = a_click_on({"target": args.get("target") or args.get("field") or "",
                           "_confirmed": args.get("_confirmed")})
     if not clicked.startswith("clicked"):
@@ -1766,6 +1801,10 @@ _SHELL_DENY = [
      "deleting is off-limits here -- use the trash action (recoverable)"),
     (r"\b(curl|wget)\b[^|]*\|\s*(ba|z|fi)?sh\b", "piping a download into a shell"),
     (r"(^|[\s/])\.?ssh/|\.gnupg|id_rsa|id_ed25519", "touches SSH/GPG keys"),
+    (r"\bpass\s+(show|ls|find|grep|otp|-c)|\bpass\s*$|\.password-store|\bgpg\b.*(-d|--decrypt)|"
+     r"secret-tool|kwallet|gnome-keyring|keyring\s+get|Login Data|logins\.json|key4\.db|"
+     r"\bbw\s+(get|list)|\bop\s+(item|read)|keepassxc-cli",
+     "reads saved passwords/secrets -- never allowed"),
     (r"\b(dd|mkfs|wipefs|fdisk|parted|sgdisk|cryptsetup|mount|umount|swapoff)\b",
      "disk/mount tool"),
     (r"\b(shred|mkfs[\w.]*|wipefs|fdisk|parted|sgdisk|dd)\b", "disk-destroying tool"),
@@ -2337,7 +2376,8 @@ ACTIONS = {
     "coin":       (a_coin, "flip a coin", [r"^(?:flip a coin|coin ?flip|heads or tails)$"]),
     "dice":       (a_dice, "roll a die: sides= (default 6)",
                    [r"^roll (?:a )?(?:die|dice)$", r"^roll (?:a )?d(?P<sides>\d{1,4})$"]),
-    "play":       (a_play, "play a song/video on youtube: q=",
+    "play":       (a_play, "play a song/video on youtube: q=. This ALREADY opens and "
+                         "starts the top video -- do NOT click anything afterwards.",
                    [r"^play (?P<q>.+) on youtube$"]),
     "look":       (a_look, "LOOK at the screen and answer a question about it (q=). "
                            "Use before clicking if unsure what's there.", []),
@@ -2345,7 +2385,8 @@ ACTIONS = {
                                "target='the subscribe button' (button=right, double=true optional). "
                                "Finds it by text, else by vision.", []),
     "click":      (a_click, "click at exact screen pixels x=, y= (button=, double=)", []),
-    "scroll":     (a_scroll, "scroll a window: what=chrome, dir=down|up|left|right, amount=",
+    "scroll":     (a_scroll, "scroll a window: what=chrome, dir=down|up|left|right, "
+                             "amount=notches 1-15 (default 5 = about half a page)",
                    [r"^scroll (?P<dir>down|up)(?: (?:on|in) (?P<what>\w+))?$"]),
     "type_into":  (a_type_into, "click a field by description then type: target='the search box', text=", []),
     "ask_claude": (a_ask_claude, "ask Claude (Anthropic's AI, via Claude Code) a question: q=. "

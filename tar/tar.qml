@@ -611,7 +611,12 @@ Item {
             // An action ran -- either matched outright (no model) or requested
             // by the model via <<ACT ...>>. Show it as a distinct line so it
             // never reads like something T.A.R. merely claimed to do.
-            window.say("act", (d.v || d.action));
+            // Long results (a whole screen description, a file listing) are
+            // for the model; the transcript only needs the gist.
+            var actTxt = String(d.v || d.action);
+            if (actTxt.length > 280)
+                actTxt = actTxt.substring(0, 280).replace(/\s+\S*$/, "") + " \u2026";
+            window.say("act", actTxt);
             orb.pulse();
             window.sfx("act");
         } else if (d.t === "confirm") {
@@ -2463,6 +2468,12 @@ Item {
                 window.capsRefresh();
                 window.say("sys", "that needs an engine — hit ASK T.A.R. on the "
                          + "locked card and pick one.");
+            }
+            onSettingsRequested: {
+                window.viewMode = "chat";
+                window.settingsOpen = true;
+                window.historyOpen = false;
+                window.capsRefresh();
             }
             onHistoryRequested: window.openHistory()
             onCloseRequested: window.close()

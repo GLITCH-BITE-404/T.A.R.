@@ -250,7 +250,9 @@ SYSTEM = (
     "SCREEN & MOUSE: you can see and click. 'click X' / 'press X' / 'that "
     "button' -> click_on target=<what the user described> (it finds it by "
     "text or vision and clicks; T.A.R. hides itself so it never clicks "
-    "itself). Not sure what they mean by 'that'? use look first. Typing into "
+    "itself). Not sure what they mean by 'that'? call look YOURSELF (never tell "
+    "the user to), then click it, or if several things fit, ask which one and "
+    "name what you see. Typing into "
     "a field -> type_into. Scrolling -> scroll with what=<window>. Never fake "
     "a click with key presses. 'ask claude ...' -> ask_claude.\n"
     "HONESTY: never invent personal info (emails, passwords, names, "
@@ -425,9 +427,30 @@ def gemini_call(key, model, body):
     raise RuntimeError("rate limited")
 
 
+# A reply that says it DID something while no action ran is a bluff.
+_CLAIM_RE = None
+
+
+def _claims_action(text):
+    global _CLAIM_RE
+    import re
+    if _CLAIM_RE is None:
+        _CLAIM_RE = re.compile(
+            r"\b(typed|typing|clicked|clicking|pressed|opened|opening|closed|"
+            r"closing|scrolled|scrolling|sent|moved|launched|deleted|turned (?:it )?"
+            r"(?:on|off|up|down)|switched|muted|played|playing|copied|saved|set (?:it|the|a|your)|"
+            r"done|on it)\b", re.I)
+    return bool(_CLAIM_RE.search(text or ""))
+
+
 def chat_gemini(message, model, max_turns=6):
     import time
     import tar_brain as B
+    import tar_tools as T
+    # what the USER wrote (this turn + recent turns) -- the type guards check
+    # personal info against this, so the model can't invent an email
+    T.USER_SAID = " \n ".join([h["content"] for h in B.history_tail(6)
+                               if h.get("role") == "user"] + [message])
 
     key = api_key("google")
     if not key:
@@ -452,6 +475,7 @@ def chat_gemini(message, model, max_turns=6):
     started = time.time()
     first = None
     tools = gemini_tools()
+    nudged = False
 
     for _turn in range(max_turns):
         try:
@@ -470,6 +494,24 @@ def chat_gemini(message, model, max_turns=6):
         parts = content.get("parts") or []
         calls = [p["functionCall"] for p in parts if "functionCall" in p]
 
+        # Honesty check: claims to have acted, but nothing ran this turn?
+        said = "".join(p.get("text", "") for p in parts if not p.get("thought"))
+        if not calls and not acted and not nudged and _claims_action(said):
+            nudged = True
+            contents.append(content)
+            contents.append({"role": "user", "parts": [{"text": (
+                "[system check] You said you did something, but you called NO "
+                "action, so nothing happened. Either call the right action now, "
+                "or tell the user plainly that you didn't do it and why (e.g. "
+                "you need their email). Never invent personal info.")}]})
+            continue
+
+        if not calls and not acted and nudged and _claims_action(said):
+            # bluffed again after being told nothing ran: don't show it
+            said = ("I didn't actually do that -- no action ran. "
+                    "Tell me exactly what you want (and anything I'd need, "
+                    "like the text to type) and I'll do it for real.")
+            parts = [{"text": said}]
         for p in parts:
             if p.get("text") and not p.get("thought"):
                 if first is None:
@@ -489,7 +531,8 @@ def chat_gemini(message, model, max_turns=6):
             payload = c.get("args") or {}
             out = run_tool(c.get("name"), payload)
             act = payload.get("action", "?")
-            acted.append(act)
+            if act in T.ACTIONS or act in T.UI_ACTIONS:
+                acted.append(act)       # malformed calls don't count as "did something"
             B.act_log(act, payload.get("args") or {}, out)
             emit("acted", action=act, args=payload.get("args") or {},
                  v=out, direct=False)
@@ -498,6 +541,10 @@ def chat_gemini(message, model, max_turns=6):
         contents.append({"role": "user", "parts": results})
 
     reply = "".join(reply_parts).strip()
+    if not reply and acted:
+        # model went quiet after acting: say *something* so it isn't a void
+        reply = "Done: " + ", ".join(a for a in dict.fromkeys(acted) if a != "?") + "."
+        emit("token", v=reply)
     B.history_append("user", message)
     if reply:
         B.history_append("assistant", reply)
