@@ -566,6 +566,10 @@ def a_open(args):
 
     # "open youtube" is a website, not a binary
     site = SITES.get(low) or SITES.get(re.sub(r"\.com$", "", low))
+    if site and _already_open(low):
+        w = _already_open(low)
+        sh(["hyprctl", "dispatch", "focuswindow", "address:" + w["address"]])
+        return "already open (%r) -- switched to it -- VERIFIED" % (w.get("title") or "")[:50]
     if site:
         b = (want_browser if want_browser and shutil.which(want_browser)
              else preferred_browser())
@@ -969,11 +973,30 @@ def a_dns(args):
     return "%s -> %s" % (host, ", ".join(ips[:4]) if ips else "no records")
 
 
+def _already_open(q):
+    """A browser window whose title already shows this site/game -> it, else None."""
+    words = re.sub(r"https?://|www\.|\.com|\.org|\.net|/.*$|\b(game|site|website|online|play)\b",
+                   " ", q.lower().lstrip("\\"))
+    key = " ".join(w for w in words.split() if len(w) > 2)
+    if not key:
+        return None
+    for w in _clients():
+        if _is_browser(w) and key in (w.get("title") or "").lower():
+            return w
+    return None
+
+
 def a_web(args):
     """Open a URL, or search the web, in the user's browser."""
     q = (args.get("q") or args.get("what") or "").strip()
     if not q:
         return "open what?"
+    if not str(args.get("new", "")).lower() in ("1", "true", "yes"):
+        w = _already_open(q)
+        if w:
+            sh(["hyprctl", "dispatch", "focuswindow", "address:" + w["address"]])
+            return ("already open in %s (%r) -- switched to it instead of opening another tab "
+                    "-- VERIFIED" % (_label(w), (w.get("title") or "")[:50]))
     if re.match(r"^(https?://|www\.)", q, re.I):
         url = q if q.lower().startswith("http") else "https://" + q
     elif re.match(r"^[\w.-]+\.[a-z]{2,}(/|$)", q, re.I):
@@ -1408,6 +1431,66 @@ def a_cliphist(_):
     rows = [_SECRET_RE.sub("[hidden secret]", l.split("\t", 1)[-1][:80])
             for l in out.splitlines()[:10]]
     return "\n".join(rows) or "empty"
+
+
+# ---- background tasks: "keep doing X until I say stop" ----------------------
+LOOP = os.path.join(DATA, "loop.json")
+
+
+def loop_running():
+    try:
+        with open(LOOP, encoding="utf-8") as f:
+            d = json.load(f)
+        os.kill(int(d["pid"]), 0)           # still alive?
+        return d
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def a_keep_doing(args):
+    task = (args.get("task") or args.get("what") or "").strip()
+    if not task:
+        return "keep doing what?"
+    old = loop_running()
+    if old:
+        a_stop_task({})
+    every = max(15, min(300, _int(args.get("every"), 25)))
+    minutes = max(1, min(120, _int(args.get("minutes"), 20)))
+    here = os.path.dirname(os.path.abspath(__file__))
+    log = open(os.path.join(DATA, "loop.log"), "a")
+    p = subprocess.Popen([sys.executable, os.path.join(here, "tar_cloud.py"), "loop",
+                          "--task", task, "--every", str(every), "--minutes", str(minutes)],
+                         stdout=log, stderr=log, start_new_session=True,
+                         env=dict(os.environ, TAR_DATA=DATA))
+    with open(LOOP, "w", encoding="utf-8") as f:
+        json.dump({"pid": p.pid, "task": task, "started": time.time(),
+                   "until": time.time() + minutes * 60}, f)
+    sh(["notify-send", "-a", "T.A.R.", "T.A.R. is working", task[:120] + "  (say stop to end)"])
+    return ("started in the background: %r -- a round every %ds for up to %d min. "
+            "Say 'stop' to end it. -- VERIFIED" % (task[:80], every, minutes))
+
+
+def a_stop_task(_):
+    d = loop_running()
+    if not d:
+        try:
+            os.remove(LOOP)
+        except OSError:
+            pass
+        return "nothing is running in the background"
+    try:
+        os.killpg(int(d["pid"]), 15)
+    except OSError:
+        try:
+            os.kill(int(d["pid"]), 15)
+        except OSError:
+            pass
+    try:
+        os.remove(LOOP)
+    except OSError:
+        pass
+    mins = int((time.time() - d.get("started", time.time())) / 60)
+    return "stopped %r after %d min -- VERIFIED" % (d.get("task", "")[:60], mins)
 
 
 def a_coin(_):
@@ -2550,6 +2633,13 @@ ACTIONS = {
     "record":     (a_record, "screen recording: state=start|stop",
                    [r"^(?P<state>start|stop) recording(?: the screen)?$", r"^record (?:my |the )?screen$"]),
     "cliphist":   (a_cliphist, "recent clipboard history", [r"^clipboard history$"]),
+    "keep_doing": (a_keep_doing, "run a task in the BACKGROUND, round after round, until the "
+                                 "user says stop: task='play cookie clicker: click the big "
+                                 "cookie ~20 times fast, then buy the best upgrade you can "
+                                 "afford in the store' (every=seconds between rounds, "
+                                 "minutes=time limit, default 20). Use for 'keep doing', "
+                                 "'until I stop you', 'play this for me'.", []),
+    "stop_task":  (a_stop_task, "stop the background task", []),
     "coin":       (a_coin, "flip a coin", [r"^(?:flip a coin|coin ?flip|heads or tails)$"]),
     "dice":       (a_dice, "roll a die: sides= (default 6)",
                    [r"^roll (?:a )?(?:die|dice)$", r"^roll (?:a )?d(?P<sides>\d{1,4})$"]),
@@ -2815,7 +2905,13 @@ _NOT_TARGETS = re.compile(r"^(?:me|myself|yourself|you|your \w+|my (?:eyes|mind|
                           r"source|up|now|the door|eyes|mind|heart)(?:\b|$)")
 
 
+_STOP_RE = re.compile(r"^(?:stop|stop it|stop now|stop playing|stop that|ok stop|enough|"
+                      r"that'?s enough|you can stop|quit it|cancel (?:it|that|the task))$")
+
+
 def _match_one(low):
+    if _STOP_RE.match(low) and loop_running():
+        return "stop_task", {}
     if pending_action():
         if _YES_RE.match(low):
             return "confirm", {}

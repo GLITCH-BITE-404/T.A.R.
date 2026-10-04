@@ -266,6 +266,9 @@ SYSTEM = (
     "If NOT VERIFIED, don't claim success: look, then retry a different way "
     "(different target wording, wait, close a popup) -- at most 2 retries -- "
     "and if it still fails, tell the user plainly what didn't work.\n"
+    "LONG TASKS: 'until I stop you' / 'keep doing it' / 'play this for me' -> "
+    "keep_doing with a clear task that includes the strategy. If the site/app "
+    "is already open, DON'T open it again -- just keep going in it.\n"
     "MULTI-STEP: do every step the user asked, in order, in this same turn "
     "(e.g. open the site, then click_on the thing times=5). Don't stop after "
     "step one.\n"
@@ -667,6 +670,46 @@ def chat_gemini(message, model, max_turns=10):
 
 # ------------------------------------------------------------------ cli
 
+def background_loop(task, every, minutes):
+    """Run a task round after round until stopped (loop.json removed), the
+    time limit, or repeated failures. Each round is one normal cloud turn."""
+    import time
+    import tar_tools as T
+    import tar_brain as B
+    B._speak = lambda *a, **k: None          # rounds are silent
+    B.history_append = lambda *a, **k: None  # and don't flood the chat history
+    end = time.time() + minutes * 60
+    fails, n = 0, 0
+    while time.time() < end and T.loop_running():
+        n += 1
+        before = len(open(B.ACTLOG_PATH).readlines()) if os.path.exists(B.ACTLOG_PATH) else 0
+        try:
+            rc = chat_gemini(
+                "[background task, round %d] Task: %s\nDo the next round NOW: FIRST "
+                "call look to read the current state (numbers, prices, what's "
+                "affordable/lit up, any popup), THEN act on what you actually see -- "
+                "click things by their real names (e.g. 'Cursor'), not guesses. "
+                "Then stop. Keep any reply to a few words." % (n, task),
+                (B.config().get("cloud_model") or default_model()), max_turns=8)
+        except Exception as e:
+            rc = 1
+            print("round %d failed: %s" % (n, e), flush=True)
+        after = len(open(B.ACTLOG_PATH).readlines()) if os.path.exists(B.ACTLOG_PATH) else 0
+        fails = fails + 1 if (rc or after == before) else 0
+        if fails >= 3:
+            os.system("notify-send -a T.A.R. 'T.A.R. stopped' 'the background task kept failing'")
+            break
+        for _ in range(every):
+            if not T.loop_running():
+                break
+            time.sleep(1)
+    try:
+        os.remove(T.LOOP)
+    except OSError:
+        pass
+    return 0
+
+
 def main():
     if len(sys.argv) < 2:
         emit("error", v="usage: tar_cloud.py chat -m '...' | models | "
@@ -705,6 +748,12 @@ def main():
         ready, why = status()
         emit("cloud_status", key=bool(api_key()), sdk=have_sdk(),
              ready=ready, model=active_model(), v=("ready" if ready else why))
+
+    elif cmd == "loop":
+        return background_loop(
+            sys.argv[sys.argv.index("--task") + 1],
+            int(sys.argv[sys.argv.index("--every") + 1]),
+            int(sys.argv[sys.argv.index("--minutes") + 1]))
 
     elif cmd == "chat":
         msg = None
