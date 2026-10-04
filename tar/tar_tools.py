@@ -1532,10 +1532,29 @@ def _tar_window():
 
 
 class _TarHidden:
-    """Park T.A.R. on a hidden special workspace while looking/clicking, so it
-    never covers the target and never clicks itself; put it back after."""
+    """Get T.A.R. out of the way while looking/clicking.
+
+    FLOATING T.A.R. sits on top of things: park it on a hidden special
+    workspace and put it back after. TILED T.A.R. covers nothing -- hiding it
+    would make Hyprland re-tile, every other window jumps mid-animation and
+    the click lands on the wrong spot. So a tiled T.A.R. stays put and its
+    rectangle (self.rect) is masked out / refused instead."""
     def __enter__(self):
         self.w = _tar_window()
+        self.rect = None
+        if self.w:
+            # only matters if T.A.R. is on the workspace that's actually showing
+            rc, out = sh(["hyprctl", "-j", "monitors"])
+            try:
+                shown = {m["activeWorkspace"]["id"] for m in json.loads(out)}
+            except (ValueError, KeyError, TypeError):
+                shown = None
+            if shown is not None and (self.w.get("workspace") or {}).get("id") not in shown:
+                self.w = None
+        if self.w and not self.w.get("floating"):
+            (x, y), (w, h) = self.w.get("at", [0, 0]), self.w.get("size", [0, 0])
+            self.rect = (x, y, x + w, y + h)
+            self.w = None                   # nothing to restore
         if self.w:
             self.ws = (self.w.get("workspace") or {}).get("name") or "1"
             sh(["hyprctl", "dispatch", "movetoworkspacesilent",
@@ -1665,18 +1684,47 @@ def _locate(target, tries=3):
     return loc, err
 
 
+def _mask(path, rect, mon):
+    """Black out T.A.R.'s own (tiled) window in a screenshot."""
+    if not rect:
+        return
+    x1, y1, x2, y2 = (rect[0] - mon.get("x", 0), rect[1] - mon.get("y", 0),
+                      rect[2] - mon.get("x", 0), rect[3] - mon.get("y", 0))
+    try:
+        from PIL import Image, ImageDraw
+        im = Image.open(path)
+        ImageDraw.Draw(im).rectangle([x1, y1, x2, y2], fill=(0, 0, 0))
+        im.save(path, quality=85)
+    except Exception:
+        if shutil.which("magick"):
+            sh(["magick", path, "-fill", "black", "-draw",
+                "rectangle %d,%d %d,%d" % (x1, y1, x2, y2), path])
+
+
+def _inside(rect, x, y, mon=None):
+    if not rect:
+        return False
+    mon = mon or {}
+    ax, ay = x + mon.get("x", 0), y + mon.get("y", 0)
+    return rect[0] <= ax <= rect[2] and rect[1] <= ay <= rect[3]
+
+
 def _locate_once(target):
     """Find something on screen -> ((x, y, label, how), None) or (None, why).
     OCR first (exact for text buttons), vision second (icons, images)."""
     path = os.path.join(DATA, "screen-look.jpg")
     mon = _monitor()
-    with _TarHidden():
+    with _TarHidden() as hid:
         if not _shot(path):
             return None, "couldn't take a screenshot"
+        rect = hid.rect
+    _mask(path, rect, mon)                  # tiled T.A.R. can't see/click itself
     hit = _find_text(_ocr_boxes(path), target)
-    if hit:
+    if hit and not _inside(rect, hit[1], hit[2], mon):
         return (hit[1], hit[2], hit[0], "text"), None
     p, err = _gemini_point(path, target, mon)
+    if p and _inside(rect, p[0], p[1], mon):
+        return None, "that spot is inside T.A.R.'s own window -- not clicking myself"
     if p:
         return (p[0], p[1], p[2], "vision"), None
     return None, (err or "not found") + (" -- call look to see what's on screen; a popup "
@@ -1717,9 +1765,10 @@ def a_look(args):
     """Answer a question about what's on screen (T.A.R. hides itself first)."""
     q = args.get("q") or args.get("question") or "Describe what is on the screen."
     path = os.path.join(DATA, "screen-look.jpg")
-    with _TarHidden():
+    with _TarHidden() as hid:
         if not _shot(path):
             return "couldn't take a screenshot"
+        _mask(path, hid.rect, _monitor())
     txt, err = _gemini_image(path, "Screenshot of the user's desktop. " + q +
                              " Be specific and brief; mention exact button/label text.")
     if err:
