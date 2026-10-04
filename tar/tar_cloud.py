@@ -267,8 +267,9 @@ SYSTEM = (
     "(different target wording, wait, close a popup) -- at most 2 retries -- "
     "and if it still fails, tell the user plainly what didn't work.\n"
     "LONG TASKS: 'until I stop you' / 'keep doing it' / 'play this for me' -> "
-    "keep_doing with a clear task that includes the strategy. If the site/app "
-    "is already open, DON'T open it again -- just keep going in it.\n"
+    "keep_doing. For clicker/idle games set autoclick=<the thing to click "
+    "non-stop> and task=<the decisions, e.g. buy the best affordable upgrade>. "
+    "If the site/app is already open, DON'T open it again.\n"
     "MULTI-STEP: do every step the user asked, in order, in this same turn "
     "(e.g. open the site, then click_on the thing times=5). Don't stop after "
     "step one.\n"
@@ -680,7 +681,37 @@ def chat_gemini(message, model, max_turns=10):
 
 # ------------------------------------------------------------------ cli
 
-def background_loop(task, every, minutes):
+def _autoclick_burst(target, rate, until_ts, push):
+    """Click `target` non-stop until until_ts (or pause/stop) -- no AI, just a
+    fast local clicker at the remembered spot. Returns clicks done."""
+    import time
+    import tar_tools as T
+    loc = T._loc_get(target)
+    if not loc:
+        found, err = T._locate(target, tries=1)
+        if not found:
+            push("warn", "autoclick: can't find %r (%s)" % (target, (err or "")[:60]))
+            return 0
+        loc = {"x": found[0], "y": found[1], "label": found[2]}
+        T._loc_set(target, found[0], found[1], found[2])
+    x, y = loc["x"], loc["y"]
+    n = 0
+    gap = 1.0 / max(1, rate)
+    with T._TarHidden():
+        T._move(x, y)
+        while time.time() < until_ts:
+            d = T.loop_running()
+            if not d or d.get("paused"):
+                break
+            T._click("left", False)
+            n += 1
+            if n % 20 == 0:
+                T.loop_update(clicks=int(d.get("clicks") or 0) + 20, beat=time.time())
+            time.sleep(gap)
+    return n
+
+
+def background_loop(task, every, minutes, autoclick="", rate=8):
     """Run a task round after round until stopped (loop.json removed), the
     time limit, or repeated failures. Each round is one normal cloud turn.
     Progress goes into loop.json so T.A.R.'s tasks panel can show it."""
@@ -730,21 +761,37 @@ def background_loop(task, every, minutes):
                 push(kind, "%s: %s%s" % (kw.get("action"), short, tail))
             _emit(t, **kw)
         globals()["emit"] = tee
+        _run_tool = globals()["run_tool"]
+
+        def run_tool_live(name, payload):      # show each step as it STARTS
+            act, a = normalize_call(name, payload)
+            what = a.get("target") or a.get("q") or a.get("what") or ""
+            label = {"look": "looking at the screen", "click_on": "clicking",
+                     "click": "clicking", "type_into": "typing into", "scroll": "scrolling"
+                     }.get(act, act)
+            push("doing", "\u2192 %s%s\u2026" % (label, (" " + str(what)[:50]) if what and act != "look" else ""))
+            return _run_tool(name, payload)
+        globals()["run_tool"] = run_tool_live
         try:
             rc = chat_gemini(
-                "[background task, round %d] Task: %s\nDo the next round NOW: FIRST "
-                "call look to read the current state (numbers, prices, what's "
-                "affordable/lit up, any popup). Then write ONE short line of "
-                "reasoning -- what you see and what you'll do (e.g. '202 cookies, "
-                "Grandma 100 is affordable -> buy it, then click'). THEN act on what "
-                "you actually see -- click things by their real names (e.g. 'Cursor'), "
-                "not guesses. Then stop." % (n, task),
+                "[background task, round %d] Task: %s\n%s"
+                "Do the next round NOW: FIRST call look to read the current state "
+                "(numbers, prices, what's affordable/lit up, any popup). Then write ONE "
+                "short line of reasoning (what you see, what you'll do). THEN do it: "
+                "call click_on for EACH thing you decided -- e.g. one click_on "
+                "target='Grandma' per Grandma you buy. Writing 'buying X' without "
+                "calling click_on does NOTHING. Then stop." % (
+                    n, task,
+                    ("(%r is being clicked automatically between rounds -- don't click it "
+                     "yourself; your job is only the decisions.)\n" % autoclick)
+                    if autoclick else ""),
                 (B.config().get("cloud_model") or default_model()), max_turns=8)
         except Exception as e:
             rc = 1
             captured.append("error: %s" % e)
         finally:
             globals()["emit"] = _emit
+            globals()["run_tool"] = _run_tool
         after = len(open(B.ACTLOG_PATH).readlines()) if os.path.exists(B.ACTLOG_PATH) else 0
         fails = fails + 1 if (rc or after == before) else 0
         if thought and "".join(thought).strip():
@@ -757,6 +804,11 @@ def background_loop(task, every, minutes):
             os.system("notify-send -a T.A.R. 'T.A.R. stopped' 'the background task kept failing'")
             break
         next_at = time.time() + every
+        if autoclick:
+            T.loop_update(status="autoclicking", next_at=next_at)
+            done = _autoclick_burst(autoclick, rate, next_at, push)
+            if done:
+                push("act", "autoclicked %s x%d \u2713" % (autoclick, done))
         T.loop_update(status="waiting", next_at=next_at)
         while time.time() < next_at and T.loop_running():
             if (T.loop_running() or {}).get("paused"):
@@ -810,10 +862,11 @@ def main():
              ready=ready, model=active_model(), v=("ready" if ready else why))
 
     elif cmd == "loop":
-        return background_loop(
-            sys.argv[sys.argv.index("--task") + 1],
-            int(sys.argv[sys.argv.index("--every") + 1]),
-            int(sys.argv[sys.argv.index("--minutes") + 1]))
+        def opt(name, default=""):
+            return sys.argv[sys.argv.index(name) + 1] if name in sys.argv else default
+        return background_loop(opt("--task"), int(opt("--every", "15")),
+                               int(opt("--minutes", "20")), opt("--autoclick"),
+                               int(opt("--rate", "8")))
 
     elif cmd == "chat":
         msg = None

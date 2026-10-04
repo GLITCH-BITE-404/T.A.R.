@@ -1018,11 +1018,14 @@ def chrome_profiles():
 
 def resolve_profile(want):
     """'student' / 'school' -> the managed profile, 'main' -> Default, or a name."""
-    want = (want or "").strip().lower()
-    want = re.sub(r"\b(my|the|chrome|google|account|profile|user)\b", " ", want).strip()
+    raw = re.sub(r"[\u200e\u200f\u202a-\u202e]", "", (want or "")).strip().lower()
+    profs = chrome_profiles()
+    for p in profs:                         # the display name exactly as given
+        if raw and raw in (p["name"].lower(), p["given"].lower(), p["dir"].lower()):
+            return p
+    want = re.sub(r"\b(my|the|chrome|google|account|profile|user)\b", " ", raw).strip()
     if not want:
         return None
-    profs = chrome_profiles()
     for p in profs:                         # an exact name wins
         if want in (p["name"].lower(), p["given"].lower(), p["dir"].lower()):
             return p
@@ -1569,22 +1572,30 @@ def a_keep_doing(args):
     old = loop_running()
     if old:
         a_stop_task({})
-    every = max(3, min(300, _int(args.get("every"), 3)))
+    autoclick = (args.get("autoclick") or "").strip()
+    rate = max(1, min(15, _int(args.get("rate"), 8)))
+    # with an autoclicker doing the repetitive part, the AI only needs to
+    # check in now and then to make decisions
+    every = max(3, min(300, _int(args.get("every"), 15 if autoclick else 3)))
     minutes = max(1, min(120, _int(args.get("minutes"), 20)))
     here = os.path.dirname(os.path.abspath(__file__))
     log = open(os.path.join(DATA, "loop.log"), "a")
     p = subprocess.Popen([sys.executable, os.path.join(here, "tar_cloud.py"), "loop",
-                          "--task", task, "--every", str(every), "--minutes", str(minutes)],
+                          "--task", task, "--every", str(every), "--minutes", str(minutes),
+                          "--autoclick", autoclick, "--rate", str(rate)],
                          stdout=log, stderr=log, start_new_session=True,
                          env=dict(os.environ, TAR_DATA=DATA))
     with open(LOOP, "w", encoding="utf-8") as f:
         json.dump({"pid": p.pid, "task": task, "started": time.time(),
                    "until": time.time() + minutes * 60, "every": every,
                    "round": 0, "status": "starting", "last": "", "paused": False, "feed": [],
+                   "autoclick": autoclick, "rate": rate, "clicks": 0,
                    "beat": time.time()}, f)
     sh(["notify-send", "-a", "T.A.R.", "T.A.R. is working", task[:120] + "  (say stop to end)"])
-    return ("started in the background: %r -- a round every %ds for up to %d min. "
-            "Say 'stop' to end it. -- VERIFIED" % (task[:80], every, minutes))
+    return ("started in the background: %r%s -- an AI round every %ds for up to %d min. "
+            "Say 'stop' to end it. -- VERIFIED" % (
+                task[:80], (" + autoclicking %r %d/s between rounds" % (autoclick, rate))
+                if autoclick else "", every, minutes))
 
 
 def a_stop_task(_):
@@ -1919,10 +1930,17 @@ def _locate_once(target):
             return None, "couldn't take a screenshot"
         rect = hid.rect
     _mask(path, rect, mon)                  # tiled T.A.R. can't see/click itself
+    # OCR (text buttons) and vision (icons, pictures) run AT THE SAME TIME:
+    # a lookup costs the slower of the two instead of both added up
+    import threading
+    res = {}
+    vt = threading.Thread(target=lambda: res.__setitem__("v", _gemini_point(path, target, mon)))
+    vt.start()
     hit = _find_text(_ocr_boxes(path), target)
     if hit and not _inside(rect, hit[1], hit[2], mon):
-        return (hit[1], hit[2], hit[0], "text"), None
-    p, err = _gemini_point(path, target, mon)
+        return (hit[1], hit[2], hit[0], "text"), None   # vision thread just finishes on its own
+    vt.join(timeout=30)
+    p, err = res.get("v") or (None, "vision timed out")
     if p and _inside(rect, p[0], p[1], mon):
         return None, "that spot is inside T.A.R.'s own window -- not clicking myself"
     if p:
@@ -2816,10 +2834,13 @@ ACTIONS = {
                    [r"^(?P<state>start|stop) recording(?: the screen)?$", r"^record (?:my |the )?screen$"]),
     "cliphist":   (a_cliphist, "recent clipboard history", [r"^clipboard history$"]),
     "keep_doing": (a_keep_doing, "run a task in the BACKGROUND, round after round, until the "
-                                 "user says stop: task='play cookie clicker: click the big "
-                                 "cookie ~20 times fast, then buy the best upgrade you can "
-                                 "afford in the store' (every=seconds between rounds, "
-                                 "minutes=time limit, default 20). Use for 'keep doing', "
+                                 "user says stop. task=the DECISIONS to make each round (e.g. "
+                                 "'buy the best upgrade/building you can afford in the store'). "
+                                 "autoclick=<thing to click NON-STOP between rounds, e.g. 'the big "
+                                 "cookie'> -- for clicker/idle games ALWAYS set it: a fast local "
+                                 "clicker (rate= clicks/sec, default 8) does the repetitive "
+                                 "clicking, the AI round only decides. every=seconds between AI "
+                                 "rounds, minutes=time limit (default 20). Use for 'keep doing', "
                                  "'until I stop you', 'play this for me'.", []),
     "stop_task":  (a_stop_task, "stop the background task", []),
     "pause_task": (a_pause_task, "pause the background task (resume_task continues it)", []),

@@ -3,15 +3,14 @@ import Quickshell
 import Quickshell.Io
 import "."
 
-// T.A.R. background-tasks tab -- the mirror image of the CONSOLE tab.
-// While a task runs, a TASKS button sits on the right edge (pulsing dot +
-// round badge). Clicking it slides a drawer in from the right: the task,
-// running time, time left (with a bar), the round, a live REASONING feed of
-// what it sees / decides / does each round, and PAUSE/RESUME + KILL.
-// Reads loop.json (written by the task itself) once a second.
+// T.A.R. background-tasks drawer -- works like the CONSOLE: the host docks it
+// to the outside edge of the panel and widens the window, so it never covers
+// the chat. Task, running time, time left (bar), round, live REASONING feed,
+// PAUSE/RESUME + KILL. Reads loop.json once a second, even while folded, so
+// the host knows when a task exists.
 Item {
     id: tasks
-    anchors.fill: parent
+    signal closed()
 
     property var theme
     property color accent: "#cba6f7"
@@ -19,11 +18,10 @@ Item {
     function s(v) { return scaleFn ? scaleFn(v) : v }
 
     property var task: null             // parsed loop.json, or null
-    property bool open: false
+    property bool open: false           // set by the host
     property real now: Date.now() / 1000
 
     readonly property bool active: task !== null
-    onActiveChanged: if (active) open = true     // a new task: show it once
     readonly property string dataDir: Quickshell.env("TAR_DATA")
         || (Quickshell.env("HOME") + "/.local/share/bite-os/tar")
     readonly property string tools: Quickshell.env("HOME")
@@ -70,61 +68,13 @@ Item {
     readonly property color dotColor: paused ? theme.yellow
         : (taskStatus === "not responding" || taskStatus === "failed") ? theme.red : theme.green
 
-    // ---------------------------------------------------------------- the tab
-    Item {
-        id: tab
-        anchors.right: parent.right
-        anchors.verticalCenter: parent.verticalCenter
-        anchors.rightMargin: tasks.s(12)
-        width: btn.width
-        height: btn.height
-        visible: tasks.active
-        opacity: tasks.open ? 0 : 1
-        Behavior on opacity { NumberAnimation { duration: 180 } }
-
-        TarHudButton {
-            id: btn
-            theme: tasks.theme; accent: tasks.accent; scaleFn: tasks.scaleFn
-            glyph: "\u{f0954}"
-            label: "TASKS"
-            active: tasks.active
-            onClicked: tasks.open = true
-        }
-        Rectangle {                     // live dot
-            width: tasks.s(7); height: width; radius: width / 2
-            anchors.right: parent.right; anchors.top: parent.top
-            anchors.margins: -tasks.s(2)
-            color: tasks.dotColor
-            SequentialAnimation on opacity {
-                loops: Animation.Infinite
-                running: tab.visible && !tasks.paused
-                NumberAnimation { to: 0.25; duration: 650 }
-                NumberAnimation { to: 1.0; duration: 650 }
-            }
-        }
-        Text {                          // round badge
-            anchors.top: parent.bottom
-            anchors.topMargin: tasks.s(3)
-            anchors.horizontalCenter: parent.horizontalCenter
-            text: tasks.active ? "R" + (tasks.task.round || 0) : ""
-            color: tasks.theme.overlay1
-            font.family: "JetBrains Mono"
-            font.pixelSize: tasks.s(8)
-        }
-    }
-
     // ---------------------------------------------------------------- drawer
     Item {
         id: drawer
-        width: tasks.s(330)
-        anchors.top: parent.top
-        anchors.bottom: parent.bottom
-        anchors.right: parent.right
-        anchors.topMargin: tasks.s(6)
-        anchors.bottomMargin: tasks.s(6)
-        visible: tasks.active && opacity > 0.01
+        anchors.fill: parent
+        visible: opacity > 0.01
         opacity: tasks.open ? 1 : 0
-        transform: Translate {
+        transform: Translate {          // tucks in behind the panel, like the console
             x: tasks.open ? 0 : drawer.width + tasks.s(14)
             Behavior on x { NumberAnimation { duration: 340; easing.type: Easing.OutExpo } }
         }
@@ -168,7 +118,7 @@ Item {
                     color: closeHov.hovered ? tasks.theme.text : tasks.theme.overlay1
                     font.pixelSize: tasks.s(12)
                     HoverHandler { id: closeHov }
-                    TapHandler { onTapped: tasks.open = false }
+                    TapHandler { onTapped: tasks.closed() }
                 }
             }
 
@@ -289,6 +239,7 @@ Item {
                     color: modelData.k === "think" ? tasks.accent
                          : modelData.k === "warn" ? tasks.theme.red
                          : modelData.k === "round" ? tasks.theme.surface2
+                         : modelData.k === "doing" ? tasks.theme.overlay0
                          : tasks.theme.green
                 }
                 Text {
@@ -296,7 +247,7 @@ Item {
                     width: feed.width - tasks.s(9)
                     text: (modelData.k === "think" ? "“" + modelData.t + "”" : modelData.t)
                     color: modelData.k === "think" ? tasks.theme.text
-                         : modelData.k === "round" ? tasks.theme.overlay0
+                         : modelData.k === "round" || modelData.k === "doing" ? tasks.theme.overlay0
                          : tasks.theme.subtext0
                     font.family: "JetBrains Mono"
                     font.pixelSize: tasks.s(modelData.k === "round" ? 8 : 9)

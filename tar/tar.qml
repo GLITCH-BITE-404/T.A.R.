@@ -102,9 +102,15 @@ Item {
     // of letting the console hang off the edge.
     readonly property real consoleW: s(330)
     readonly property real consoleGap: s(12)
-    readonly property real panelW: consoleOpen
-        ? Math.max(s(360), Math.min(targetW,
-                   window.width - consoleW - consoleGap - s(56)))
+    // background-tasks drawer docks on the OTHER (left) side, same rules
+    readonly property real tasksW: s(330)
+    property bool tasksOpen: false
+    readonly property bool tasksActive: tasksTab.active
+    onTasksActiveChanged: window.tasksOpen = tasksActive   // new task: show it; done: fold
+    readonly property real sideW: (consoleOpen ? consoleW + consoleGap : 0)
+                                + (tasksOpen && tasksActive ? tasksW + consoleGap : 0)
+    readonly property real panelW: sideW > 0
+        ? Math.max(s(360), Math.min(targetW, window.width - sideW - s(56)))
         : targetW
     property real introBurst: 0.0        // 0..1 expanding shockwave
     property bool introDone: false
@@ -129,13 +135,15 @@ Item {
     property bool consoleOpen: false
     // Opening a side panel should make the window BIGGER, not squash the chat.
     onConsoleOpenChanged: window.autoSize()
+    onTasksOpenChanged: window.autoSize()
     onSettingsOpenChanged: window.autoSize()
     onHistoryOpenChanged: window.autoSize()
     onTestModeChanged: window.autoSize()
     function autoSize() {
         if (!window.windowed) return;
         var wide = window.consoleOpen || window.settingsOpen
-                   || window.historyOpen || window.testMode !== "";
+                   || window.historyOpen || window.testMode !== ""
+                   || (window.tasksOpen && window.tasksActive);
         window.requestSize(wide ? 1420 : 1040, wide ? 860 : 760);
     }
     property bool autotier: true
@@ -1421,9 +1429,10 @@ Item {
         id: frame
         anchors.centerIn: parent
         // slide left by half the group's extra width so the pair stays centred
-        anchors.horizontalCenterOffset:
-            (window.introDone && window.consoleOpen)
-                ? -(window.consoleW + window.consoleGap) / 2 : 0
+        anchors.horizontalCenterOffset: !window.introDone ? 0
+            : ((window.consoleOpen ? -(window.consoleW + window.consoleGap) / 2 : 0)
+               + (window.tasksOpen && window.tasksActive
+                  ? (window.tasksW + window.consoleGap) / 2 : 0))
         Behavior on anchors.horizontalCenterOffset {
             NumberAnimation { duration: 360; easing.type: Easing.OutExpo }
         }
@@ -1825,6 +1834,13 @@ Item {
                     glyph: "\u{f0a9e}"; label: "CONSOLE"
                     active: window.consoleOpen
                     onClicked: window.consoleOpen = !window.consoleOpen
+                }
+                TarHudButton {
+                    visible: window.tasksActive
+                    theme: theme; accent: window.accent; scaleFn: window.s
+                    glyph: "\u{f0954}"; label: "TASKS"
+                    active: window.tasksOpen
+                    onClicked: window.tasksOpen = !window.tasksOpen
                 }
                 TarHudButton {
                     theme: theme; accent: window.accent; scaleFn: window.s
@@ -2501,6 +2517,9 @@ Item {
             bootAllowed: window.introDone
             consoleOpen: window.consoleOpen
             onConsoleRequested: window.consoleOpen = !window.consoleOpen
+            tasksOpen: window.tasksOpen
+            tasksActive: window.tasksActive
+            onTasksRequested: window.tasksOpen = !window.tasksOpen
             // Setup and past chats are now reachable without leaving orb mode.
             onSetupRequested: {
                 window.viewMode = "chat";
@@ -2613,10 +2632,19 @@ Item {
     // ---- background tasks tab: docks to the right edge while a task runs
     TarTasks {
         id: tasksTab
-        z: 900
+        open: window.tasksOpen && window.tasksActive && window.introDone
+        // docked to the outside LEFT edge of the panel (the console takes the right)
+        anchors.right: frame.left
+        anchors.rightMargin: window.s(10)
+        anchors.top: frame.top
+        anchors.topMargin: window.s(6)
+        width: window.tasksW
+        height: frame.height - window.s(12)
+        z: -1
         theme: theme
         accent: window.accent
         scaleFn: window.s
+        onClosed: window.tasksOpen = false
     }
 
     // ---- effects layer: on top of BOTH views, so effects are always visible

@@ -49,12 +49,15 @@ Item {
     signal readAloudRequested(string text)
     signal chatModeRequested()
     signal consoleRequested()
+    signal tasksRequested()
     signal setupRequested()      // a LOCKED feature was clicked
     signal settingsRequested()   // plain SETUP button
     signal historyRequested()
     signal closeRequested()
     signal stopRequested()
     property bool consoleOpen: false
+    property bool tasksOpen: false
+    property bool tasksActive: false
 
     readonly property color accent: mode === "error" ? theme.red
                                   : mode === "thinking" ? theme.blue
@@ -683,6 +686,14 @@ Item {
             label: "CONSOLE"
             active: view.consoleOpen
             onClicked: view.consoleRequested()
+        }
+        TarHudButton {
+            visible: view.tasksActive
+            theme: view.theme; accent: view.accent; scaleFn: view.hostScale
+            glyph: "\u{f0954}"
+            label: "TASKS"
+            active: view.tasksOpen
+            onClicked: view.tasksRequested()
         }
     }
 
