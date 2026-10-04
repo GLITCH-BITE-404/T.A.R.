@@ -1638,8 +1638,16 @@ def _locate(target):
     return None, err
 
 
+def _wlrctl():
+    """wlrctl from PATH, or ~/.local/bin (a user-built copy works without
+    sudo, and T.A.R. may be launched with a PATH that lacks ~/.local/bin)."""
+    return shutil.which("wlrctl") or next(
+        (p for p in (os.path.expanduser("~/.local/bin/wlrctl"), "/usr/bin/wlrctl")
+         if os.access(p, os.X_OK)), None)
+
+
 def _pointer_ok():
-    return bool(shutil.which("wlrctl"))
+    return bool(_wlrctl())
 
 
 _NO_POINTER = ("can't click yet: the mouse tool isn't installed. Tell the user to "
@@ -1654,7 +1662,7 @@ def _move(x, y, mon=None):
 
 def _click(button="left", double=False):
     for _ in range(2 if double else 1):
-        sh(["wlrctl", "pointer", "click", button])
+        sh([_wlrctl(), "pointer", "click", button])
         if double:
             time.sleep(0.08)
 
@@ -1743,7 +1751,7 @@ def a_scroll(args):
         sh(["hyprctl", "dispatch", "movecursor", str(x + ww // 2), str(y + hh // 2)])
         dy = {"down": 1, "up": -1}.get(d, 0) * 15 * n
         dx = {"right": 1, "left": -1}.get(d, 0) * 15 * n
-        sh(["wlrctl", "pointer", "scroll", str(dy), str(dx)])
+        sh([_wlrctl(), "pointer", "scroll", str(dy), str(dx)])
     return "scrolled %s %d in %s" % (d, n, _label(w))
 
 
