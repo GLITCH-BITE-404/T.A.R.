@@ -221,9 +221,7 @@ def run_tool(name, payload):
 
 SYSTEM = (
     "You are T.A.R., {user}'s assistant running inside BITE-OS, an Arch/CachyOS "
-    "Hyprland rice. Think JARVIS: dry, clipped, competent. No emoji, no filler, "
-    "never repeat the user's words back at them. Two or three sentences unless "
-    "asked for more or asked for code.\n\n"
+    "Hyprland rice.\n{voice}\n\n"
     "You have real control of this machine through the run_action tool. When "
     "they ask for something to happen, CALL THE TOOL — do not describe what "
     "you would do, do not ask for confirmation, and never say you are unable "
@@ -287,8 +285,9 @@ def chat(message, model=None, max_turns=6):
     client = anthropic.Anthropic(api_key=key)
     tools = build_tools()
 
-    system = SYSTEM.format(user=cfg.get("user", "the user")) + B.mem_block()
+    system = SYSTEM.format(user=cfg.get("user", "the user"), voice=B.voice_block(cfg)) + B.mem_block()
     system += B.act_block_context(n=40, within_s=None)
+    system += B.persona_tail(cfg)
 
     history = B.history_tail(int(cfg.get("cloud_history_turns", 40)))
     messages = [{"role": h["role"], "content": h["content"]} for h in history]
@@ -413,8 +412,9 @@ def chat_gemini(message, model, max_turns=6):
         return 1
 
     cfg = B.config()
-    system = SYSTEM.format(user=cfg.get("user", "the user")) + B.mem_block()
+    system = SYSTEM.format(user=cfg.get("user", "the user"), voice=B.voice_block(cfg)) + B.mem_block()
     system += B.act_block_context(n=40, within_s=None)
+    system += B.persona_tail(cfg)
 
     contents = []
     for h in B.history_tail(int(cfg.get("cloud_history_turns", 40))):

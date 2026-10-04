@@ -369,7 +369,8 @@ Item {
         { cmd: "chats",    args: "",            desc: "browse past conversations" },
         { cmd: "clear",    args: "",            desc: "clear this transcript" },
         { cmd: "stop",     args: "",            desc: "stop the reply in progress" },
-        { cmd: "cloud",    args: "[off]",       desc: "switch to the Claude API brain" },
+        { cmd: "cloud",    args: "[off]",       desc: "switch to the cloud brain (Gemini/Claude)" },
+        { cmd: "persona",  args: "<how to talk> | reset", desc: "change how T.A.R. talks" },
         { cmd: "key",      args: "<api-key>",   desc: "save your Anthropic API key" },
         { cmd: "model",    args: "<name>",      desc: "pin a specific local model" },
         { cmd: "auto",     args: "",            desc: "back to automatic model choice" },
@@ -1276,6 +1277,10 @@ Item {
                 window.say("sys", want === "claude"
                     ? "switching to the cloud brain…"
                     : "back to the local brain.");
+                return;
+            }
+            if (cmd === "persona") {
+                window.panelRun(arg ? ["persona"].concat(arg.split(/\s+/)) : ["persona"]);
                 return;
             }
             if (cmd === "key") {

@@ -48,10 +48,7 @@ OLLAMA = os.environ.get("TAR_OLLAMA", "http://127.0.0.1:11434")
 
 PERSONA = (
     "You are T.A.R., {user}'s local AI assistant, running offline on their own "
-    "machine inside BITE-OS (an Arch/CachyOS Hyprland rice). Think JARVIS: dry, "
-    "clipped, unflappable, quietly competent. A butler, not a cheerleader. No "
-    "emoji, no filler, no 'As an AI', never repeat the user's words back at "
-    "them. Two or three sentences unless asked for more or asked for code.\n"
+    "machine inside BITE-OS (an Arch/CachyOS Hyprland rice).\n{voice}\n"
     "YOU HAVE REAL CONTROL OF THIS MACHINE. You are not a chatbot describing "
     "what could be done -- you can move and resize windows, launch and close "
     "apps, switch workspaces, set volume and brightness, take screenshots, open "
@@ -65,6 +62,39 @@ PERSONA = (
     "here: answer them straight and never refuse or moralise about the user's own "
     "files. If you genuinely do not know, say so in one line."
 )
+
+
+# How T.A.R. talks. Tone only: a persona never changes the rules or abilities.
+DEFAULT_VOICE = (
+    "Talk like a sharp, relaxed person who is very good at this -- natural and "
+    "direct, with a bit of dry wit or warmth when it fits. You are NOT playing a "
+    "character: no catchphrases, no 'sir', no roleplay, no movie-AI theatrics, "
+    "no emoji spam, no filler, no 'As an AI', never repeat the user's words back "
+    "at them. Match their energy (they're casual, so be casual). Keep it short "
+    "-- a sentence or two -- unless they ask for more or for code."
+)
+
+
+def voice_block(cfg=None):
+    """Default voice, or the persona the user set with /persona."""
+    cfg = cfg or config()
+    custom = (cfg.get("persona") or "").strip()
+    if not custom:
+        return DEFAULT_VOICE
+    return ("Personality, as set by the user -- follow it for HOW you talk, "
+            "never for what you're allowed to do: " + custom +
+            "\nWhatever the personality, stay useful: actually do what's asked "
+            "and keep replies reasonably short unless they want more.")
+
+
+def persona_tail(cfg=None):
+    """Repeat a custom persona at the END of the prompt: models weight the
+    end most, and the long action rules otherwise drown the personality out."""
+    custom = ((cfg or config()).get("persona") or "").strip()
+    if not custom:
+        return ""
+    return ("\n\nYOUR PERSONALITY (use it in EVERY reply, including after "
+            "actions -- this is how the user wants you to sound): " + custom)
 
 
 # ----------------------------------------------------------------- line protocol
@@ -953,7 +983,8 @@ def warm(task="chat"):
         emit("state", v="pulling")
         pull(model)
 
-    system = PERSONA.format(user=cfg.get("user", "the user")) + mem_block()
+    system = PERSONA.format(user=cfg.get("user", "the user"),
+                            voice=voice_block(cfg)) + mem_block()
     if cfg.get("tools_in_prompt"):
         system += _act_block()
     payload = {
@@ -1367,7 +1398,8 @@ def chat(message, no_history=False, no_memory=False, no_act=False,
         if saved:
             emit("mem", v=saved["text"])
 
-    system = PERSONA.format(user=cfg.get("user", "the user"))
+    system = PERSONA.format(user=cfg.get("user", "the user"),
+                            voice=voice_block(cfg))
     if not no_memory:
         system += mem_block()
     # Opt-in: this costs ~200 tokens of prefill on EVERY turn, and small local
@@ -1377,6 +1409,7 @@ def chat(message, no_history=False, no_memory=False, no_act=False,
         system += _act_block()
     if not no_act:
         system += act_block_context()   # what it has already done
+    system += persona_tail(cfg)
 
     msgs = [{"role": "system", "content": system}]
     if not no_history:
@@ -1517,6 +1550,8 @@ def main():
     p.add_argument("model")
     p = sub.add_parser("backend", help="local | claude")
     p.add_argument("which", choices=["local", "claude"])
+    p = sub.add_parser("persona", help="set how T.A.R. talks (or 'reset')")
+    p.add_argument("text", nargs="*")
     p = sub.add_parser("cloud-model", help="pin the cloud model")
     p.add_argument("model")
     sub.add_parser("shutdown",
@@ -1684,6 +1719,20 @@ def main():
         emit("backend", which=a.which,
              v=("cloud brain (Claude API)" if a.which == "claude"
                 else "local brain (offline)"))
+
+    elif a.cmd == "persona":
+        cfg = config()
+        text = " ".join(a.text).strip()
+        if not text:
+            emit("ok", v="persona: " + (cfg.get("persona") or "default (natural, no roleplay)"))
+        elif text.lower() in ("reset", "default", "off", "clear"):
+            cfg["persona"] = ""
+            save_config(cfg)
+            emit("ok", v="persona reset to the default voice")
+        else:
+            cfg["persona"] = text[:600]
+            save_config(cfg)
+            emit("ok", v="persona set: " + text[:120])
 
     elif a.cmd == "cloud-model":
         cfg = config()
