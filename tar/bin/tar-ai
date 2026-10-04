@@ -1,0 +1,16 @@
+#!/bin/sh
+# Open T.A.R. -- or focus it if it's already running (never stacks a second one).
+#   tar-ai        open / focus
+#   tar-ai new    open / focus AND start a new chat
+HARNESS="$HOME/.config/hypr/scripts/quickshell/TarHarness.qml"
+BRAIN="$HOME/.config/hypr/scripts/quickshell/tar/tar_brain.py"
+running() { hyprctl clients -j | jq -e '.[] | select(.title == "T.A.R.")' >/dev/null 2>&1; }
+
+if running; then
+    hyprctl dispatch focuswindow 'title:^(T\.A\.R\.)$' >/dev/null
+    [ "$1" = "new" ] && qs ipc -p "$HARNESS" call tar newChat >/dev/null 2>&1
+    exit 0
+fi
+# not open yet: start the fresh session first so it opens empty
+[ "$1" = "new" ] && python3 "$BRAIN" session-new >/dev/null 2>&1
+setsid -f qs -p "$HARNESS" >/dev/null 2>&1

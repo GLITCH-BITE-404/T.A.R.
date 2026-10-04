@@ -22,6 +22,7 @@ Item {
 
     property string mode: "boot"
     property real level: 0.0
+    property real rainBoost: 1.0          // effects layer can flood the rain
     property bool busy: false
     property string lastUser: ""
     property string lastReply: ""
@@ -148,7 +149,7 @@ Item {
         headColor: view.theme.text
         columns: 20
         glyphSize: view.s(12)
-        strength: (view.mode === "thinking" ? 1.4 : 0.7)
+        strength: (view.mode === "thinking" ? 1.4 : 0.7) * view.rainBoost
                   * (0.35 + view.revealed * 0.65)
         Behavior on strength { NumberAnimation { duration: 400 } }
     }

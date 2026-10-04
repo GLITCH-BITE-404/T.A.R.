@@ -12,6 +12,12 @@ import "../"
 Item {
     id: window
     focus: true
+    // shake / barrel roll from the effects layer move the whole panel
+    transform: [
+        Translate { x: fx.shakeX; y: fx.shakeY },
+        Rotation { origin.x: window.width / 2; origin.y: window.height / 2
+                   angle: fx.spin }
+    ]
 
     MatugenColors { id: theme }
 
@@ -370,6 +376,7 @@ Item {
         { cmd: "clear",    args: "",            desc: "clear this transcript" },
         { cmd: "stop",     args: "",            desc: "stop the reply in progress" },
         { cmd: "cloud",    args: "[off]",       desc: "switch to the cloud brain (Gemini/Claude)" },
+        { cmd: "new",      args: "",            desc: "start a new chat" },
         { cmd: "persona",  args: "<how to talk> | reset", desc: "change how T.A.R. talks" },
         { cmd: "key",      args: "<api-key>",   desc: "save your Anthropic API key" },
         { cmd: "model",    args: "<name>",      desc: "pin a specific local model" },
@@ -426,6 +433,12 @@ Item {
         window.historyOpen = false;
     }
 
+    // `tar-ai new` from a terminal:  qs ipc -p <TarHarness.qml> call tar newChat
+    IpcHandler {
+        target: "tar"
+        function newChat(): void { window.newSession(); }
+    }
+
     // Orb/panel effects an action can trigger. These are UI-only: tar_tools
     // emits them instead of running anything, so the renderer stays the only
     // thing that knows how the orb actually moves.
@@ -438,6 +451,7 @@ Item {
     property bool alertFlash: false
     function playUiAction(name, d) {
         if (name === "close")           { window.close(); return; }
+        if (name === "newchat")         { window.newSession(); return; }
         if (name === "collapse" || name === "compact") {
             window.viewMode = "orb";
             window.settingsOpen = false; window.historyOpen = false;
@@ -455,20 +469,24 @@ Item {
         }
         if (name === "calm")            { window.mode = "idle"; orbView.settle();
                                           window.rainBoost = 1.0; return; }
-        if (name === "pulse" || name === "anim") { orb.pulse(); return; }
-        if (name === "glitch")          { orb.pulse(); glitchKick.restart(); return; }
         if (name === "rain")            { window.rainBoost =
                                               window.rainBoost > 1.5 ? 1.0 : 2.4;
                                           return; }
-        if (name === "scan")            { scanSweep.restart(); return; }
+        // Everything visual goes through the effects layer, which sits over
+        // both views -- these used to animate the chat-view orb only, so in
+        // orb view (the default) nothing visible happened.
+        if (name === "pulse")           { orb.pulse(); fx.play("shock"); return; }
+        if (name === "anim") {
+            var which = String(d.name || d.what || "shock");
+            fx.play(fx.effects.indexOf(which) >= 0 ? which : "shock", d.text);
+            return;
+        }
         if (name === "alert")           { window.mode = "error"; orb.pulse();
-                                          alertHold.restart(); return; }
+                                          fx.play("alert"); alertHold.restart(); return; }
+        if (fx.effects.indexOf(name) >= 0) { orb.pulse(); fx.play(name, d.text); return; }
     }
     Timer { id: alertHold; interval: 1600; onTriggered: {
         window.mode = "idle"; orbView.settle(); } }
-    Timer { id: glitchKick; interval: 900; property real k: 0
-        onTriggered: k = 0
-        onRunningChanged: if (running) k = 1.0 }
     SequentialAnimation {
         id: scanSweep
         NumberAnimation { target: window; property: "scanY"; from: 0.0; to: 1.0
@@ -647,9 +665,9 @@ Item {
             window.statusNote = d.reason || "ready";
             window.mode = "idle";
             orb.boot();
-            if (!d.ollama)
+            if (d.tier !== "cloud" && !d.ollama)
                 say("sys", "ollama offline — starting it on your first message.");
-            if (d.installed && d.installed.indexOf(d.model) === -1)
+            if (d.tier !== "cloud" && d.installed && d.installed.indexOf(d.model) === -1)
                 say("sys", d.model + " not on disk; first message will fetch it.");
         } else if (d.t === "models") {
             var out = "MODELS   · installed   > active\n\n";
@@ -1305,6 +1323,7 @@ Item {
                 window.capsRun(["speak", on ? "on" : "off"]);
                 return;
             }
+            if (cmd === "new" || cmd === "newchat") { window.newSession(); return; }
             if (cmd === "clear") { chatModel.clear(); window.lastUser = "";
                                    window.lastReply = ""; return; }
 
@@ -1395,7 +1414,7 @@ Item {
             columns: 18
             glyphSize: window.s(12)
             strength: (window.mode === "thinking" ? 1.9
-                    : window.mode === "speaking" ? 1.35 : 1.0) * window.rainBoost
+                    : window.mode === "speaking" ? 1.35 : 1.0) * window.rainBoost * fx.rainBoost
             Behavior on strength { NumberAnimation { duration: 400 } }
         }
 
@@ -2383,6 +2402,7 @@ Item {
         TarOrbView {
             id: orbView
             anchors.fill: parent
+            rainBoost: window.rainBoost * fx.rainBoost
             visible: window.viewMode === "orb"
             enabled: window.viewMode === "orb"
 
@@ -2533,5 +2553,13 @@ Item {
         onClosed: window.consoleOpen = false
         onSetBackend: (which) => window.capsRun(["backend", which])
         onSetKey: (k) => window.setApiKey(k)
+    }
+
+    // ---- effects layer: on top of BOTH views, so effects are always visible
+    TarFx {
+        id: fx
+        theme: theme
+        accent: window.accent
+        scaleFn: window.s
     }
 }

@@ -1309,6 +1309,22 @@ def a_cliphist(_):
     return "\n".join(rows) or "empty"
 
 
+def a_coin(_):
+    side = "heads" if os.urandom(1)[0] % 2 else "tails"
+    emit("ui", action="banner", text=side.upper())
+    return side
+
+
+def a_dice(args):
+    try:
+        sides = max(2, min(1000, int(args.get("sides") or 6)))
+    except ValueError:
+        sides = 6
+    n = 1 + int.from_bytes(os.urandom(2), "big") % sides
+    emit("ui", action="banner", text=str(n))
+    return "rolled a %d (d%d)" % (n, sides)
+
+
 def a_play(args):
     q = args.get("q") or args.get("what") or ""
     if not q:
@@ -1380,6 +1396,10 @@ def a_run(args):
     terminal is the sandbox, and you can see exactly what it did.
     """
     cmd = (args.get("cmd") or args.get("what") or "").strip()
+    # "run btop inside it" / "in the terminal" -- where, not part of the command
+    cmd = re.sub(r"\s+(?:inside|in|on|into)\s+(?:it|there|that|this|the terminal|"
+                 r"that terminal|the new terminal|a terminal|kitty)$", "", cmd,
+                 flags=re.I).strip()
     if not cmd:
         return "run what?"
     first = cmd.split()[0]
@@ -1654,6 +1674,18 @@ UI_ACTIONS = {
     "expand":    "grow the panel to console view",
     "collapse":  "shrink the panel back to the orb",
     "close":     "close T.A.R. ITSELF -- only when the user says close yourself/tar",
+    "newchat":   "start a new, empty chat (old ones stay in CHATS)",
+    # visual effects (TarFx layer) -- fine to use for fun or to celebrate
+    "shock":     "fx: shockwave ring",
+    "flash":     "fx: white flash",
+    "shake":     "fx: shake the panel",
+    "heartbeat": "fx: double pulse",
+    "matrix":    "fx: green matrix takeover (text= optional line)",
+    "hack":      "fx: hacker hex cascade + ACCESS GRANTED",
+    "party":     "fx: colour-cycling party mode",
+    "barrelroll": "fx: spin the whole panel 360",
+    "selfdestruct": "fx: fake self-destruct countdown (harmless joke)",
+    "banner":    "fx: big glitch text across the panel (text=)",
 }
 
 
@@ -1849,6 +1881,9 @@ ACTIONS = {
     "record":     (a_record, "screen recording: state=start|stop",
                    [r"^(?P<state>start|stop) recording(?: the screen)?$", r"^record (?:my |the )?screen$"]),
     "cliphist":   (a_cliphist, "recent clipboard history", [r"^clipboard history$"]),
+    "coin":       (a_coin, "flip a coin", [r"^(?:flip a coin|coin ?flip|heads or tails)$"]),
+    "dice":       (a_dice, "roll a die: sides= (default 6)",
+                   [r"^roll (?:a )?(?:die|dice)$", r"^roll (?:a )?d(?P<sides>\d{1,4})$"]),
     "play":       (a_play, "play a song/video on youtube: q=",
                    [r"^play (?P<q>.+) on youtube$"]),
     "shell":      (a_shell, "run ANY shell command (bash, as the user, in ~) and get its "
@@ -1898,6 +1933,25 @@ UI_PATTERNS = {
     "alert":     [r"^alert$"],
     "calm":      [r"^calm(?: down)?$", r"^settle$"],
     "close":     [r"^(?:close|quit|exit) (?:yourself|tar|the panel)$"],
+    # ---- easter eggs (no model needed) ----
+    "barrelroll": [r"^do a barrel roll$", r"^barrel roll$", r"^spin$"],
+    "selfdestruct": [r"^(?:initiate |activate |start )?self[ -]?destruct(?: sequence)?$"],
+    "hack":      [r"^hack (?:the )?(?:mainframe|planet|pentagon|nasa|gibson)$", r"^i'?m in$",
+                  r"^hacker ?mode$", r"^enhance$"],
+    "matrix":    [r"^(?:enter the matrix|wake up,? neo|follow the white rabbit|red pill)$"],
+    "party":     [r"^(?:party|rave|disco)(?: mode| time)?$", r"^let'?s party$"],
+    "shake":     [r"^(?:earthquake|shake(?: it)?)$"],
+    "heartbeat": [r"^are you alive$", r"^heartbeat$"],
+    "flash":     [r"^lumos$", r"^flashbang$"],
+    "shock":     [r"^shockwave$", r"^boom$", r"^kamehameha$"],
+    "banner":    [r"^(?P<_hal>open the pod bay doors(?:,? (?:hal|tar))?)$",
+                  r"^(?P<_humor>what'?s your humou?r setting)$",
+                  r"^(?P<_life>what'?s the meaning of life(?:,? the universe and everything)?)$",
+                  r"^(?P<_sandwich>sudo make me a sandwich)$",
+                  r"^(?P<_hello>hello there)$",
+                  r"^(?P<_ily>i love you)$"],
+    "newchat":   [r"^(?:start |open |make )?(?:a )?(?:new|fresh|clean) (?:chat|conversation|session)$",
+                  r"^new chat please$", r"^clear (?:the )?chat$"],
 }
 
 
@@ -2050,7 +2104,7 @@ def match(text):
     return None, None
 
 
-_PRIORITY = ("record", "remind", "wifi", "bluetooth", "dnd", "nightlight", "power",
+_PRIORITY = ("coin", "dice", "record", "remind", "wifi", "bluetooth", "dnd", "nightlight", "power",
              "play", "weather", "datetime", "battery", "calc", "processes",
              "colorpick", "cliphist")
 
@@ -2089,10 +2143,42 @@ def _match_one(low):
     return None, None
 
 
+# What T.A.R. says back when an easter egg fires (instead of the fx label).
+EGG_REPLY = {
+    "barrelroll": "wheee.",
+    "selfdestruct": "self-destruct sequence engaged. stand by.",
+    "hack": "I'm in.",
+    "matrix": "follow the white rabbit.",
+    "party": "party mode. don't tell anyone.",
+    "shake": "brace yourself.",
+    "heartbeat": "still ticking.",
+    "flash": "lumos.",
+    "shock": "boom.",
+}
+# banner eggs: the matched phrase picks the line (and the banner text)
+BANNER_EGG = {
+    "_hal": ("I'm sorry. I'm afraid I can't do that.", "alert"),
+    "_humor": ("75%. want me to turn it down?", "banner"),
+    "_life": ("42.", "banner"),
+    "_sandwich": ("okay. (I can't make sandwiches.)", "banner"),
+    "_hello": ("general kenobi.", "banner"),
+    "_ily": ("I know.", "banner"),
+}
+
+
 def run(name, args):
     if name in UI_ACTIONS:
-        emit("ui", action=name, **(args or {}))
-        return UI_ACTIONS[name]
+        args = dict(args or {})
+        egg = next((k for k in BANNER_EGG if k in args), None)
+        if egg:
+            line, kind = BANNER_EGG[egg]
+            args.pop(egg, None)
+            if kind == "alert":
+                emit("ui", action="alert")
+            emit("ui", action="banner", text=line if len(line) < 28 else line.split(".")[0] + ".")
+            return line
+        emit("ui", action=name, **args)
+        return EGG_REPLY.get(name) or UI_ACTIONS[name]
     entry = ACTIONS.get(name)
     if not entry:
         return None
