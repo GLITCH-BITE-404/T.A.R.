@@ -262,6 +262,10 @@ SYSTEM = (
     "something you opened, pass its name as what= (\"close it\" right after "
     "opening kitty = closewin what=kitty). The 'close' UI action shuts T.A.R. "
     "down — use it ONLY if they say close yourself / close T.A.R.\n\n"
+    "CHECK YOUR WORK: action results now end with VERIFIED or NOT VERIFIED. "
+    "If NOT VERIFIED, don't claim success: look, then retry a different way "
+    "(different target wording, wait, close a popup) -- at most 2 retries -- "
+    "and if it still fails, tell the user plainly what didn't work.\n"
     "MULTI-STEP: do every step the user asked, in order, in this same turn "
     "(e.g. open the site, then click_on the thing times=5). Don't stop after "
     "step one.\n"
@@ -555,6 +559,7 @@ def chat_gemini(message, model, max_turns=10):
     first = None
     tools = gemini_tools()
     nudged = False
+    last_check = None           # "ok" / "failed" from the latest verified action
 
     for _turn in range(max_turns):
         try:
@@ -595,6 +600,12 @@ def chat_gemini(message, model, max_turns=10):
                 "you need their email). Never invent personal info.")}]})
             continue
 
+        if not calls and last_check == "failed" and _claims_action(said) and \
+                "didn't" not in said.lower() and "not " not in said.lower():
+            # the final check said it didn't work -- don't let "done" stand
+            said = ("I tried, but it doesn't look like it worked -- nothing changed "
+                    "on screen after my last attempt. Want me to try another way?")
+            parts = [{"text": said}]
         if not calls and not acted and nudged and _claims_action(said):
             # bluffed again after being told nothing ran: don't show it
             said = ("I didn't actually do that -- no action ran. "
@@ -619,6 +630,10 @@ def chat_gemini(message, model, max_turns=10):
         for c in calls:
             payload = c.get("args") or {}
             out = run_tool(c.get("name"), payload)
+            if "NOT VERIFIED" in str(out):
+                last_check = "failed"
+            elif "VERIFIED" in str(out):
+                last_check = "ok"
             act, _a = normalize_call(c.get("name"), payload)
             act = act or "?"
             if act in T.ACTIONS or act in T.UI_ACTIONS:

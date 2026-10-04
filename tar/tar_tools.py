@@ -1778,6 +1778,64 @@ def a_look(args):
     return txt or "couldn't make sense of the screen"
 
 
+# ---- verification: did that actually do anything? --------------------------
+def _screen_change(before, after, x, y, radius=160):
+    """Fraction of pixels that visibly changed: (around the click, whole screen).
+    None if it can't be measured (no PIL / missing shots)."""
+    try:
+        from PIL import Image, ImageChops
+        a = Image.open(before).convert("L")
+        b = Image.open(after).convert("L")
+        if a.size != b.size:
+            return None
+        diff = ImageChops.difference(a, b).point(lambda v: 255 if v > 28 else 0)
+
+        def frac(img):
+            small = img.resize((max(1, img.width // 4), max(1, img.height // 4)))
+            hist = small.histogram()
+            total = sum(hist) or 1
+            return hist[255] / total
+        box = (max(0, x - radius), max(0, y - radius),
+               min(a.width, x + radius), min(a.height, y + radius))
+        return frac(diff.crop(box)), frac(diff)
+    except Exception:
+        return None
+
+
+def _verdict(change):
+    if change is None:
+        return "(couldn't verify)"
+    local, overall = change
+    if local > 0.015 or overall > 0.02:
+        return "VERIFIED: the screen changed (%d%% around the click, %d%% overall)" % (
+            round(local * 100), round(overall * 100))
+    return ("NOT VERIFIED: nothing on screen changed after the click -- it probably "
+            "missed or the thing isn't clickable. look, then try again (or tell the user)")
+
+
+def _click_and_check(x, y, button, double, times=1, fast=False):
+    """Hover, snapshot, click, snapshot, compare. Returns the verdict text."""
+    mon = _monitor()
+    b_path = os.path.join(DATA, "click-before.jpg")
+    a_path = os.path.join(DATA, "click-after.jpg")
+    with _TarHidden() as hid:
+        _move(x, y, mon)
+        time.sleep(0.15)                    # let hover effects settle first
+        have_before = _shot(b_path)
+        for i in range(times):
+            _click(button, double)
+            if times > 1:
+                time.sleep(0.04 if fast else 0.12)
+        time.sleep(0.6)                     # give the page time to react
+        have_after = _shot(a_path)
+        rect = hid.rect
+    if not (have_before and have_after):
+        return "(couldn't verify)"
+    _mask(b_path, rect, mon)
+    _mask(a_path, rect, mon)
+    return _verdict(_screen_change(b_path, a_path, x, y))
+
+
 def a_click_on(args):
     """Click something on screen by description: 'the subscribe button'."""
     target = (args.get("target") or args.get("what") or "").strip()
@@ -1821,17 +1879,12 @@ def a_click_on(args):
             return stop
     button = (args.get("button") or "left").lower()
     times = max(1, min(50, _int(args.get("times"), 1)))
-    with _TarHidden():
-        _move(x, y)
-        time.sleep(0.05)
-        for i in range(times):
-            _click(button if button in ("left", "right", "middle") else "left",
-                   str(args.get("double", "")).lower() in ("1", "true", "yes"))
-            if times > 1:
-                fast = str(args.get("fast", "")).lower() in ("1", "true", "yes")
-                time.sleep(0.04 if fast else 0.12)
-    return "clicked %r%s at (%d, %d) [found by %s]" % (
-        label[:60], (" %d times" % times) if times > 1 else "", x, y, how)
+    check = _click_and_check(
+        x, y, button if button in ("left", "right", "middle") else "left",
+        str(args.get("double", "")).lower() in ("1", "true", "yes"), times,
+        str(args.get("fast", "")).lower() in ("1", "true", "yes"))
+    return "clicked %r%s at (%d, %d) [found by %s] -- %s" % (
+        label[:60], (" %d times" % times) if times > 1 else "", x, y, how, check)
 
 
 def a_click(args):
@@ -1843,12 +1896,10 @@ def a_click(args):
     if not (0 <= x < mon["width"] and 0 <= y < mon["height"]):
         return "x/y must be on screen (0-%d, 0-%d)" % (mon["width"] - 1, mon["height"] - 1)
     button = (args.get("button") or "left").lower()
-    with _TarHidden():
-        _move(x, y, mon)
-        time.sleep(0.05)
-        _click(button if button in ("left", "right", "middle") else "left",
-               str(args.get("double", "")).lower() in ("1", "true", "yes"))
-    return "clicked %s at (%d, %d)" % (button, x, y)
+    check = _click_and_check(
+        x, y, button if button in ("left", "right", "middle") else "left",
+        str(args.get("double", "")).lower() in ("1", "true", "yes"))
+    return "clicked %s at (%d, %d) -- %s" % (button, x, y, check)
 
 
 def a_scroll(args):
@@ -2829,6 +2880,84 @@ BANNER_EGG = {
 }
 
 
+# ---- post-checks: report whether an action REALLY worked ---------------------
+_WINDOW_OPENERS = ("open", "run", "web", "play", "folder")
+_SKIP_VERIFY = ("refused", "NEEDS CONFIRMATION", "no ", "couldn't", "can't", "don't know",
+                "not clicking", "too vague", "which ", "need ", "nothing ", "rolled",
+                "opened T.A.R.", "cancelled", "confirmed")
+
+
+def _snapshot_windows():
+    return {w["address"]: (w.get("title") or "", (w.get("workspace") or {}).get("id"),
+                           w.get("class") or "") for w in _clients()}
+
+
+def _pre_verify(name, args):
+    if name in _WINDOW_OPENERS or name in ("closewin", "kill", "sendto", "focus"):
+        return _snapshot_windows()
+    return None
+
+
+def _post_verify(name, args, pre, out):
+    """Append a real check of the result. Never raises."""
+    try:
+        if name in _WINDOW_OPENERS and pre is not None:
+            for _ in range(10):             # up to ~5s for the app/page to show up
+                time.sleep(0.5)
+                now = _snapshot_windows()
+                new = [now[a] for a in now if a not in pre]
+                if new:
+                    return "VERIFIED: new window appeared (%s)" % (new[0][2] or new[0][0][:40])
+                moved = [now[a] for a in now if a in pre and now[a][0] != pre[a][0]
+                         and _is_browser({"class": now[a][2]})]
+                if moved:
+                    return "VERIFIED: browser now shows %r" % moved[0][0][:60]
+            return "NOT VERIFIED: no new window or page appeared within 5s"
+        if name in ("closewin", "kill") and pre is not None:
+            time.sleep(1.2)
+            now = _snapshot_windows()
+            gone = [pre[a][2] or pre[a][0][:30] for a in pre if a not in now]
+            if gone:
+                return "VERIFIED: closed %s" % ", ".join(gone)
+            return ("NOT VERIFIED: the window is still open -- it may be showing a "
+                    "'save changes?' dialog. look to check")
+        if name == "sendto" and pre is not None:
+            now = _snapshot_windows()
+            moved = [a for a in now if a in pre and now[a][1] != pre[a][1]]
+            return "VERIFIED: window moved" if moved else "NOT VERIFIED: no window changed workspace"
+        if name == "focus":
+            rc, o = sh(["hyprctl", "-j", "activewindow"])
+            t = (json.loads(o).get("title") or "") if rc == 0 and o.strip().startswith("{") else ""
+            return ("VERIFIED: %r is now in front" % t[:50]) if t and t != TAR_TITLE \
+                else "NOT VERIFIED: focus didn't move"
+        if name == "volume":
+            rc, o = sh(["pactl", "get-sink-volume", "@DEFAULT_SINK@"])
+            m = re.search(r"(\d+)%", o or "")
+            rc2, mute = sh(["pactl", "get-sink-mute", "@DEFAULT_SINK@"])
+            return "now: volume %s%s" % (m.group(1) + "%" if m else "?",
+                                         ", MUTED" if "yes" in (mute or "") else "")
+        if name == "wifi" and str(args.get("state", "")).lower() in ("on", "off"):
+            rc, o = sh(["nmcli", "radio", "wifi"])
+            want = "enabled" if args["state"].lower() == "on" else "disabled"
+            return ("VERIFIED: wifi is %s" % o) if o.strip() == want else ("NOT VERIFIED: wifi is %s" % o)
+        if name == "bluetooth" and str(args.get("state", "")).lower() in ("on", "off"):
+            rc, o = sh(["bluetoothctl", "show"])
+            on = "Powered: yes" in (o or "")
+            ok = on == (args["state"].lower() == "on")
+            return ("VERIFIED" if ok else "NOT VERIFIED") + ": bluetooth is %s" % ("on" if on else "off")
+        if name == "media":
+            rc, o = sh(["playerctl", "status"])
+            return "now: %s" % (o or "no player")
+        if name == "brightness":
+            rc, cur = sh(["brightnessctl", "get"])
+            rc2, mx = sh(["brightnessctl", "max"])
+            if cur.isdigit() and mx.isdigit() and int(mx):
+                return "now: brightness %d%%" % round(int(cur) * 100 / int(mx))
+    except Exception as e:
+        return "(couldn't verify: %s)" % e
+    return None
+
+
 def run(name, args):
     if name in UI_ACTIONS:
         args = dict(args or {})
@@ -2846,7 +2975,13 @@ def run(name, args):
     if not entry:
         return None
     fn = entry[0]
-    return fn(args or {})
+    pre = _pre_verify(name, args or {})
+    out = fn(args or {})
+    if isinstance(out, str) and not out.startswith(_SKIP_VERIFY) and "VERIFIED" not in out:
+        check = _post_verify(name, args or {}, pre, out)
+        if check:
+            out = "%s -- %s" % (out, check)
+    return out
 
 
 def schema():
