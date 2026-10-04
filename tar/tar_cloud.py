@@ -711,6 +711,47 @@ def _autoclick_burst(target, rate, until_ts, push):
     return n
 
 
+# ---- speech: Gemini TTS (Hebrew + anything piper can't say) and STT -------
+TTS_MODEL = "gemini-2.5-flash-preview-tts"
+STT_MODEL = "gemini-flash-lite-latest"
+
+
+def tts_pcm(text, voice="Charon"):
+    """Text -> raw PCM (24 kHz, s16, mono) via Gemini. Raises on failure."""
+    import base64
+    key = api_key("google")
+    if not key:
+        raise RuntimeError("no Gemini key")
+    body = {"contents": [{"parts": [{"text": "Read this aloud naturally, in its own "
+                                              "language, exactly as written:\n" + text}]}],
+            "generationConfig": {"responseModalities": ["AUDIO"],
+                                 "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {
+                                     "voiceName": voice}}}}}
+    r = gemini_call(key, TTS_MODEL, body)
+    part = r["candidates"][0]["content"]["parts"][0]["inlineData"]
+    return base64.b64decode(part["data"])
+
+
+def transcribe_wav(path):
+    """Speech file -> text via Gemini (any language, incl. Hebrew).
+    Returns '' for no speech. Raises on failure."""
+    import base64
+    key = api_key("google")
+    if not key:
+        raise RuntimeError("no Gemini key")
+    with open(path, "rb") as f:
+        b64 = base64.b64encode(f.read()).decode()
+    r = gemini_call(key, STT_MODEL, {"contents": [{"parts": [
+        {"inline_data": {"mime_type": "audio/wav", "data": b64}},
+        {"text": "Transcribe exactly what is said, in the language it is spoken "
+                 "(Hebrew stays in Hebrew letters, English in English). Output ONLY "
+                 "the words. If there is no clear speech, output exactly: [none]"}]}],
+        "generationConfig": {"temperature": 0, "maxOutputTokens": 400}})
+    parts = ((r.get("candidates") or [{}])[0].get("content") or {}).get("parts") or []
+    text = "".join(p.get("text", "") for p in parts).strip()
+    return "" if text.lower().strip("[]. ") in ("none", "") else text
+
+
 def background_loop(task, every, minutes, autoclick="", rate=8):
     """Run a task round after round until stopped (loop.json removed), the
     time limit, or repeated failures. Each round is one normal cloud turn.
@@ -860,6 +901,16 @@ def main():
         ready, why = status()
         emit("cloud_status", key=bool(api_key()), sdk=have_sdk(),
              ready=ready, model=active_model(), v=("ready" if ready else why))
+
+    elif cmd == "tts":
+        # tar_say.sh: text on stdin -> raw 24k PCM on stdout
+        try:
+            voice = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2].strip() else "Charon"
+            sys.stdout.buffer.write(tts_pcm(sys.stdin.read(), voice))
+            return 0
+        except Exception as e:
+            print("tts failed: %s" % e, file=sys.stderr)
+            return 1
 
     elif cmd == "loop":
         def opt(name, default=""):

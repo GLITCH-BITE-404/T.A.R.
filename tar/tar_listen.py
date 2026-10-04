@@ -186,18 +186,12 @@ def record(max_s, silence_s):
 
 
 def transcribe(pcm):
-    model = model_path()
-    if not model:
-        emit("error", v="no whisper model — install the mic engine in setup")
-        return
+    model = model_path()                # may be None: the cloud path doesn't need it
     binary = None
     for c in ("whisper-cli", "whisper-cpp", "main"):
         if shutil.which(c):
             binary = c
             break
-    if not binary:
-        emit("error", v="whisper is not installed")
-        return
 
     emit("listen", v="transcribing")
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tf:
@@ -208,10 +202,31 @@ def transcribe(pcm):
             w.setsampwidth(2)
             w.setframerate(RATE)
             w.writeframes(pcm)
-        r = subprocess.run(
-            [binary, "-m", model, "-f", path, "-nt", "--no-prints",
-             "-t", str(min(8, (os.cpu_count() or 4)))],
-            capture_output=True, text=True, timeout=180)
+        # Cloud first when there's a Gemini key: it understands Hebrew AND
+        # English (the local base.en model is English-only -> Hebrew came out
+        # as nothing). Local whisper stays the offline fallback.
+        try:
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            import tar_cloud
+            if tar_cloud.api_key("google"):
+                text = tar_cloud.transcribe_wav(path)
+                if text:
+                    emit("transcript", v=text, ok=True, engine="gemini")
+                else:
+                    emit("transcript", v="", ok=False, v_reason="could not make out any words")
+                return
+        except Exception as e:
+            emit("listen", v="cloud transcription failed (%s) -- using local" % str(e)[:60])
+        if model and binary:
+            pass
+        else:
+            emit("error", v="no speech engine available")
+            return
+        argv = [binary, "-m", model, "-f", path, "-nt", "--no-prints",
+                "-t", str(min(8, (os.cpu_count() or 4)))]
+        if not os.path.basename(model).endswith(".en.bin"):
+            argv += ["-l", "auto"]          # multilingual model: detect Hebrew etc.
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=180)
         text = " ".join((r.stdout or "").split()).strip()
         # Whisper narrates non-speech audio in brackets -- "[MUSIC PLAYING]",
         # "(crickets chirping)", "[BLANK_AUDIO]". Those are descriptions of the

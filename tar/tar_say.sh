@@ -73,6 +73,28 @@ play_raw() {   # stdin: s16 mono 22050
     fi
 }
 
+# ---- Hebrew (and other text piper's English voice can't say): Gemini TTS.
+# Needs the cloud key; one request for the whole line (~2s), then it plays.
+if printf '%s' "$TEXT" | grep -qP '[\x{0590}-\x{05FF}]' \
+        || [[ "$(jqget '.tts_cloud')" == "true" ]]; then
+    HERE="$(dirname "$(readlink -f "$0")")"
+    TMPPCM="$(mktemp)"
+    if printf '%s' "$TEXT" | python3 "$HERE/tar_cloud.py" tts "$(jqget '.tts_voice' || true)" \
+            > "$TMPPCM" 2>/dev/null && [[ -s "$TMPPCM" ]]; then
+        if command -v pw-cat >/dev/null 2>&1; then
+            pw-cat --playback --raw --rate 24000 --format s16 --channels 1 \
+                   ${SINK:+--target "$SINK"} --volume "$VOL" "$TMPPCM" 2>/dev/null
+        else
+            paplay --raw --rate=24000 --format=s16le --channels=1 ${SINK:+--device="$SINK"} "$TMPPCM" 2>/dev/null
+        fi
+        rm -f "$TMPPCM"
+        exit 0
+    fi
+    rm -f "$TMPPCM"
+    # no key / offline: piper's English voice can't read Hebrew -- say so once
+    printf '%s' "$TEXT" | grep -qP '[\x{0590}-\x{05FF}]' && { echo "NO_HEBREW_TTS"; exit 0; }
+fi
+
 # ---- piper (neural). Binary is piper-tts on Arch; accept both.
 PIPER=""
 for c in piper-tts piper; do
