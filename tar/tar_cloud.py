@@ -199,17 +199,37 @@ def build_tools():
     }]
 
 
+def normalize_call(name, payload):
+    """Models don't always use the one run_action tool the way it's declared:
+    some call `click_on` directly, or put the args flat next to `action`.
+    Accept all of those shapes -> (action, args)."""
+    import tar_tools as T
+    payload = dict(payload or {})
+    action = payload.pop("action", "") or ""
+    if not action and name and name != "run_action" and (
+            name in T.ACTIONS or name in T.UI_ACTIONS):
+        action = name                   # called the action by its own name
+    args = payload.pop("args", None)
+    if args is None:
+        args = payload                  # flat: {"action": .., "target": ..}
+    elif payload:
+        args = dict(args) if isinstance(args, dict) else {"what": str(args)}
+        args.update(payload)
+    return action, args
+
+
 def run_tool(name, payload):
     os.environ["TAR_BACKEND"] = "cloud"     # unlocks the shell action
     import tar_tools as T
-    action = (payload or {}).get("action") or ""
-    args = (payload or {}).get("args") or {}
+    action, args = normalize_call(name, payload)
     if not isinstance(args, dict):
         args = {"what": str(args)}
     args = {k: (str(v) if not isinstance(v, str) else v)
             for k, v in args.items()}
     if action not in T.ACTIONS and action not in T.UI_ACTIONS:
-        return "no such action: %s" % action
+        return ("no such action: %r. Call run_action with action=<one of the "
+                "listed names> and args={...}, e.g. action='click_on', "
+                "args={'target': 'the big cookie', 'times': 10}" % action)
     if action in ("confirm", "cancel") or args.get("_confirmed"):
         # only the USER can approve a parked action, by replying yes
         return ("you can't confirm actions yourself -- ask the user to reply "
@@ -245,6 +265,13 @@ SYSTEM = (
     "MULTI-STEP: do every step the user asked, in order, in this same turn "
     "(e.g. open the site, then click_on the thing times=5). Don't stop after "
     "step one.\n"
+    "THINK MIDWAY: things pop up. After opening a site/app, and whenever a "
+    "click target isn't found, call look. If a dialog is in the way, handle "
+    "it yourself when the choice is obvious and harmless -- pick English for "
+    "a language prompt, 'Got it'/'OK'/close (X) for notices and cookie "
+    "banners, 'Not now' for upsells -- then carry on. STOP and ask the user "
+    "only for real decisions: logins, payments, permissions, anything "
+    "personal or irreversible.\n"
     "Prefer the dedicated actions (remind, wifi, bluetooth, battery, "
     "weather, calc, files, find, move, copy, rename, mkdir, trash, restore, "
     "folder, download, kill, processes, power, dnd, nightlight, record, play, "
@@ -592,7 +619,8 @@ def chat_gemini(message, model, max_turns=10):
         for c in calls:
             payload = c.get("args") or {}
             out = run_tool(c.get("name"), payload)
-            act = payload.get("action", "?")
+            act, _a = normalize_call(c.get("name"), payload)
+            act = act or "?"
             if act in T.ACTIONS or act in T.UI_ACTIONS:
                 acted.append(act)       # malformed calls don't count as "did something"
             B.act_log(act, payload.get("args") or {}, out)

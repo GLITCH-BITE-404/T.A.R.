@@ -1679,7 +1679,8 @@ def _locate_once(target):
     p, err = _gemini_point(path, target, mon)
     if p:
         return (p[0], p[1], p[2], "vision"), None
-    return None, err
+    return None, (err or "not found") + (" -- call look to see what's on screen; a popup "
+                                         "or dialog may be in the way")
 
 
 def _wlrctl():
@@ -1778,7 +1779,8 @@ def a_click_on(args):
             _click(button if button in ("left", "right", "middle") else "left",
                    str(args.get("double", "")).lower() in ("1", "true", "yes"))
             if times > 1:
-                time.sleep(0.12)
+                fast = str(args.get("fast", "")).lower() in ("1", "true", "yes")
+                time.sleep(0.04 if fast else 0.12)
     return "clicked %r%s at (%d, %d) [found by %s]" % (
         label[:60], (" %d times" % times) if times > 1 else "", x, y, how)
 
@@ -2461,7 +2463,8 @@ ACTIONS = {
     "click_on":   (a_click_on, "CLICK (single/double/right -- it CANNOT press-and-hold) "
                                "something visible on screen by description: "
                                "target='the subscribe button' (button=right, double=true, "
-                               "times=N to click it N times, all optional). Waits a few "
+                               "times=N to click it N times, fast=true for rapid clicks, all "
+                               "optional). Waits a few "
                                "seconds for a page that's still loading. "
                                "Finds it by text, else by vision.", []),
     "click":      (a_click, "click at exact screen pixels x=, y= (button=, double=)", []),
