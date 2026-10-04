@@ -1447,6 +1447,47 @@ def loop_running():
         return None
 
 
+def loop_update(**fields):
+    """Merge fields into loop.json (the tasks panel reads it)."""
+    try:
+        with open(LOOP, encoding="utf-8") as f:
+            d = json.load(f)
+    except (OSError, ValueError):
+        return None
+    d.update(fields)
+    tmp = LOOP + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(d, f)
+        os.replace(tmp, LOOP)
+    except OSError:
+        pass
+    return d
+
+
+def a_pause_task(_):
+    d = loop_running()
+    if not d:
+        return "nothing is running in the background"
+    if d.get("paused"):
+        return "already paused"
+    loop_update(paused=True, paused_at=time.time(), status="paused")
+    return "paused %r -- say resume to continue -- VERIFIED" % d.get("task", "")[:60]
+
+
+def a_resume_task(_):
+    d = loop_running()
+    if not d:
+        return "nothing is running in the background"
+    if not d.get("paused"):
+        return "it isn't paused"
+    # the paused time doesn't count against the time limit
+    extra = time.time() - float(d.get("paused_at") or time.time())
+    loop_update(paused=False, paused_at=None, status="running",
+                until=float(d.get("until") or time.time()) + extra)
+    return "resumed %r -- VERIFIED" % d.get("task", "")[:60]
+
+
 def a_keep_doing(args):
     task = (args.get("task") or args.get("what") or "").strip()
     if not task:
@@ -1454,7 +1495,7 @@ def a_keep_doing(args):
     old = loop_running()
     if old:
         a_stop_task({})
-    every = max(15, min(300, _int(args.get("every"), 25)))
+    every = max(5, min(300, _int(args.get("every"), 10)))
     minutes = max(1, min(120, _int(args.get("minutes"), 20)))
     here = os.path.dirname(os.path.abspath(__file__))
     log = open(os.path.join(DATA, "loop.log"), "a")
@@ -1464,7 +1505,9 @@ def a_keep_doing(args):
                          env=dict(os.environ, TAR_DATA=DATA))
     with open(LOOP, "w", encoding="utf-8") as f:
         json.dump({"pid": p.pid, "task": task, "started": time.time(),
-                   "until": time.time() + minutes * 60}, f)
+                   "until": time.time() + minutes * 60, "every": every,
+                   "round": 0, "status": "starting", "last": "", "paused": False,
+                   "beat": time.time()}, f)
     sh(["notify-send", "-a", "T.A.R.", "T.A.R. is working", task[:120] + "  (say stop to end)"])
     return ("started in the background: %r -- a round every %ds for up to %d min. "
             "Say 'stop' to end it. -- VERIFIED" % (task[:80], every, minutes))
@@ -2640,6 +2683,8 @@ ACTIONS = {
                                  "minutes=time limit, default 20). Use for 'keep doing', "
                                  "'until I stop you', 'play this for me'.", []),
     "stop_task":  (a_stop_task, "stop the background task", []),
+    "pause_task": (a_pause_task, "pause the background task (resume_task continues it)", []),
+    "resume_task": (a_resume_task, "resume a paused background task", []),
     "coin":       (a_coin, "flip a coin", [r"^(?:flip a coin|coin ?flip|heads or tails)$"]),
     "dice":       (a_dice, "roll a die: sides= (default 6)",
                    [r"^roll (?:a )?(?:die|dice)$", r"^roll (?:a )?d(?P<sides>\d{1,4})$"]),
@@ -2910,8 +2955,16 @@ _STOP_RE = re.compile(r"^(?:stop|stop it|stop now|stop playing|stop that|ok stop
 
 
 def _match_one(low):
-    if _STOP_RE.match(low) and loop_running():
-        return "stop_task", {}
+    if loop_running():
+        if _STOP_RE.match(low):
+            return "stop_task", {}
+        # only while a task exists -- otherwise "keep going" is just chat
+        if re.match(r"^(?:pause|pause (?:the |that |your )?(?:task|playing|game|background task)|"
+                    r"hold on|wait a sec|take a break)$", low):
+            return "pause_task", {}
+        if re.match(r"^(?:resume|continue|keep going|carry on|unpause|go on)"
+                    r"(?: (?:the |that )?(?:task|playing|game))?$", low):
+            return "resume_task", {}
     if pending_action():
         if _YES_RE.match(low):
             return "confirm", {}

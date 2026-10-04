@@ -2573,6 +2573,18 @@ Item {
         onSetKey: (k) => window.setApiKey(k)
     }
 
+    // ---- background tasks tab: docks to the right edge while a task runs
+    TarTasks {
+        id: tasksTab
+        anchors.right: parent.right
+        anchors.top: parent.top
+        anchors.topMargin: window.s(96)
+        z: 900
+        theme: theme
+        accent: window.accent
+        scaleFn: window.s
+    }
+
     // ---- effects layer: on top of BOTH views, so effects are always visible
     TarFx {
         id: fx

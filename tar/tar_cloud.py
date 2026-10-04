@@ -672,17 +672,36 @@ def chat_gemini(message, model, max_turns=10):
 
 def background_loop(task, every, minutes):
     """Run a task round after round until stopped (loop.json removed), the
-    time limit, or repeated failures. Each round is one normal cloud turn."""
+    time limit, or repeated failures. Each round is one normal cloud turn.
+    Progress goes into loop.json so T.A.R.'s tasks panel can show it."""
     import time
     import tar_tools as T
     import tar_brain as B
     B._speak = lambda *a, **k: None          # rounds are silent
     B.history_append = lambda *a, **k: None  # and don't flood the chat history
-    end = time.time() + minutes * 60
     fails, n = 0, 0
-    while time.time() < end and T.loop_running():
+
+    def until():
+        d = T.loop_running() or {}
+        return float(d.get("until") or 0)
+
+    while T.loop_running() and time.time() < until():
+        d = T.loop_running() or {}
+        if d.get("paused"):
+            T.loop_update(status="paused", beat=time.time())
+            time.sleep(1)
+            continue
         n += 1
+        T.loop_update(round=n, status="working", beat=time.time())
         before = len(open(B.ACTLOG_PATH).readlines()) if os.path.exists(B.ACTLOG_PATH) else 0
+        captured = []
+        _emit = globals()["emit"]
+
+        def tee(t, **kw):                       # remember what happened this round
+            if t == "acted":
+                captured.append("%s: %s" % (kw.get("action"), str(kw.get("v", ""))[:90]))
+            _emit(t, **kw)
+        globals()["emit"] = tee
         try:
             rc = chat_gemini(
                 "[background task, round %d] Task: %s\nDo the next round NOW: FIRST "
@@ -693,16 +712,24 @@ def background_loop(task, every, minutes):
                 (B.config().get("cloud_model") or default_model()), max_turns=8)
         except Exception as e:
             rc = 1
-            print("round %d failed: %s" % (n, e), flush=True)
+            captured.append("error: %s" % e)
+        finally:
+            globals()["emit"] = _emit
         after = len(open(B.ACTLOG_PATH).readlines()) if os.path.exists(B.ACTLOG_PATH) else 0
         fails = fails + 1 if (rc or after == before) else 0
+        T.loop_update(last=(captured[-1] if captured else "no actions this round"),
+                      fails=fails, beat=time.time())
         if fails >= 3:
+            T.loop_update(status="failed")
             os.system("notify-send -a T.A.R. 'T.A.R. stopped' 'the background task kept failing'")
             break
-        for _ in range(every):
-            if not T.loop_running():
+        next_at = time.time() + every
+        T.loop_update(status="waiting", next_at=next_at)
+        while time.time() < next_at and T.loop_running():
+            if (T.loop_running() or {}).get("paused"):
                 break
             time.sleep(1)
+            T.loop_update(beat=time.time())
     try:
         os.remove(T.LOOP)
     except OSError:
