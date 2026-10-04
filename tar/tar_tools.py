@@ -1209,7 +1209,18 @@ def resolve_path(p):
     p = os.path.expanduser(p)
     if not os.path.isabs(p):
         p = os.path.join(_HOME, p)
-    return os.path.normpath(p)
+    p = os.path.normpath(p)
+    # the model says ~/Downloads, but the real folders are Hebrew (הורדות...)
+    if p.startswith(_HOME + os.sep):
+        first, _, rest = p[len(_HOME) + 1:].partition(os.sep)
+        real = xdg_dir(first)
+        eng = os.path.join(_HOME, first)
+        # use the real (Hebrew) folder when the English-named one is missing or
+        # just an empty leftover (there's an empty ~/Downloads next to הורדות)
+        if real and os.path.isdir(real) and os.path.normpath(real) != eng and (
+                not os.path.exists(eng) or (os.path.isdir(eng) and not os.listdir(eng))):
+            p = os.path.join(real, rest) if rest else real
+    return p
 
 
 def _safe_path(p):
@@ -1248,6 +1259,19 @@ def _secs(args):
 
 def a_remind(args):
     secs = _secs(args)
+    at = str(args.get("at") or "").strip()
+    m = re.match(r"^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$", at, re.I)
+    if m and not secs:
+        h, mi = int(m.group(1)), int(m.group(2) or 0)
+        if m.group(3) and m.group(3).lower() == "pm" and h < 12:
+            h += 12
+        if m.group(3) and m.group(3).lower() == "am" and h == 12:
+            h = 0
+        now = time.localtime()
+        target = time.mktime((now.tm_year, now.tm_mon, now.tm_mday, h, mi, 0, 0, 0, -1))
+        if target <= time.time():
+            target += 86400                  # already passed today -> tomorrow
+        secs = int(target - time.time())
     if secs <= 0:
         return "when? give minutes/seconds/hours"
     txt = args.get("text") or args.get("what") or "time's up"
@@ -2314,6 +2338,513 @@ def a_monitors(_):
                         " (focused)" if m.get("focused") else "") for m in ms)
 
 
+# ---- full coverage: devices, system, windows, browser, files, media, time ---
+
+# -- devices & hardware --------------------------------------------------------
+def _pactl_list(kind):
+    """[(name, description, is_default)] for sinks/sources (no monitors)."""
+    rc, out = sh(["pactl", "-f", "json", "list", kind])
+    rc2, dflt = sh(["pactl", "get-default-" + kind[:-1]])
+    try:
+        rows = json.loads(out)
+    except ValueError:
+        return []
+    return [(r.get("name", ""), r.get("description", ""), r.get("name") == dflt.strip())
+            for r in rows if ".monitor" not in r.get("name", "")]
+
+
+def a_devices(_):
+    """Everything connected: audio, cameras, input, USB, drives, screens, bluetooth."""
+    parts = []
+    outs = _pactl_list("sinks")
+    ins = _pactl_list("sources")
+    if outs:
+        parts.append("audio outputs: " + "; ".join(d + (" (in use)" if df else "") for _, d, df in outs))
+    if ins:
+        parts.append("microphones: " + "; ".join(d + (" (in use)" if df else "") for _, d, df in ins))
+    cams = sorted(f for f in os.listdir("/dev") if f.startswith("video"))
+    if cams:
+        parts.append("cameras: " + ", ".join("/dev/" + c for c in cams))
+    rc, o = sh(["hyprctl", "-j", "devices"])
+    try:
+        d = json.loads(o)
+        kb = sorted({k["name"] for k in d.get("keyboards", []) if "virtual" not in k["name"]})
+        mice = sorted({m["name"] for m in d.get("mice", []) if "virtual" not in m["name"]})
+        if kb:
+            parts.append("keyboards: " + ", ".join(kb[:6]))
+        if mice:
+            parts.append("mice/touchpads: " + ", ".join(mice[:6]))
+    except (ValueError, KeyError, TypeError):
+        pass
+    rc, o = sh(["lsusb"])
+    usb = [l.split(" ", 6)[-1] for l in o.splitlines()
+           if "root hub" not in l.lower() and len(l.split(" ", 6)) > 6]
+    if usb:
+        parts.append("usb: " + "; ".join(usb[:10]))
+    parts.append(a_usb({}))
+    parts.append(a_monitors({}))
+    rc, o = sh(["bluetoothctl", "devices", "Connected"])
+    parts.append("bluetooth connected: " + (", ".join(l.split(" ", 2)[-1] for l in o.splitlines()) or "nothing"))
+    return "\n".join(p for p in parts if p)
+
+
+def _pick_device(kind, want):
+    want = (want or "").lower()
+    rows = _pactl_list(kind)
+    hits = [r for r in rows if want and (want in r[1].lower() or want in r[0].lower())]
+    return hits[0] if hits else None
+
+
+def a_audio_out(args):
+    """List outputs, or switch to one: to='headphones' / 'speakers' / 'hdmi'."""
+    want = args.get("to") or args.get("what") or ""
+    if not want:
+        return "outputs: " + "; ".join(d + (" (in use)" if df else "") for _, d, df in _pactl_list("sinks"))
+    dev = _pick_device("sinks", want)
+    if not dev:
+        return "no output matching %r. outputs: %s" % (
+            want, "; ".join(d for _, d, _ in _pactl_list("sinks")))
+    sh(["pactl", "set-default-sink", dev[0]])
+    # move what's already playing too
+    rc, o = sh(["pactl", "list", "short", "sink-inputs"])
+    for l in o.splitlines():
+        sh(["pactl", "move-sink-input", l.split()[0], dev[0]])
+    rc, cur = sh(["pactl", "get-default-sink"])
+    return ("switched sound to %s -- VERIFIED" % dev[1]) if cur.strip() == dev[0] \
+        else "NOT VERIFIED: output is still %s" % cur
+
+
+def a_mic(args):
+    """Microphone: state=mute|unmute|toggle, or to=<name> to switch, or list."""
+    st = (args.get("state") or "").lower()
+    want = args.get("to") or ""
+    if want:
+        dev = _pick_device("sources", want)
+        if not dev:
+            return "no microphone matching %r" % want
+        sh(["pactl", "set-default-source", dev[0]])
+        return "switched microphone to %s" % dev[1]
+    if st in ("mute", "unmute", "toggle", "on", "off"):
+        val = {"mute": "1", "off": "1", "unmute": "0", "on": "0"}.get(st, "toggle")
+        sh(["pactl", "set-source-mute", "@DEFAULT_SOURCE@", val])
+        rc, o = sh(["pactl", "get-source-mute", "@DEFAULT_SOURCE@"])
+        return "microphone is now %s -- VERIFIED" % ("muted" if "yes" in o else "on")
+    rc, o = sh(["pactl", "get-source-mute", "@DEFAULT_SOURCE@"])
+    return "microphones: %s; default is %s" % (
+        "; ".join(d + (" (in use)" if df else "") for _, d, df in _pactl_list("sources")),
+        "muted" if "yes" in o else "on")
+
+
+# -- system ----------------------------------------------------------------------
+def a_disk(args):
+    p = args.get("path") or args.get("what")
+    if p:
+        path = resolve_path(p)
+        rc, o = sh(["du", "-sh", path], timeout=60)
+        return ("%s is %s" % (path, o.split()[0])) if rc == 0 and o else "couldn't measure " + path
+    rc, o = sh(["df", "-h", "--output=target,size,used,avail,pcent", "/", os.path.expanduser("~")])
+    return "disk space:\n" + o
+
+
+def a_temps(_):
+    rc, o = sh(["sensors"])
+    keep = [l.strip() for l in o.splitlines()
+            if re.search(r"(Package|Core \d|Tctl|temp1|fan\d|Composite|edge)", l)]
+    return "\n".join(keep[:12]) or "no temperature sensors found"
+
+
+def a_network(args):
+    """IP addresses, wifi, and whether the internet actually works."""
+    rc, o = sh(["ip", "-brief", "-4", "addr"])
+    ips = [l for l in o.splitlines() if not l.startswith("lo")]
+    rc, gw = sh(["ip", "route", "show", "default"])
+    rc, p = sh(["ping", "-c", "3", "-W", "2", "1.1.1.1"], timeout=15)
+    m = re.search(r"= [\d.]+/([\d.]+)/", p or "")
+    rc2, d = sh(["ping", "-c", "1", "-W", "2", "google.com"], timeout=10)
+    return "\n".join([
+        "addresses: " + ("; ".join(ips) or "none"),
+        "router: " + (gw.split()[2] if gw.split()[2:3] else "none"),
+        "internet: " + (("working, %s ms" % m.group(1)) if m else "NOT reachable"),
+        "dns: " + ("working" if rc2 == 0 else "NOT resolving names"),
+        a_wifi({})])
+
+
+def a_updates(_):
+    rc, o = sh(["checkupdates"], timeout=90)
+    n = len([l for l in o.splitlines() if l.strip()]) if rc in (0, 2) else None
+    rc2, a = sh(["yay", "-Qua"], timeout=60) if shutil.which("yay") else (1, "")
+    na = len([l for l in a.splitlines() if l.strip()]) if rc2 == 0 else 0
+    if n is None:
+        return "couldn't check for updates (offline?)"
+    return ("%d system update(s) and %d AUR update(s) available. To install, the user "
+            "runs: sudo pacman -Syu  (or press Super+U for rice updates)" % (n, na)) \
+        if (n or na) else "everything is up to date"
+
+
+def a_installed(args):
+    """Is <app> installed? (or list installed apps)"""
+    q = (args.get("q") or args.get("what") or "").strip().lower()
+    names = set()
+    for d in ("/usr/share/applications", os.path.expanduser("~/.local/share/applications")):
+        if os.path.isdir(d):
+            for f in os.listdir(d):
+                if f.endswith(".desktop"):
+                    try:
+                        with open(os.path.join(d, f), encoding="utf-8", errors="ignore") as fh:
+                            m = re.search(r"^Name=(.+)$", fh.read(), re.M)
+                        if m:
+                            names.add(m.group(1).strip())
+                    except OSError:
+                        pass
+    if not q:
+        return "%d apps: %s" % (len(names), ", ".join(sorted(names, key=str.lower)[:120]))
+    hit = sorted(n for n in names if q in n.lower())
+    binp = shutil.which(q)
+    rc, pk = sh(["pacman", "-Qq", q])
+    if hit or binp or rc == 0:
+        return "yes: %s" % (", ".join(hit[:8]) or binp or q)
+    rc, s_ = sh(["pacman", "-Ss", "^%s$|^%s-" % (re.escape(q), re.escape(q))], timeout=30)
+    found = s_.splitlines()[:2]
+    return ("not installed. available in the repos: %s -- the user installs it with: "
+            "sudo pacman -S %s" % (" / ".join(found), found[0].split("/")[-1].split()[0])) \
+        if found else "not installed (not in the official repos -- maybe the AUR: yay -S %s)" % q
+
+
+# -- windows ---------------------------------------------------------------------
+def a_minimize(args):
+    w = target_window(args)
+    if not w:
+        return "no app window to minimize"
+    hypr("movetoworkspacesilent", "special:minimized,address:" + w["address"])
+    return "minimized %s (say restore to bring it back)" % _label(w)
+
+
+def a_unminimize(args):
+    rc, o = sh(["hyprctl", "-j", "clients"])
+    try:
+        mins = [w for w in json.loads(o)
+                if (w.get("workspace") or {}).get("name") == "special:minimized"]
+    except ValueError:
+        mins = []
+    q = (args.get("what") or "").lower()
+    if q:
+        mins = [w for w in mins if q in (w.get("class", "") + w.get("title", "")).lower()]
+    if not mins:
+        return "nothing is minimized"
+    cur = json.loads(sh(["hyprctl", "-j", "activeworkspace"])[1]).get("id", 1)
+    for w in mins:
+        hypr("movetoworkspacesilent", "%s,address:%s" % (cur, w["address"]))
+    return "restored " + ", ".join(_label(w) for w in mins)
+
+
+def a_layout(args):
+    what = (args.get("what") or "split").lower()
+    if "monitor" in what or "screen" in what:
+        w, err = _focus_target(args)
+        if err:
+            return err
+        hypr("movewindow", "mon:+1")
+        return "moved %s to the next monitor" % _label(w)
+    w, err = _focus_target(args)
+    if err:
+        return err
+    hypr("togglesplit")
+    return "toggled split direction"
+
+
+# -- browser (keyboard on the browser window) ---------------------------------
+_BROWSER_KEYS = {
+    "new_tab": ("ctrl", "t"), "reopen_tab": ("ctrl+shift", "t"), "reload": ("ctrl", "r"),
+    "back": ("alt", "Left"), "forward": ("alt", "Right"), "next_tab": ("ctrl", "Tab"),
+    "prev_tab": ("ctrl+shift", "Tab"), "zoom_in": ("ctrl", "plus"), "zoom_out": ("ctrl", "minus"),
+    "zoom_reset": ("ctrl", "0"), "private": ("ctrl+shift", "n"), "bookmark": ("ctrl", "d"),
+    "find": ("ctrl", "f"), "new_window": ("ctrl", "n"), "address": ("ctrl", "l"),
+}
+
+
+def _browser_window(args):
+    w = target_window({"what": args.get("browser") or "browser"})
+    if not w:
+        return None, "no browser window is open"
+    sh(["hyprctl", "dispatch", "focuswindow", "address:" + w["address"]])
+    time.sleep(0.2)
+    return w, None
+
+
+def _press(mods, key):
+    argv = ["wtype"]
+    for m_ in mods.split("+"):
+        argv += ["-M", m_]
+    argv += ["-k", key]
+    for m_ in reversed(mods.split("+")):
+        argv += ["-m", m_]
+    sh(argv)
+
+
+def a_browser(args):
+    """Browser controls: action=new_tab|reopen_tab|reload|back|forward|next_tab|
+    prev_tab|zoom_in|zoom_out|zoom_reset|private|bookmark|find (text=)|tab (q=)|tabs"""
+    act = (args.get("action") or args.get("what") or "").lower().replace(" ", "_")
+    w, err = _browser_window(args)
+    if err:
+        return err
+    if act in ("tabs", "list_tabs", "list"):
+        seen, order = set(), []
+        for _ in range(40):
+            t = next((c.get("title") for c in _clients() if c["address"] == w["address"]), "")
+            if t in seen:
+                break
+            seen.add(t); order.append(re.sub(r"\s*-\s*Google Chrome.*$|\s*—\s*Mozilla Firefox$", "", t))
+            _press("ctrl", "Tab"); time.sleep(0.2)
+        return "%d tab(s): %s" % (len(order), " | ".join(order))
+    if act in ("tab", "switch_tab", "go_to_tab"):
+        q = (args.get("q") or args.get("title") or "").lower()
+        seen = set()
+        for _ in range(40):
+            t = next((c.get("title") for c in _clients() if c["address"] == w["address"]), "")
+            if q and q in t.lower():
+                return "switched to the tab %r -- VERIFIED" % t[:60]
+            if t in seen:
+                break
+            seen.add(t)
+            _press("ctrl", "Tab"); time.sleep(0.2)
+        return "no tab with %r in its title" % q
+    if act not in _BROWSER_KEYS:
+        return "browser action? one of: " + ", ".join(sorted(_BROWSER_KEYS) + ["tab", "tabs"])
+    mods, key = _BROWSER_KEYS[act]
+    _press(mods, key)
+    if act == "find" and args.get("text"):
+        time.sleep(0.2)
+        sh(["wtype", args["text"]])
+    return "%s in %s" % (act.replace("_", " "), _label(w))
+
+
+# -- files -------------------------------------------------------------------------
+def a_file_info(args):
+    p = resolve_path(args.get("path") or args.get("what"))
+    if not os.path.exists(p):
+        return "no such file: " + p
+    st = os.stat(p)
+    kind = "folder" if os.path.isdir(p) else (sh(["file", "-b", p])[1] or "file")
+    size = sh(["du", "-sh", p], timeout=30)[1].split()[0] if os.path.isdir(p) else "%d bytes" % st.st_size
+    return "%s: %s, %s, modified %s" % (p, kind[:60], size,
+                                        time.strftime("%d %b %Y %H:%M", time.localtime(st.st_mtime)))
+
+
+def a_recent(args):
+    days = max(1, min(30, _int(args.get("days"), 1)))
+    where = resolve_path(args.get("where") or "")
+    if shutil.which("fd"):
+        rc, o = sh(["fd", "--type", "f", "--changed-within", "%dd" % days, "--max-results", "25",
+                    "--exclude", ".cache", "--exclude", ".local", ".", where], timeout=30)
+    else:
+        rc, o = sh(["find", where, "-type", "f", "-mtime", "-%d" % days, "-not", "-path", "*/.*"], timeout=30)
+        o = "\n".join(o.splitlines()[:25])
+    return ("files changed in the last %d day(s):\n%s" % (days, o)) if o else "nothing changed recently"
+
+
+def a_write_file(args):
+    """Create a text file (path=, text=). Overwriting an existing file asks first."""
+    p = resolve_path(args.get("path") or "")
+    err = _safe_path(p)
+    if err:
+        return err
+    text = args.get("text") or ""
+    if os.path.exists(p) and not str(args.get("append", "")).lower() in ("1", "true", "yes"):
+        stop = needs_confirm("write_file", args, "overwrite %s" % p)
+        if stop:
+            return stop
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p, "a" if str(args.get("append", "")).lower() in ("1", "true", "yes") else "w",
+              encoding="utf-8") as f:
+        f.write(text if text.endswith("\n") else text + "\n")
+    return "wrote %d chars to %s -- VERIFIED" % (len(text), p)
+
+
+def _notes_path():
+    return os.path.join(xdg_dir("documents") or os.path.expanduser("~"), "tar-notes.md")
+
+
+def a_note(args):
+    text = (args.get("text") or args.get("what") or "").strip()
+    if not text:
+        return "note what?"
+    p = _notes_path()
+    with open(p, "a", encoding="utf-8") as f:
+        f.write("- %s  _(%s)_\n" % (text, time.strftime("%d %b %H:%M")))
+    return "noted -- saved to %s" % p
+
+
+def a_notes(_):
+    try:
+        with open(_notes_path(), encoding="utf-8") as f:
+            lines = f.read().strip().splitlines()
+    except OSError:
+        return "no notes yet"
+    return "\n".join(lines[-20:]) or "no notes yet"
+
+
+def a_archive(args):
+    """zip (path=folder/file, to=name.zip) or unzip (path=archive, to=folder)."""
+    act = (args.get("action") or "").lower()
+    src = resolve_path(args.get("path") or "")
+    if not os.path.exists(src):
+        return "no such file: " + src
+    if act in ("unzip", "extract") or re.search(r"\.(zip|tar|tgz|gz|xz|zst|7z|rar)$", src, re.I) and act != "zip":
+        dest = resolve_path(args.get("to") or re.sub(r"\.(zip|tar(\.\w+)?|tgz|7z|rar)$", "", src, flags=re.I))
+        err = _safe_path(dest)
+        if err:
+            return err
+        os.makedirs(dest, exist_ok=True)
+        rc, o = sh(["bsdtar", "-xf", src, "-C", dest], timeout=300)
+        return ("extracted into %s -- VERIFIED" % dest) if rc == 0 else "extract failed: " + o[:150]
+    dest = resolve_path(args.get("to") or (src.rstrip("/") + ".zip"))
+    err = _safe_path(dest)
+    if err:
+        return err
+    if os.path.exists(dest):
+        return "refusing to overwrite " + dest
+    rc, o = sh(["bsdtar", "-a", "-cf", dest, "-C", os.path.dirname(src), os.path.basename(src)], timeout=300)
+    return ("created %s -- VERIFIED" % dest) if rc == 0 and os.path.exists(dest) else "zip failed: " + o[:150]
+
+
+def a_empty_trash(args):
+    stop = needs_confirm("empty_trash", args, "PERMANENTLY delete everything in the trash")
+    if stop:
+        return stop
+    rc, o = sh(["trash-empty", "-f"]) if shutil.which("trash-empty") else (1, "trash-empty missing")
+    return "trash emptied -- VERIFIED" if rc == 0 else "couldn't empty the trash: " + o[:100]
+
+
+def a_open_with(args):
+    p = resolve_path(args.get("path") or "")
+    app = (args.get("app") or "").strip()
+    if not os.path.exists(p):
+        return "no such file: " + p
+    exe = (APPS.get(app.lower()) or [app])[0]
+    if not shutil.which(exe):
+        return "%s isn't installed" % app
+    sh([exe, p], detach=True)
+    return "opened %s with %s" % (os.path.basename(p), app)
+
+
+# -- media ---------------------------------------------------------------------------
+def a_now_playing(_):
+    rc, o = sh(["playerctl", "metadata", "--format",
+                "{{status}}: {{artist}} - {{title}} ({{duration(position)}}/{{duration(mpris:length)}}) on {{playerName}}"])
+    return o if rc == 0 and o else "nothing is playing"
+
+
+def a_seek(args):
+    s_ = str(args.get("by") or args.get("to") or "10").strip()
+    if args.get("to"):
+        sh(["playerctl", "position", s_])
+    else:
+        sh(["playerctl", "position", (s_ if s_[0] in "+-" else "+" + s_)])
+    return "now: " + a_now_playing({})
+
+
+# -- time ---------------------------------------------------------------------------
+def a_reminders(args):
+    act = (args.get("action") or "list").lower()
+    rc, o = sh(["systemctl", "--user", "list-timers", "tar-remind-*", "--no-legend", "--no-pager"])
+    rows = [l for l in o.splitlines() if "tar-remind" in l]
+    if act in ("cancel", "clear", "delete"):
+        for l in rows:
+            unit = next((t for t in l.split() if t.startswith("tar-remind") and t.endswith(".timer")), None)
+            if unit:
+                sh(["systemctl", "--user", "stop", unit])
+        return "cancelled %d reminder(s)" % len(rows)
+    return ("%d reminder(s):\n" % len(rows) + "\n".join(" ".join(l.split()[:4]) for l in rows)) \
+        if rows else "no reminders set"
+
+
+STOPWATCH = os.path.join(DATA, "stopwatch.json")
+
+
+def a_stopwatch(args):
+    act = (args.get("action") or "status").lower()
+    try:
+        with open(STOPWATCH, encoding="utf-8") as f:
+            sw = json.load(f)
+    except (OSError, ValueError):
+        sw = {}
+    if act == "start":
+        json.dump({"start": time.time()}, open(STOPWATCH, "w"))
+        return "stopwatch started"
+    if not sw.get("start"):
+        return "the stopwatch isn't running"
+    el = time.time() - sw["start"]
+    txt = "%d:%02d" % (el // 60, el % 60)
+    if act in ("stop", "reset"):
+        os.remove(STOPWATCH)
+        return "stopwatch stopped at " + txt
+    return "stopwatch: " + txt
+
+
+# -- desktop ------------------------------------------------------------------------
+def a_keyboard(args):
+    act = (args.get("action") or "next").lower()
+    if act in ("next", "switch", "change", "toggle"):
+        sh(["hyprctl", "switchxkblayout", "all", "next"])
+    rc, o = sh(["hyprctl", "-j", "devices"])
+    try:
+        kb = next(k for k in json.loads(o)["keyboards"] if k.get("main"))
+        return "keyboard layout: " + kb.get("active_keymap", "?")
+    except (ValueError, KeyError, StopIteration, TypeError):
+        return "switched keyboard layout"
+
+
+def a_keep_awake(args):
+    mins = max(1, min(600, _int(args.get("minutes"), 60)))
+    sh(["systemd-inhibit", "--what=idle:sleep", "--who=T.A.R.", "--why=user asked",
+        "sleep", str(mins * 60)], detach=True)
+    return "keeping the screen awake for %d min" % mins
+
+
+def a_snip(args):
+    """Screenshot of a region (drag to select) or the focused window, to Pictures."""
+    what = (args.get("what") or "region").lower()
+    pics = xdg_dir("pictures") or os.path.expanduser("~")
+    out = os.path.join(pics, time.strftime("tar-shot-%Y%m%d-%H%M%S.png"))
+    if "window" in what:
+        w = target_window(args)
+        if not w:
+            return "no window to capture"
+        (x, y), (ww, hh) = w["at"], w["size"]
+        rc, o = sh(["grim", "-g", "%d,%d %dx%d" % (x, y, ww, hh), out])
+    else:
+        rc, g = sh(["slurp"], timeout=60)
+        if rc != 0 or not g:
+            return "cancelled"
+        rc, o = sh(["grim", "-g", g, out])
+    if rc == 0 and os.path.exists(out):
+        return "saved %s -- VERIFIED" % out
+    return "screenshot failed"
+
+
+# -- communication ------------------------------------------------------------------
+def a_email(args):
+    """Open a Gmail draft (to=, subject=, body=) -- the user presses send."""
+    to = (args.get("to") or "").strip()
+    if to and "@" not in to:
+        return ("need %s's actual email address -- ask the user for it (never guess "
+                "one). Or leave to= empty and they fill it in." % to)
+    url = "https://mail.google.com/mail/?view=cm&fs=1&to=%s&su=%s&body=%s" % (
+        urlquote(args.get("to") or ""), urlquote(args.get("subject") or ""),
+        urlquote(args.get("body") or ""))
+    prof = resolve_profile(args.get("profile")) if args.get("profile") else None
+    return open_url(url, prof) + " -- draft ready, the user reviews and presses Send"
+
+
+def a_whatsapp(args):
+    """Open a WhatsApp Web chat (phone= with country code, text=) -- user presses send."""
+    phone = re.sub(r"[^\d]", "", args.get("phone") or "")
+    url = "https://web.whatsapp.com/send?%stext=%s" % (
+        ("phone=%s&" % phone) if phone else "", urlquote(args.get("text") or ""))
+    return open_url(url) + " -- message filled in, the user presses Send"
+
+
 # ---- shell: the cloud brain's general-purpose hands -----------------------
 # Runs a command and RETURNS its output, so the model can look things up and
 # act on anything there is no dedicated action for. Cloud-only (the small local
@@ -2866,7 +3397,8 @@ ACTIONS = {
                    []),
     # --- real work
     "notify":     (a_notify, "desktop notification (text=, title=)", []),
-    "remind":     (a_remind, "reminder/timer: minutes=/seconds=/hours= or in='10m', text=",
+    "remind":     (a_remind, "reminder/timer/alarm: minutes=/seconds=/hours= or in='10m' or "
+                           "at='18:30', text=",
                    [r"^remind me in (?P<in>\d+\s*(?:m|min|minutes?|s|sec|seconds?|h|hours?)) (?:to |that |about )?(?P<text>.+)$",
                     r"^(?:set )?(?:a )?timer (?:for )?(?P<in>\d+\s*(?:m|min|minutes?|s|sec|seconds?|h|hours?))$"]),
     "wifi":       (a_wifi, "wifi: state=on|off|status|list, or state=connect ssid= password=",
@@ -2946,6 +3478,54 @@ ACTIONS = {
     "monitors":   (a_monitors, "list connected monitors", [r"^(?:what|which|how many) monitors?.*$"]),
     "confirm":    (a_confirm, "(user-only) run the action waiting for confirmation", []),
     "cancel":     (a_cancel, "(user-only) drop the action waiting for confirmation", []),
+    "devices":    (a_devices, "everything connected: sound outputs, mics, cameras, keyboards, mice, "
+                            "usb, drives, screens, bluetooth",
+                   [r"^(?:connected )?devices$", r"^what'?s (?:connected|plugged in)$",
+                    r"^what devices are (?:connected|plugged in)$"]),
+    "audio_out":  (a_audio_out, "list sound outputs, or switch with to=headphones/speakers/hdmi", []),
+    "mic":        (a_mic, "microphone: state=mute|unmute|toggle, to=<name> to switch, or list",
+                   [r"^(?P<state>mute|unmute) (?:my |the )?mic(?:rophone)?$"]),
+    "disk":       (a_disk, "disk space left, or path= to measure a folder's size",
+                   [r"^disk space$", r"^how much (?:disk |storage )?space (?:do i have|is left)$"]),
+    "temps":      (a_temps, "CPU / drive temperatures and fans",
+                   [r"^(?:cpu )?temps?$", r"^(?:cpu )?temperatures?$"]),
+    "network":    (a_network, "IP address, router, whether internet and DNS work, wifi", []),
+    "updates":    (a_updates, "check for system/AUR updates (installing needs the user)",
+                   [r"^(?:any )?updates\??$", r"^check (?:for )?updates$"]),
+    "installed":  (a_installed, "is an app installed (q=), or list installed apps", []),
+    "minimize":   (a_minimize, "minimize a window (what=, else the last used)",
+                   [r"^minimi[sz]e (?P<what>it|that|this|[\w-]+)$"]),
+    "unminimize": (a_unminimize, "bring minimized windows back (what= optional)", []),
+    "layout":     (a_layout, "what=split toggles split direction; what=monitor moves the window "
+                             "to the next monitor", []),
+    "browser":    (a_browser, "browser controls on the open browser: action=tab q=<title> (switch "
+                              "to a tab), tabs (list them), new_tab, reopen_tab, reload, back, "
+                              "forward, next_tab, prev_tab, find text=, zoom_in, zoom_out, "
+                              "zoom_reset, private, bookmark", []),
+    "file_info":  (a_file_info, "size / type / modified date of a file or folder: path=", []),
+    "recent":     (a_recent, "files changed recently: days= (default 1), where=", []),
+    "write_file": (a_write_file, "create a text file: path=, text= (append=true to add; "
+                                 "overwriting asks the user)", []),
+    "note":       (a_note, "save a quick note: text=",
+                   [r"^(?:take a )?note[: ]+(?P<text>.+)$"]),
+    "notes":      (a_notes, "read back saved notes", [r"^(?:my |show (?:my )?|read (?:my )?)notes$"]),
+    "archive":    (a_archive, "zip (action=zip path=, to=) or unzip/extract (path=archive, to=)", []),
+    "empty_trash": (a_empty_trash, "permanently empty the trash (asks the user first)", []),
+    "open_with":  (a_open_with, "open a file with a specific app: path=, app=", []),
+    "now_playing": (a_now_playing, "what song/video is playing",
+                    [r"^what'?s playing$", r"^what song is this$", r"^now playing$"]),
+    "seek":       (a_seek, "media: by=+10 / -10 seconds, or to=<seconds>", []),
+    "reminders":  (a_reminders, "list reminders, or action=cancel to cancel them all",
+                   [r"^(?:my |list |show )?reminders$"]),
+    "stopwatch":  (a_stopwatch, "stopwatch: action=start|status|stop",
+                   [r"^(?P<action>start|stop) (?:the |a )?stopwatch$"]),
+    "keyboard":   (a_keyboard, "switch keyboard layout (action=next) or show it (action=show)",
+                   [r"^(?:switch|change) (?:the )?(?:keyboard|language|layout)$"]),
+    "keep_awake": (a_keep_awake, "stop the screen sleeping for minutes= (default 60)", []),
+    "snip":       (a_snip, "screenshot what=region (drag to pick) or what=window, saved to Pictures", []),
+    "email":      (a_email, "open a Gmail draft: to=, subject=, body= (user presses Send)", []),
+    "whatsapp":   (a_whatsapp, "open a WhatsApp Web chat: phone= (with country code), text= "
+                               "(user presses Send)", []),
     "shell":      (a_shell, "run ANY shell command (bash, as the user, in ~) and get its "
                             "output back -- for anything no other action covers: "
                             "files, settings, network, bluetooth, notifications, "
@@ -3172,7 +3752,7 @@ def match(text):
     return None, None
 
 
-_PRIORITY = ("focus", "coin", "dice", "record", "remind", "wifi", "bluetooth", "dnd", "nightlight", "power",
+_PRIORITY = ("devices", "now_playing", "note", "stopwatch", "focus", "coin", "dice", "record", "remind", "wifi", "bluetooth", "dnd", "nightlight", "power",
              "play", "weather", "datetime", "battery", "calc", "processes",
              "colorpick", "cliphist")
 
