@@ -497,6 +497,12 @@ SITES = {
     "chatgpt": "https://chatgpt.com/", "claude": "https://claude.ai/",
     "gemini": "https://gemini.google.com/", "whatsapp": "https://web.whatsapp.com/",
     "discord web": "https://discord.com/app", "spotify web": "https://open.spotify.com/",
+    "cookie clicker": "https://orteil.dashnet.org/cookieclicker/",
+    "2048": "https://play2048.co/", "chess": "https://www.chess.com/play/computer",
+    "wordle": "https://www.nytimes.com/games/wordle/", "monkeytype": "https://monkeytype.com/",
+    "google docs": "https://docs.google.com/", "google drive": "https://drive.google.com/",
+    "maps": "https://maps.google.com/", "google maps": "https://maps.google.com/",
+    "translate": "https://translate.google.com/", "google translate": "https://translate.google.com/",
 }
 
 
@@ -512,6 +518,14 @@ def a_open(args):
     what = re.sub(r"^(?:the|a|an|my|some)\s+", "", what, flags=re.I).strip()
     what = re.sub(r"\s+(?:please|now|for me|on it|in it)$", "", what,
                   flags=re.I).strip()
+    # "cookie clicker on chrome" -> the site, opened in chrome
+    want_browser = None
+    mb = re.search(r"\s+(?:on|in|with|using)\s+(?:my\s+|the\s+)?(chrome|google chrome|firefox|"
+                   r"the browser|browser|chromium)$", what, flags=re.I)
+    if mb:
+        want_browser = {"chrome": "google-chrome-stable", "google chrome": "google-chrome-stable",
+                        "firefox": "firefox", "chromium": "chromium"}.get(mb.group(1).lower())
+        what = what[:mb.start()].strip()
     low = what.lower()
 
     # "open my browser": use the one that's already open, else the preferred
@@ -539,7 +553,9 @@ def a_open(args):
 
     if re.match(r"^(https?://|www\.)", low):
         url = what if low.startswith("http") else "https://" + what
-        sh(["xdg-open", url], detach=True)
+        b = (want_browser if want_browser and shutil.which(want_browser)
+             else preferred_browser())
+        sh([b, url] if b else ["xdg-open", url], detach=True)
         return "opening " + url[:60]
 
     # "open downloads" -> the (Hebrew-named) XDG folder
@@ -551,8 +567,10 @@ def a_open(args):
     # "open youtube" is a website, not a binary
     site = SITES.get(low) or SITES.get(re.sub(r"\.com$", "", low))
     if site:
-        sh(["xdg-open", site], detach=True)
-        return "opening " + site.split("//")[1].rstrip("/")
+        b = (want_browser if want_browser and shutil.which(want_browser)
+             else preferred_browser())
+        sh([b, site] if b else ["xdg-open", site], detach=True)
+        return "opening %s in %s" % (site.split("//")[1].rstrip("/"), b or "the browser")
 
     path = os.path.expanduser(what)
     if os.path.exists(path):
@@ -1635,7 +1653,19 @@ def _gemini_point(path, target, mon):
             d.get("label") or target), None
 
 
-def _locate(target):
+def _locate(target, tries=3):
+    """Find something on screen, retrying while a page/app is still loading."""
+    loc, err = None, None
+    for i in range(max(1, tries)):
+        loc, err = _locate_once(target)
+        if loc or (err and "vision" in err and "failed" in err):
+            break
+        if i < tries - 1:
+            time.sleep(2.0)
+    return loc, err
+
+
+def _locate_once(target):
     """Find something on screen -> ((x, y, label, how), None) or (None, why).
     OCR first (exact for text buttons), vision second (icons, images)."""
     path = os.path.join(DATA, "screen-look.jpg")
@@ -1740,12 +1770,17 @@ def a_click_on(args):
         if stop:
             return stop
     button = (args.get("button") or "left").lower()
+    times = max(1, min(50, _int(args.get("times"), 1)))
     with _TarHidden():
         _move(x, y)
         time.sleep(0.05)
-        _click(button if button in ("left", "right", "middle") else "left",
-               str(args.get("double", "")).lower() in ("1", "true", "yes"))
-    return "clicked %r at (%d, %d) [found by %s]" % (label[:60], x, y, how)
+        for i in range(times):
+            _click(button if button in ("left", "right", "middle") else "left",
+                   str(args.get("double", "")).lower() in ("1", "true", "yes"))
+            if times > 1:
+                time.sleep(0.12)
+    return "clicked %r%s at (%d, %d) [found by %s]" % (
+        label[:60], (" %d times" % times) if times > 1 else "", x, y, how)
 
 
 def a_click(args):
@@ -2416,14 +2451,18 @@ ACTIONS = {
     "coin":       (a_coin, "flip a coin", [r"^(?:flip a coin|coin ?flip|heads or tails)$"]),
     "dice":       (a_dice, "roll a die: sides= (default 6)",
                    [r"^roll (?:a )?(?:die|dice)$", r"^roll (?:a )?d(?P<sides>\d{1,4})$"]),
-    "play":       (a_play, "play a song/video on youtube: q=. This ALREADY opens and "
-                         "starts the top video -- do NOT click anything afterwards.",
+    "play":       (a_play, "play MUSIC or a VIDEO to watch on youtube: q=. ONLY for "
+                         "songs/videos -- websites and web games (e.g. cookie clicker) "
+                         "go through open/web instead. ALREADY starts the top video -- "
+                         "don't click afterwards.",
                    [r"^play (?P<q>.+) on youtube$"]),
     "look":       (a_look, "LOOK at the screen and answer a question about it (q=). "
                            "Use before clicking if unsure what's there.", []),
     "click_on":   (a_click_on, "CLICK (single/double/right -- it CANNOT press-and-hold) "
                                "something visible on screen by description: "
-                               "target='the subscribe button' (button=right, double=true optional). "
+                               "target='the subscribe button' (button=right, double=true, "
+                               "times=N to click it N times, all optional). Waits a few "
+                               "seconds for a page that's still loading. "
                                "Finds it by text, else by vision.", []),
     "click":      (a_click, "click at exact screen pixels x=, y= (button=, double=)", []),
     "scroll":     (a_scroll, "scroll a window: what=chrome, dir=down|up|left|right, "
@@ -2459,7 +2498,8 @@ ACTIONS = {
                    [r"^copy (?P<text>.+)$"]),
     "dns":        (a_dns, "DNS lookup",
                    [r"^(?:dns|nslookup|lookup|resolve) (?P<host>\S+)$"]),
-    "web":        (a_web, "open a site or search the web (lucky=true opens the first result)",
+    "web":        (a_web, "open a site or search the web (lucky=true opens the first "
+                         "result -- use it to open a named site/web game you don't know the URL of)",
                    [r"^(?:google|search the web for|look up online)(?: up)? (?P<q>.+)$",
                     r"^(?:go to|browse|visit) (?P<q>\S+)$"]),
     "usb":        (a_usb, "list attached removable drives",
@@ -2607,6 +2647,11 @@ def match_all(text):
             if m_:
                 n, a = "web", {"q": m_.group(1).strip().strip('"')}
 
+        if not n and not (carry in BROWSERS):
+            # A step the shortcut can't do ("...and then click the cookie 5
+            # times"). Doing only the first half is worse than not starting:
+            # hand the whole request to the model, which can do every step.
+            return None
         if not n and carry in BROWSERS:
             # The tail has no verb of its own ("... and arch wiki"). Send it to
             # the web action DIRECTLY -- routing it back through match() as

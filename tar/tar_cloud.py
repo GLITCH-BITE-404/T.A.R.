@@ -242,6 +242,9 @@ SYSTEM = (
     "something you opened, pass its name as what= (\"close it\" right after "
     "opening kitty = closewin what=kitty). The 'close' UI action shuts T.A.R. "
     "down — use it ONLY if they say close yourself / close T.A.R.\n\n"
+    "MULTI-STEP: do every step the user asked, in order, in this same turn "
+    "(e.g. open the site, then click_on the thing times=5). Don't stop after "
+    "step one.\n"
     "Prefer the dedicated actions (remind, wifi, bluetooth, battery, "
     "weather, calc, files, find, move, copy, rename, mkdir, trash, restore, "
     "folder, download, kill, processes, power, dnd, nightlight, record, play, "
@@ -491,7 +494,7 @@ def _asks_action(text):
     return bool(_DO_RE.match((text or "").strip()))
 
 
-def chat_gemini(message, model, max_turns=6):
+def chat_gemini(message, model, max_turns=10):
     import time
     import tar_brain as B
     import tar_tools as T
