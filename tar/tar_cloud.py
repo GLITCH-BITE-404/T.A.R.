@@ -255,6 +255,9 @@ SYSTEM = (
     "name what you see. Typing into "
     "a field -> type_into. Scrolling -> scroll with what=<window>. Never fake "
     "a click with key presses. 'ask claude ...' -> ask_claude.\n"
+    "ALWAYS TRY: tools get installed and things change during a chat. If the "
+    "user asks for something, call the action again -- never just repeat an "
+    "earlier failure or 'I can't' from the conversation.\n"
     "HONESTY: never invent personal info (emails, passwords, names, "
     "addresses) -- ask, or use what's in memory. Only say you did something "
     "if an action result shows it worked; if a result says it failed or "
@@ -443,6 +446,22 @@ def _claims_action(text):
     return bool(_CLAIM_RE.search(text or ""))
 
 
+# The user asked for something to HAPPEN (not a question about it).
+_DO_RE = None
+
+
+def _asks_action(text):
+    global _DO_RE
+    import re
+    if _DO_RE is None:
+        _DO_RE = re.compile(
+            r"^(?:(?:hey |yo |ok |okay |so |pls |please )*(?:can|could|would|will) "
+            r"(?:you|u|ya) |please |pls )?(?:click|press|tap|hit|open|close|type|"
+            r"scroll|launch|start|play|pause|turn|set|move|send|search|find|show|"
+            r"take|mute|switch|focus|drag|select|copy|paste|run|kill|lock)\b", re.I)
+    return bool(_DO_RE.match((text or "").strip()))
+
+
 def chat_gemini(message, model, max_turns=6):
     import time
     import tar_brain as B
@@ -496,6 +515,16 @@ def chat_gemini(message, model, max_turns=6):
 
         # Honesty check: claims to have acted, but nothing ran this turn?
         said = "".join(p.get("text", "") for p in parts if not p.get("thought"))
+        if not calls and not acted and not nudged and _asks_action(message):
+            # asked to DO something, answered without even trying -- usually
+            # parroting an old "I can't" from history. Make it actually try.
+            nudged = True
+            contents.append(content)
+            contents.append({"role": "user", "parts": [{"text": (
+                "[system check] You didn't call any action. The user asked you "
+                "to do this NOW -- call the action and report its real result. "
+                "Earlier failures in this chat may no longer apply.")}]})
+            continue
         if not calls and not acted and not nudged and _claims_action(said):
             nudged = True
             contents.append(content)
