@@ -1186,7 +1186,13 @@ def _act_block():
 
 
 def _speak(text):
-    """Fire TTS if the user has it on and an engine is actually wired."""
+    """Fire TTS if the user has it on and an engine is actually wired.
+
+    The UI speaks replies itself (it has the volume, the stop button, and
+    cancels the previous line). Speaking here as well made every reply play
+    twice, overlapping -- so the brain only speaks when run without the UI."""
+    if not os.environ.get("TAR_BRAIN_SPEAKS"):
+        return
     cfg = config()
     if not cfg.get("speak") or not text:
         return

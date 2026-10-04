@@ -11,11 +11,41 @@
 # so even a correctly installed piper silently fell through to "no TTS".
 set -uo pipefail
 
+DATA="${TAR_DATA:-${XDG_DATA_HOME:-$HOME/.local/share}/bite-os/tar}"
+PIDF="$DATA/tts.pid"
+
+# Run as our own process group so the WHOLE pipeline (piper + player) can be
+# stopped at once -- killing just this script left the audio playing, so a
+# new reply talked over the old one.
+if [[ "${TAR_SAY_LEADER:-}" != 1 ]]; then
+    TAR_SAY_LEADER=1 exec setsid -w bash "$(readlink -f "$0")" "$@"
+fi
+
+stop_previous() {
+    local prev
+    prev="$(cat "$PIDF" 2>/dev/null)"
+    [[ -n "$prev" && "$prev" != "$$" ]] && kill -- "-$prev" 2>/dev/null
+}
+
+if [[ "${1:-}" == "--stop" ]]; then
+    stop_previous; rm -f "$PIDF"; exit 0
+fi
+
 TEXT="${1:-}"
 VOL="${2:-0.7}"
 [[ -z "$TEXT" ]] && exit 0
 
-DATA="${TAR_DATA:-${XDG_DATA_HOME:-$HOME/.local/share}/bite-os/tar}"
+stop_previous                       # one voice at a time
+mkdir -p "$DATA" && echo $$ > "$PIDF"
+trap '[[ "$(cat "$PIDF" 2>/dev/null)" == "$$" ]] && rm -f "$PIDF"' EXIT
+
+# Speakable text: drop markdown symbols and URLs, and put each sentence on its
+# own line -- piper synthesizes line by line, so audio starts after the first
+# sentence instead of after the whole reply.
+TEXT="$(printf '%s' "$TEXT" \
+    | sed -E 's#https?://[^ )]+#a link#g; s/[*_`#>|~]+//g; s/\[([^]]*)\]\([^)]*\)/\1/g' \
+    | sed -E 's/([.!?])[[:space:]]+/\1\n/g')"
+
 CONF="$DATA/config.json"
 VOICE_DIR="$DATA/voices"
 

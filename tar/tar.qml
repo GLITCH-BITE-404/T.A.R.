@@ -1259,6 +1259,7 @@ Item {
     }
 
     function stopGeneration() {
+        window.shutUp();
         if (!brain.running && !window.busy) return;
         brain.running = false;
         window.busy = false;
@@ -1303,10 +1304,18 @@ Item {
         tts.say = text;
         tts.running = true;
     }
+    // cut T.A.R. off mid-sentence (new message, stop button)
+    Process {
+        id: ttsStop
+        command: ["bash", Quickshell.env("HOME")
+                  + "/.config/hypr/scripts/quickshell/tar/tar_say.sh", "--stop"]
+    }
+    function shutUp() { ttsStop.running = false; ttsStop.running = true; }
 
     function submit(raw) {
         var text = (raw || "").trim();
         if (text === "" || window.busy) return;
+        window.shutUp();                // stop talking when you start typing
         input.text = "";
         cmdModel.clear();
 
