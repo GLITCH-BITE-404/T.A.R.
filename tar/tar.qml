@@ -452,6 +452,10 @@ Item {
     function playUiAction(name, d) {
         if (name === "close")           { window.close(); return; }
         if (name === "newchat")         { window.newSession(); return; }
+        if (name === "setup")           { window.viewMode = "chat"; window.historyOpen = false;
+                                          window.settingsOpen = true; window.capsRefresh(); return; }
+        if (name === "console")         { window.consoleOpen = !window.consoleOpen; return; }
+        if (name === "chats")           { window.openHistory(); return; }
         if (name === "collapse" || name === "compact") {
             window.viewMode = "orb";
             window.settingsOpen = false; window.historyOpen = false;

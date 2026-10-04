@@ -1488,6 +1488,17 @@ def _int(v, default):
 
 
 # ---- eyes and hands: screen, OCR, vision, pointer ---------------------------
+# power controls: never pressed by clicking -- the power action asks first
+_POWER_CLICK = re.compile(r"\b(restart|reboot|shut ?down|power ?off|power button|power icon|"
+                          r"turn off|sleep|suspend|hibernate|log ?out|sign ?out)\b", re.I)
+# T.A.R.'s own buttons: hidden while it looks, so press them directly
+_SELF_UI = [
+    (re.compile(r"\b(setup|set up|settings|config(?:uration)?)\b", re.I), "setup"),
+    (re.compile(r"\bconsole\b", re.I), "console"),
+    (re.compile(r"\b(chats|history|past chats)\b", re.I), "chats"),
+    (re.compile(r"\bchat (?:mode|button|view)\b", re.I), "expand"),
+    (re.compile(r"\borb(?: mode| button| view)?\b", re.I), "collapse"),
+]
 _RISKY_CLICK = re.compile(
     r"\b(delete|remove|erase|wipe|uninstall|format|buy|purchase|pay|checkout|"
     r"order|subscribe|unsubscribe|send|post|publish|submit|confirm|transfer|"
@@ -1603,9 +1614,12 @@ def _gemini_image(path, prompt):
 def _gemini_point(path, target, mon):
     txt, err = _gemini_image(path, (
         "This is a screenshot. Find: %s\nReply with ONLY JSON: "
-        "{\"found\": true, \"point\": [y, x], \"label\": \"what it is\"} with y and x "
-        "normalized 0-1000 to the CENTER of it, or {\"found\": false, \"why\": "
-        "\"...\"} if it is not visible." % target))
+        "{\"found\": true, \"point\": [y, x], \"label\": \"...\"} with y and x "
+        "normalized 0-1000 to the CENTER of it. label = what is ACTUALLY at that "
+        "spot in your own words (its visible text, or the icon, e.g. 'restart "
+        "icon', 'gear icon'), NOT a copy of the request. If only something "
+        "different-but-similar is there, return it with its real label. Or "
+        "{\"found\": false, \"why\": \"...\"} if nothing fits." % target))
     if err:
         return None, err
     m = re.search(r"\{.*\}", txt or "", re.S)
@@ -1697,6 +1711,17 @@ def a_click_on(args):
     if not vague:
         return ("too vague to click safely (%r). Use look first to see what's "
                 "there, then click_on its actual label." % target)
+    # "your setup button": T.A.R. can't see itself, so press its own UI directly
+    if re.search(r"\b(your|tar'?s|t\.a\.r\.?'?s)\b", target, re.I) or \
+            re.fullmatch(r"(?:the )?(setup|settings|console|chats|history)(?: button| tab| panel)?",
+                         target.strip(), re.I):
+        for pat, ui in _SELF_UI:
+            if pat.search(target):
+                emit("ui", action=ui)
+                return "opened T.A.R.'s own %s (pressed directly -- it isn't on the screenshot)" % ui
+    if _POWER_CLICK.search(target):
+        return ("not clicking power controls -- use the power action instead "
+                "(action=restart/shutdown/suspend/logout); it asks the user to confirm")
     if not _pointer_ok():
         return _NO_POINTER
     if _RISKY_CLICK.search(target):
@@ -1707,6 +1732,9 @@ def a_click_on(args):
     if not loc:
         return err
     x, y, label, how = loc
+    if _POWER_CLICK.search(label):
+        return ("that turned out to be a power control (%r) -- not clicking it. "
+                "Use the power action if the user wants that; it asks to confirm." % label)
     if _RISKY_CLICK.search(label) and not args.get("_confirmed") and not DIRECT:
         stop = needs_confirm("click_on", args, "click %r (found %r)" % (target, label))
         if stop:
@@ -2173,6 +2201,9 @@ UI_ACTIONS = {
     "collapse":  "shrink the panel back to the orb",
     "close":     "close T.A.R. ITSELF -- only when the user says close yourself/tar",
     "newchat":   "start a new, empty chat (old ones stay in CHATS)",
+    "setup":     "open T.A.R.'s own SETUP pane",
+    "console":   "toggle T.A.R.'s console (models, voice, memory)",
+    "chats":     "open T.A.R.'s past chats",
     # visual effects (TarFx layer) -- fine to use for fun or to celebrate
     "shock":     "fx: shockwave ring",
     "flash":     "fx: white flash",
@@ -2390,7 +2421,8 @@ ACTIONS = {
                    [r"^play (?P<q>.+) on youtube$"]),
     "look":       (a_look, "LOOK at the screen and answer a question about it (q=). "
                            "Use before clicking if unsure what's there.", []),
-    "click_on":   (a_click_on, "CLICK something visible on screen by description: "
+    "click_on":   (a_click_on, "CLICK (single/double/right -- it CANNOT press-and-hold) "
+                               "something visible on screen by description: "
                                "target='the subscribe button' (button=right, double=true optional). "
                                "Finds it by text, else by vision.", []),
     "click":      (a_click, "click at exact screen pixels x=, y= (button=, double=)", []),
