@@ -1,0 +1,147 @@
+{
+  "_comment": "T.A.R. model registry. Tiers are chosen from AVAILABLE ram (not total), because the rice + browser already eat most of it. 'safe' = stock instruct tunes, 'open' = abliterated/uncensored tunes that don't refuse on security/tooling code. Sizes are on-disk GB of the model layer.",
+  "tiers": {
+    "tiny": {
+      "min_avail_gb": 0.0,
+      "desc": "Potato / heavy multitasking. Fast but dumb.",
+      "safe": {
+        "model": "qwen2.5:0.5b",
+        "size_gb": 0.4
+      },
+      "open": {
+        "model": "huihui_ai/llama3.2-abliterate:1b",
+        "size_gb": 0.96
+      },
+      "num_ctx": 2048
+    },
+    "light": {
+      "min_avail_gb": 1.5,
+      "desc": "Laptop with the full rice running. Good chat, weak reasoning.",
+      "safe": {
+        "model": "qwen2.5:1.5b",
+        "size_gb": 0.99
+      },
+      "open": {
+        "model": "huihui_ai/qwen2.5-abliterate:1.5b",
+        "size_gb": 0.99
+      },
+      "num_ctx": 2048
+    },
+    "mid": {
+      "min_avail_gb": 3.0,
+      "desc": "Roomy laptop / light desktop. Solid general assistant.",
+      "safe": {
+        "model": "llama3.2:3b",
+        "size_gb": 2.02
+      },
+      "open": {
+        "model": "huihui_ai/llama3.2-abliterate:3b",
+        "size_gb": 2.24
+      },
+      "num_ctx": 4096
+    },
+    "heavy": {
+      "min_avail_gb": 6.0,
+      "desc": "Gaming rig. Real code review, actually follows instructions.",
+      "safe": {
+        "model": "qwen2.5-coder:7b",
+        "size_gb": 4.68
+      },
+      "open": {
+        "model": "huihui_ai/qwen2.5-coder-abliterate:7b",
+        "size_gb": 4.68
+      },
+      "num_ctx": 8192
+    }
+  },
+  "tasks": {
+    "_comment": "Task-aware routing. The RAM tier sets the CEILING and the task sets the PREFERENCE inside it: the first model in `prefer` that is already pulled AND fits the budget wins. num_ctx is deliberately NOT varied per task -- changing it forces ollama to reload the model, and an oversized KV cache on a CPU-only box is the single biggest cause of slow replies.",
+    "code": {
+      "desc": "Writing, reading or debugging code, configs, shell, QML.",
+      "prefer": [
+        "qwen2.5-coder:7b",
+        "qwen2.5-coder:3b"
+      ],
+      "temperature": 0.25
+    },
+    "vision": {
+      "desc": "Anything with an image attached (camera frame, screenshot).",
+      "prefer": [
+        "moondream:1.8b",
+        "qwen2-vl:2b",
+        "llava:7b"
+      ],
+      "temperature": 0.3,
+      "requires_vision": true
+    },
+    "quick": {
+      "desc": "One-liners, yes/no, a fact, a command name. Latency beats depth.",
+      "prefer": [
+        "qwen2.5:1.5b",
+        "huihui_ai/qwen2.5-abliterate:1.5b",
+        "qwen2.5:0.5b"
+      ],
+      "temperature": 0.4
+    },
+    "chat": {
+      "desc": "Default. General conversation and system questions.",
+      "prefer": [],
+      "temperature": 0.6
+    }
+  },
+  "model_sizes": {
+    "_comment": "Size lookup for models that only appear in tasks.prefer, so the budget check works without them being a tier or an extra.",
+    "moondream:1.8b": 1.7,
+    "qwen2-vl:2b": 2.2,
+    "llava:7b": 4.7
+  },
+  "extras": {
+    "_comment": "Hand-pickable alternates, not auto-selected. Use: tar_brain.py set-model <model>",
+    "dolphin3:8b": {
+      "size_gb": 4.92,
+      "lane": "open",
+      "desc": "Dolphin 3.0 on Llama 3.1 8B. Very compliant, chatty."
+    },
+    "dolphin-mistral:7b": {
+      "size_gb": 4.11,
+      "lane": "open",
+      "desc": "Classic uncensored Mistral. Older but light."
+    },
+    "mannix/llama3.1-8b-abliterated:latest": {
+      "size_gb": 4.68,
+      "lane": "open",
+      "desc": "Abliterated Llama 3.1 8B, good general reasoning."
+    },
+    "huihui_ai/qwen2.5-abliterate:7b": {
+      "size_gb": 4.68,
+      "lane": "open",
+      "desc": "General (non-coder) abliterated Qwen 7B."
+    },
+    "hermes3:8b": {
+      "size_gb": 4.66,
+      "lane": "open",
+      "desc": "Hermes 3, steerable and light on refusals."
+    },
+    "qwen2.5-coder:3b": {
+      "size_gb": 1.93,
+      "lane": "safe",
+      "desc": "Already on this box. Code-focused but refuses sometimes."
+    }
+  },
+  "speed": {
+    "_comment": "Adaptive speed governor. tar_brain records first-token latency per (model, num_ctx) in perf.json and demotes itself when it busts the budget: first by halving num_ctx, then by dropping to the next faster model in `ladder`. Set config `speed` to fast|auto|quality.",
+    "first_token_budget_ms": 6000,
+    "hard_budget_ms": 15000,
+    "min_ctx": 1024,
+    "samples_before_demote": 2,
+    "ladder": [
+      "qwen2.5:0.5b",
+      "huihui_ai/llama3.2-abliterate:1b",
+      "huihui_ai/qwen2.5-abliterate:1.5b",
+      "qwen2.5:1.5b",
+      "qwen2.5-coder:3b",
+      "huihui_ai/llama3.2-abliterate:3b"
+    ],
+    "keep_alive": "30m"
+  }
+}

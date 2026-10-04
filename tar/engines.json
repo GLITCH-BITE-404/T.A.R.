@@ -1,0 +1,228 @@
+{
+  "_comment": "T.A.R. capability/engine registry. Every capability that needs software T.A.R. does NOT ship is declared here. The UI reads `tar_caps.py caps` and locks anything with no installed engine behind a wall; the two wall buttons map to `engines <cap>` (ask the LLM to pick one) and `connect <cap>` (LLM searches + wires whatever is present). Package names verified against CachyOS/Arch repos + AUR on 2026-09-26. size_mb is download+install footprint, approximate.",
+  "capabilities": {
+    "tts": {
+      "label": "Speech out",
+      "blurb": "Lets T.A.R. talk back out loud.",
+      "icon": "󰓃",
+      "device_kind": "sink",
+      "engines": {
+        "piper": {
+          "bin": [
+            "piper-tts",
+            "piper"
+          ],
+          "pkg": "piper-tts-bin",
+          "source": "aur",
+          "size_mb": 110,
+          "quality": "neural",
+          "needs_voice": true,
+          "recommended": true,
+          "desc": "Neural TTS. Sounds like a real voice, not a robot. Needs a voice file (auto-fetched)."
+        },
+        "espeak-ng": {
+          "bin": "espeak-ng",
+          "pkg": "espeak-ng",
+          "source": "repo",
+          "size_mb": 12,
+          "quality": "robotic",
+          "recommended": false,
+          "desc": "Tiny and instant. Unmistakably a 1980s robot. Good fallback / good for a JARVIS-ish bite."
+        },
+        "flite": {
+          "bin": "flite",
+          "pkg": "flite",
+          "source": "repo",
+          "size_mb": 32,
+          "quality": "basic",
+          "recommended": false,
+          "desc": "Festival-lite. Small, slightly warmer than espeak."
+        },
+        "festival": {
+          "bin": "festival",
+          "pkg": "festival",
+          "source": "repo",
+          "size_mb": 96,
+          "quality": "basic",
+          "recommended": false,
+          "desc": "Older full TTS stack. Heavier than flite for little gain."
+        }
+      }
+    },
+    "stt": {
+      "label": "Microphone / speech in",
+      "blurb": "Lets you talk to T.A.R. instead of typing.",
+      "icon": "󰍬",
+      "device_kind": "source",
+      "engines": {
+        "whisper-cpp": {
+          "bin": [
+            "whisper-cli",
+            "whisper-cpp",
+            "main"
+          ],
+          "pkg": "whisper-cpp",
+          "source": "repo",
+          "size_mb": 4,
+          "model_mb": 78,
+          "quality": "good",
+          "needs_model": true,
+          "recommended": true,
+          "desc": "Whisper in C++. Accurate, offline, runs fine on CPU. Needs a model file (base.en ~78MB, auto-fetched)."
+        },
+        "vosk": {
+          "bin": [
+            "vosk-transcriber"
+          ],
+          "pkg": "vosk-api python-vosk",
+          "source": "repo",
+          "size_mb": 40,
+          "model_mb": 50,
+          "quality": "ok",
+          "needs_model": true,
+          "recommended": false,
+          "desc": "Lighter than Whisper and truly streaming, but less accurate. Good on a potato."
+        }
+      }
+    },
+    "camera": {
+      "label": "Camera",
+      "blurb": "Lets T.A.R. open a live view or grab a still.",
+      "icon": "󰄀",
+      "device_kind": "video",
+      "engines": {
+        "ffmpeg": {
+          "bin": "ffmpeg",
+          "pkg": "ffmpeg",
+          "source": "repo",
+          "size_mb": 0,
+          "quality": "good",
+          "recommended": true,
+          "desc": "Grabs stills and clips off /dev/video*. Already on this box."
+        },
+        "mpv": {
+          "bin": "mpv",
+          "pkg": "mpv",
+          "source": "repo",
+          "size_mb": 0,
+          "quality": "good",
+          "recommended": true,
+          "desc": "Live camera window. Already on this box."
+        }
+      }
+    },
+    "vision": {
+      "label": "Eyes (image understanding)",
+      "blurb": "Lets T.A.R. actually describe what the camera or a screenshot shows.",
+      "icon": "󰋩",
+      "device_kind": null,
+      "engines": {
+        "moondream": {
+          "ollama_model": "moondream:1.8b",
+          "size_mb": 1700,
+          "quality": "ok",
+          "recommended": true,
+          "desc": "Tiny vision model. Fits this 7GB box alongside the rice. Describes scenes and reads big text."
+        },
+        "llava-7b": {
+          "ollama_model": "llava:7b",
+          "size_mb": 4700,
+          "quality": "good",
+          "recommended": false,
+          "desc": "Much sharper, but 4.7GB will fight the rice for RAM on this machine."
+        },
+        "qwen2vl-2b": {
+          "ollama_model": "qwen2-vl:2b",
+          "size_mb": 2200,
+          "quality": "good",
+          "recommended": false,
+          "desc": "Better OCR than moondream, a bit heavier."
+        }
+      }
+    },
+    "wakeword": {
+      "label": "Wake word",
+      "blurb": "Always-listening \"hey tar\" trigger. Needs the mic working first.",
+      "icon": "󱦠",
+      "device_kind": "source",
+      "requires": [
+        "stt"
+      ],
+      "engines": {
+        "openwakeword": {
+          "bin": "openwakeword",
+          "pkg": "python-openwakeword",
+          "source": "aur",
+          "size_mb": 90,
+          "quality": "ok",
+          "recommended": true,
+          "desc": "Small always-on wake-word spotter. Custom phrases supported."
+        }
+      }
+    },
+    "cloud": {
+      "label": "Cloud brain",
+      "blurb": "Swap the local model for Claude over the API. Far smarter and far faster than anything this machine can run locally — needs an API key and costs money per use.",
+      "icon": "",
+      "device_kind": null,
+      "engines": {
+        "anthropic": {
+          "bin": null,
+          "python_module": "anthropic",
+          "pkg": "anthropic",
+          "source": "pip",
+          "size_mb": 28,
+          "quality": "neural",
+          "needs_key": true,
+          "recommended": true,
+          "desc": "Official Anthropic SDK. Installed into T.A.R.'s own venv, never the system python."
+        }
+      }
+    }
+  },
+  "voices": {
+    "_comment": "Piper voice files, fetched on demand into ~/.local/share/bite-os/tar/voices/.",
+    "en_US-lessac-medium": {
+      "size_mb": 63,
+      "recommended": true,
+      "desc": "Neutral US male. Calm, butler-ish. Good default for T.A.R.",
+      "url": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx",
+      "config_url": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json"
+    },
+    "en_GB-alan-medium": {
+      "size_mb": 63,
+      "recommended": false,
+      "desc": "British male. The closest thing to actual JARVIS.",
+      "url": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_GB/alan/medium/en_GB-alan-medium.onnx",
+      "config_url": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_GB/alan/medium/en_GB-alan-medium.onnx.json"
+    },
+    "en_US-amy-medium": {
+      "size_mb": 63,
+      "recommended": false,
+      "desc": "US female, warm and clear.",
+      "url": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium/en_US-amy-medium.onnx",
+      "config_url": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium/en_US-amy-medium.onnx.json"
+    }
+  },
+  "stt_models": {
+    "_comment": "whisper.cpp GGML models, fetched into ~/.local/share/bite-os/tar/stt/.",
+    "base.en": {
+      "size_mb": 148,
+      "recommended": true,
+      "desc": "English-only base. Best accuracy-per-MB for dictation on CPU.",
+      "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin"
+    },
+    "tiny.en": {
+      "size_mb": 78,
+      "recommended": false,
+      "desc": "Half the size, noticeably worse on names and jargon.",
+      "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin"
+    },
+    "small.en": {
+      "size_mb": 488,
+      "recommended": false,
+      "desc": "Clearly better, but slow on a CPU-only 7GB box.",
+      "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin"
+    }
+  }
+}
