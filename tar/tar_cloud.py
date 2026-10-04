@@ -485,7 +485,61 @@ def gemini_tools():
     }]}]
 
 
+# Free tier: each model has its OWN daily request quota. When one runs out,
+# fall through to the next instead of going dead for the rest of the day.
+FALLBACK_CHAIN = ["gemini-flash-lite-latest", "gemini-3.1-flash-lite", "gemini-3.5-flash",
+                  "gemini-flash-latest", "gemini-3.6-flash"]
+QUOTA_FILE = os.path.join(DATA, "quota-exhausted.json")
+
+
+def _exhausted():
+    try:
+        with open(QUOTA_FILE, encoding="utf-8") as f:
+            d = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    import time
+    return {m: t for m, t in d.items() if t > time.time()}
+
+
+def _mark_exhausted(model, retry_s):
+    import time
+    d = _exhausted()
+    d[model] = time.time() + max(600, retry_s)
+    try:
+        with open(QUOTA_FILE, "w", encoding="utf-8") as f:
+            json.dump(d, f)
+    except OSError:
+        pass
+
+
 def gemini_call(key, model, body):
+    """generateContent with automatic fallback when a model's DAILY free quota
+    is used up (remembered until it resets). TTS models don't fall back."""
+    gone = _exhausted()
+    chain = [model] + ([m for m in FALLBACK_CHAIN if m != model] if "tts" not in model else [])
+    last = None
+    for m in chain:
+        if m in gone and m != chain[-1]:
+            continue
+        try:
+            return _gemini_call_one(key, m, body)
+        except _DailyQuota as e:
+            _mark_exhausted(m, e.retry_s)
+            emit("info", v="%s is out of free requests for today -- switching to %s" % (
+                m, next((x for x in chain[chain.index(m) + 1:] if x not in gone), "nothing")))
+            last = e
+    raise RuntimeError("every Gemini model is out of free requests for today -- try again "
+                       "later (quota resets daily)" if last else "no Gemini model available")
+
+
+class _DailyQuota(Exception):
+    def __init__(self, retry_s):
+        Exception.__init__(self, "daily quota")
+        self.retry_s = retry_s
+
+
+def _gemini_call_one(key, model, body):
     """One generateContent call. Free-tier 429s get one patient retry."""
     import time
     import urllib.error
@@ -501,6 +555,10 @@ def gemini_call(key, model, body):
                 return json.loads(r.read().decode())
         except urllib.error.HTTPError as e:
             detail = e.read().decode(errors="replace")
+            if e.code == 429 and "PerDay" in detail:
+                import re as _re
+                m_ = _re.search(r'"retryDelay":\s*"(\d+)s"', detail)
+                raise _DailyQuota(int(m_.group(1)) if m_ else 3600)
             if e.code == 429 and attempt == 0:
                 emit("info", v="Gemini rate limit — waiting a moment")
                 time.sleep(15)
