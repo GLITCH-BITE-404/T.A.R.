@@ -204,6 +204,30 @@ def _clients():
         return []
 
 
+# "browser" means whatever browser the user actually uses -- an open one first
+BROWSER_CLASSES = ("google-chrome", "chromium", "firefox", "brave", "zen",
+                   "librewolf", "vivaldi", "opera", "microsoft-edge", "floorp")
+_BROWSER_WORDS = ("browser", "web browser", "my browser", "the browser",
+                  "internet", "the internet", "chrome or firefox")
+
+
+def _is_browser(w):
+    c = (w.get("class") or "").lower()
+    return any(b in c for b in BROWSER_CLASSES)
+
+
+def preferred_browser():
+    """Binary to launch: config `browser`, else the first installed of
+    chrome / chromium / firefox (the same order web searches use)."""
+    want = (cfg().get("browser") or "").strip()
+    if want and shutil.which(want):
+        return want
+    for c in ("google-chrome-stable", "chromium", "firefox"):
+        if shutil.which(c):
+            return c
+    return None
+
+
 def _label(w):
     return (w.get("class") or w.get("title") or "window")[:40]
 
@@ -217,8 +241,14 @@ def target_window(args=None):
     needle = re.sub(r"^(?:the|a|an|my)\s+", "", needle.strip().lower())
     needle = re.sub(r"\s+(?:window|app)$", "", needle)
     ours = tar_opened(wins)
-    if needle and needle not in _PRONOUNS:
-        alias = {"terminal": "kitty", "term": "kitty", "browser": "firefox",
+    if needle in _BROWSER_WORDS:
+        hits = [w for w in wins if _is_browser(w)]
+        if not hits:
+            return False
+        mine = [w for w in hits if w in ours]
+        wins = mine or hits
+    elif needle and needle not in _PRONOUNS:
+        alias = {"terminal": "kitty", "term": "kitty",
                  "chrome": "google-chrome", "files": "nautilus",
                  "file manager": "nautilus", "editor": "codium"}.get(needle, needle)
         hits = [w for w in wins
@@ -409,24 +439,20 @@ def a_winlist(_):
 
 
 def a_focus(args):
-    """Focus a window by fuzzy title/class match."""
-    needle = (args.get("q") or "").lower()
-    if not needle:
-        return "focus what?"
-    rc, out = sh(["hyprctl", "-j", "clients"])
-    if rc:
-        return "could not list windows"
-    try:
-        wins = json.loads(out)
-    except ValueError:
-        return "could not parse window list"
-    for w in wins:
-        hay = (w.get("title", "") + " " + w.get("class", "")).lower()
-        if needle in hay:
-            sh(["hyprctl", "dispatch", "focuswindow",
-                "address:" + w.get("address", "")])
-            return "focused " + (w.get("title") or w.get("class"))[:50]
-    return "no window matching %r" % needle
+    """Focus a window: by name (q=/what=/name=), "browser", or the last used."""
+    needle = (args.get("q") or args.get("what") or args.get("name")
+              or args.get("app") or "")
+    w = target_window({"what": needle})
+    if w:
+        sh(["hyprctl", "dispatch", "focuswindow", "address:" + w["address"]])
+        return "focused " + (w.get("title") or w.get("class") or "window")[:50]
+    others = _clients()
+    if not others:
+        return "no windows are open"
+    # say what IS open so the model can pick instead of guessing
+    return ("no window matching %r. open windows: %s"
+            % (needle, ", ".join("%s (%s)" % (_label(o), (o.get("title") or "")[:30])
+                                 for o in others)))
 
 
 # ----------------------------------------------------------------- launch
@@ -434,12 +460,12 @@ def a_focus(args):
 # Friendly name -> what to actually exec. Keeps the model from inventing
 # binaries; anything not here falls through to a PATH lookup.
 APPS = {
-    "browser": ["firefox"], "firefox": ["firefox"],
+    "firefox": ["firefox"],
     "chrome": ["google-chrome-stable"], "chromium": ["chromium"],
     "terminal": ["kitty"], "kitty": ["kitty"], "term": ["kitty"],
     "files": ["nautilus"], "nautilus": ["nautilus"], "explorer": ["nautilus"],
     "file manager": ["nautilus"], "filemanager": ["nautilus"],
-    "web browser": ["firefox"], "thunar": ["thunar"], "dolphin": ["dolphin"],
+    "thunar": ["thunar"], "dolphin": ["dolphin"],
     "editor": ["codium"], "code": ["codium"], "vscode": ["codium"],
     "zed": ["zed"], "nvim": ["kitty", "-e", "nvim"], "vim": ["kitty", "-e", "nvim"],
     "discord": ["equibop"], "spotify": ["spotify"],
@@ -478,6 +504,18 @@ def a_open(args):
     what = re.sub(r"\s+(?:please|now|for me|on it|in it)$", "", what,
                   flags=re.I).strip()
     low = what.lower()
+
+    # "open my browser": use the one that's already open, else the preferred
+    if low in _BROWSER_WORDS:
+        w = target_window({"what": "browser"})
+        if w:
+            sh(["hyprctl", "dispatch", "focuswindow", "address:" + w["address"]])
+            return "%s is already open -- focused it" % _label(w)
+        b = preferred_browser()
+        if not b:
+            return "no browser installed"
+        sh([b], detach=True)
+        return "opening " + b
 
     if low in APPS:
         argv = APPS[low]
@@ -893,11 +931,7 @@ def a_web(args):
         if str(args.get("lucky", "")).lower() in ("1", "true", "yes"):
             q = "\\" + q
         url = "https://duckduckgo.com/?q=" + urlquote(q)
-    browser = None
-    for c in ("google-chrome-stable", "chromium", "firefox"):
-        if shutil.which(c):
-            browser = c
-            break
+    browser = preferred_browser()
     if browser:
         sh([browser, url], detach=True)
     else:
@@ -1737,8 +1771,11 @@ ACTIONS = {
     "winlist":    (a_winlist, "list open windows",
                    [r"^(?:list|show|which|what)?\s*(?:open\s+)?windows$",
                     r"^what'?s open$", r"^windows list$"]),
-    "focus":      (a_focus, "focus a window by name",
-                   [r"^focus (?P<q>.+)$", r"^switch to (?P<q>.+)$"]),
+    "focus":      (a_focus, "focus/switch to a window: q=kitty, q=browser (any open "
+                            "browser), or omit for the last one used",
+                   [r"^(?:go to|press on|click on|switch to|bring up|show me|jump to) "
+                    r"(?:my |the )?(?P<q>browser|chrome|firefox|kitty|terminal|files)$",
+                    r"^focus (?P<q>.+)$", r"^switch to (?P<q>.+)$"]),
 
     # --- self-configuration
     "autostart":  (a_autostart,
@@ -1973,8 +2010,8 @@ def _normalize(text):
     # entirely and get handed to the model, which then invented an action.
     low = re.sub(r"^(?:thanks?|thank you|ok(?:ay)?|alright|aight|yo|hey|hi|"
                  r"so|um+|uh+|well|dude|bro)\b[,\s]+", "", low)
-    low = re.sub(r"^(?:please\s+|can you\s+|could you\s+|would you\s+|"
-                 r"i want you to\s+|i need you to\s+)+", "", low)
+    low = re.sub(r"^(?:please\s+|pls\s+|plz\s+|(?:can|could|would|will) (?:you|u|ya)\s+|"
+                 r"i want you to\s+|i need you to\s+|i want u to\s+)+", "", low)
     # "run on it btop" / "open it up for me" -- dangling prepositional filler
     low = re.sub(r"^(run|open|launch|start)\s+(?:on|in)\s+it\s+", r"\1 ", low)
     low = re.sub(r"^(run|open|launch|start)\s+up\s+", r"\1 ", low)
@@ -2104,7 +2141,7 @@ def match(text):
     return None, None
 
 
-_PRIORITY = ("coin", "dice", "record", "remind", "wifi", "bluetooth", "dnd", "nightlight", "power",
+_PRIORITY = ("focus", "coin", "dice", "record", "remind", "wifi", "bluetooth", "dnd", "nightlight", "power",
              "play", "weather", "datetime", "battery", "calc", "processes",
              "colorpick", "cliphist")
 
