@@ -210,6 +210,10 @@ def run_tool(name, payload):
             for k, v in args.items()}
     if action not in T.ACTIONS and action not in T.UI_ACTIONS:
         return "no such action: %s" % action
+    if action in ("confirm", "cancel") or args.get("_confirmed"):
+        # only the USER can approve a parked action, by replying yes
+        return ("you can't confirm actions yourself -- ask the user to reply "
+                "'yes' to go ahead or 'no' to cancel")
     try:
         out = T.run(action, args)
     except Exception as e:          # never let a tool crash the turn
@@ -243,6 +247,18 @@ SYSTEM = (
     "folder, download, kill, processes, power, dnd, nightlight, record, play, "
     "notify...) -- they are reliable. Chain several actions for multi-step "
     "requests. "
+    "SCREEN & MOUSE: you can see and click. 'click X' / 'press X' / 'that "
+    "button' -> click_on target=<what the user described> (it finds it by "
+    "text or vision and clicks; T.A.R. hides itself so it never clicks "
+    "itself). Not sure what they mean by 'that'? use look first. Typing into "
+    "a field -> type_into. Scrolling -> scroll with what=<window>. Never fake "
+    "a click with key presses. 'ask claude ...' -> ask_claude.\n"
+    "HONESTY: never invent personal info (emails, passwords, names, "
+    "addresses) -- ask, or use what's in memory. Only say you did something "
+    "if an action result shows it worked; if a result says it failed or "
+    "NEEDS CONFIRMATION, say so plainly. If you can't do something, say what "
+    "you can't do and offer the closest thing you can. One monitor unless "
+    "the monitors action says otherwise.\n"
     "If no dedicated action fits, use the shell action -- it runs any "
     "command and returns the output, so you can do almost anything. This "
     "machine: CachyOS (Arch), Hyprland on Wayland, fish shell (shell action "
@@ -399,6 +415,13 @@ def gemini_call(key, model, body):
             except (ValueError, KeyError, TypeError):
                 pass
             raise RuntimeError("HTTP %d: %s" % (e.code, detail[:300]))
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+            # wifi blip / DNS hiccup: one quick retry before giving up
+            if attempt == 0:
+                time.sleep(2)
+                continue
+            raise RuntimeError("no connection to Google (%s) -- check your internet"
+                               % getattr(e, "reason", e))
     raise RuntimeError("rate limited")
 
 

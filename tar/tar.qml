@@ -614,6 +614,9 @@ Item {
             window.say("act", (d.v || d.action));
             orb.pulse();
             window.sfx("act");
+        } else if (d.t === "confirm") {
+            window.say("sys", "\u26a0 needs your OK: " + (d.v || "") + "  \u2014  type yes or no");
+            fx.play("alert");
         } else if (d.t === "ui") {
             window.playUiAction(d.action, d);
         } else if (d.t === "windows") {

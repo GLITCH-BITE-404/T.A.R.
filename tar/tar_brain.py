@@ -966,10 +966,16 @@ def warm(task="chat"):
     68s cold and 0.4s warm, so doing this when the panel opens is the difference
     between T.A.R. feeling broken and feeling instant.
     """
+    cfg = config()
+    if cloud_enabled(cfg):
+        # the cloud brain answers: preloading a local model would just sit on
+        # ~2.5GB of RAM for nothing (and start ollama if it wasn't running)
+        unload_except(None)     # and shut down any local model still loaded
+        emit("warm", ok=True, v="cloud brain -- no local model needed")
+        return
     if not start_ollama():
         emit("warm", ok=False, v="ollama not running")
         return
-    cfg = config()
     reg = registry()
     info = resolve(reg=reg, cfg=cfg, task=task)
     info, _ = govern(reg, cfg, info)
@@ -1168,14 +1174,17 @@ def _speak(text):
         pass
 
 
-def _run_act(name, args):
+def _run_act(name, args, direct=False):
     t = _tools()
     if not t:
         return None
+    t.DIRECT = direct           # user typed it themselves: no confirmation gate
     try:
         out = t.run(name, args)
     except Exception as e:
         out = "action failed: %s" % e
+    finally:
+        t.DIRECT = False
     if out is not None:
         act_log(name, args, out)
     return out
@@ -1267,7 +1276,7 @@ def is_cloud_model(name):
 
 _FAIL_PREFIXES = ("don't know how", "no window matching", "no app window",
                   "open what", "focus what", "which workspace", "need a size",
-                  "could not", "no such")
+                  "could not", "no such", "no running process", "refusing to kill")
 
 
 def _act_failed(out):
@@ -1297,7 +1306,7 @@ def chat(message, no_history=False, no_memory=False, no_act=False,
             if len(chain) > 1:
                 names = []
                 for nm, ag in chain:
-                    res = _run_act(nm, ag)
+                    res = _run_act(nm, ag, direct=True)
                     names.append(nm)
                     emit("acted", action=nm, args=ag, v=res, direct=True)
                 history_append("user", message)
@@ -1310,8 +1319,8 @@ def chat(message, no_history=False, no_memory=False, no_act=False,
             # btop" -> run btop); use it rather than re-matching the raw text
             name, args = chain[0] if len(chain) == 1 else t.match(message)
             if name:
-                out = _run_act(name, args)
-                if _cloud and _act_failed(out):
+                out = _run_act(name, args, direct=True)
+                if _act_failed(out):
                     # The shortcut guessed and missed ("open the first link"
                     # -> an app called "first link"). Nothing happened, so let
                     # the cloud model, which has the conversation, try it.
@@ -1714,8 +1723,7 @@ def main():
         cfg = config()
         cfg["backend"] = a.which
         save_config(cfg)
-        if a.which == "local":
-            unload_except(None)     # nothing should stay resident either way
+        unload_except(None)         # cloud: nothing local needed; local: reload fresh
         emit("backend", which=a.which,
              v=("cloud brain (Claude API)" if a.which == "claude"
                 else "local brain (offline)"))

@@ -323,6 +323,10 @@ def a_closewin(args):
         wins = _clients()               # already excludes T.A.R.
         if not wins:
             return "no other windows are open"
+        stop = needs_confirm("closewin", args, "close ALL %d windows: %s" % (
+            len(wins), ", ".join(_label(w) for w in wins)))
+        if stop:
+            return stop
         for w in wins:
             sh(["hyprctl", "dispatch", "closewindow", "address:" + w["address"]])
         return "closed %d windows: %s" % (len(wins),
@@ -350,8 +354,8 @@ def a_closewin(args):
 
 
 def a_resize(args):
-    w = int(args.get("w", 0))
-    h = int(args.get("h", 0))
+    w = _int(args.get("w", 0), 0)
+    h = _int(args.get("h", 0), 0)
     if not w and not h:
         return "need a size"
     _w, err = _focus_target(args)
@@ -365,7 +369,7 @@ def a_resize(args):
 
 def a_grow(args):
     d = args.get("dir", "right")
-    step = int(args.get("step", 100))
+    step = _int(args.get("step", 100), 100)
     dx, dy = {"l": (-step, 0), "r": (step, 0),
               "u": (0, -step), "d": (0, step)}[DIRS.get(d, "r")]
     _w, err = _focus_target(args)
@@ -388,7 +392,9 @@ def a_workspace(args):
     n = args.get("n")
     if n is None:
         return "which workspace?"
-    hypr("workspace", int(n))
+    if _int(n, -1) < 1:
+        return "which workspace? (a number)"
+    hypr("workspace", _int(n, 1))
     return "workspace " + str(n)
 
 
@@ -396,6 +402,9 @@ def a_sendto(args):
     n = args.get("n")
     if n is None:
         return "which workspace?"
+    if _int(n, -1) < 1:
+        return "which workspace? (a number)"
+    n = _int(n, 1)
     w = target_window(args)
     if not w:
         return "no app window to send"
@@ -413,7 +422,7 @@ def a_pin(args):
 
 
 def a_opacity(args):
-    p = max(10, min(100, int(args.get("pct", 100))))
+    p = max(10, min(100, _int(args.get("pct", 100), 100)))
     w = target_window(args)
     if not w:
         return "no app window to change"
@@ -660,10 +669,10 @@ def a_volume(args):
         sh(["pactl", "set-sink-mute", "@DEFAULT_SINK@", "toggle"])
         return "mute toggled"
     if args.get("pct") is not None:
-        p = max(0, min(150, int(args["pct"])))
+        p = max(0, min(150, _int(args["pct"], 50)))
         sh(["pactl", "set-sink-volume", "@DEFAULT_SINK@", "%d%%" % p])
         return "volume %d%%" % p
-    d = int(args.get("delta", 5))
+    d = _int(args.get("delta", 5), 5)
     sh(["pactl", "set-sink-volume", "@DEFAULT_SINK@", "%+d%%" % d])
     return "volume %+d%%" % d
 
@@ -673,9 +682,10 @@ def a_bright(args):
     if not shutil.which("brightnessctl"):
         return "brightnessctl isn't installed"
     if args.get("pct") is not None:
-        sh(["brightnessctl", "set", "%d%%" % int(args["pct"])])
-        return "brightness %d%%" % int(args["pct"])
-    d = int(d or 10)
+        pct = max(1, min(100, _int(args["pct"], 50)))
+        sh(["brightnessctl", "set", "%d%%" % pct])
+        return "brightness %d%%" % pct
+    d = _int(d or 10, 10)
     sh(["brightnessctl", "set", ("%d%%+" % d) if d > 0 else ("%d%%-" % -d)])
     return "brightness %+d%%" % d
 
@@ -1201,7 +1211,10 @@ def a_mkdir(args):
     err = _safe_path(p)
     if err:
         return err
-    os.makedirs(p, exist_ok=True)
+    try:
+        os.makedirs(p, exist_ok=True)
+    except OSError as e:
+        return "couldn't create it: %s" % e.strerror
     return "created " + p
 
 
@@ -1212,6 +1225,11 @@ def a_trash(args):
         return err
     if not os.path.lexists(p):
         return "no such file: " + p
+    if os.path.isdir(p) and not os.path.islink(p):
+        n = sum(len(f) for _, _, f in os.walk(p))
+        stop = needs_confirm("trash", args, "move the folder %s (%d files) to the trash" % (p, n))
+        if stop:
+            return stop
     rc, out = sh(["trash-put", p]) if shutil.which("trash-put") else sh(["gio", "trash", p])
     return ("moved %s to the trash (restorable)" % p) if rc == 0 else out
 
@@ -1258,8 +1276,12 @@ def a_kill(args):
     name = (args.get("name") or args.get("what") or "").strip()
     if not name:
         return "kill what?"
-    if name.lower() in _NEVER_KILL:
-        return "refusing to kill %s -- the desktop/session depends on it" % name
+    if name.lower() in _NEVER_KILL or name.lower() in ("me", "myself", "yourself",
+                                                       "you", "it", "tar", "t.a.r."):
+        return "refusing to kill %s" % name
+    stop = needs_confirm("kill", args, "force-quit %s (unsaved work in it is lost)" % name)
+    if stop:
+        return stop
     # windows first: closing by window is gentler than a signal
     w = target_window({"what": name})
     if w:
@@ -1287,6 +1309,9 @@ def a_power(args):
     if what not in cmds:
         return "power what? suspend|lock|logout|reboot|shutdown"
     if what in ("reboot", "restart", "shutdown", "poweroff", "logout"):
+        stop = needs_confirm("power", args, what + " the computer")
+        if stop:
+            return stop
         sh(["notify-send", "-u", "critical", "-a", "T.A.R.", "T.A.R.",
             "%s in 5 seconds" % what])
         sh(["bash", "-c", "sleep 5; " + " ".join(cmds[what])], detach=True)
@@ -1368,18 +1393,387 @@ def a_play(args):
     return a_web({"q": q + " site:youtube.com", "lucky": "true"})
 
 
+# ---- confirmation gate -----------------------------------------------------
+# Risky things the MODEL decides to do are parked here and only run when the
+# USER's next message says yes. The model cannot confirm for itself: "yes" is
+# matched against the user's own message in the fast path, never a tool call.
+# Commands the user typed directly (DIRECT=True, set by the brain's fast path)
+# skip the gate -- typing "reboot" yourself shouldn't ask twice.
+PENDING = os.path.join(DATA, "pending.json")
+PENDING_TTL_S = 180
+DIRECT = False
+
+
+def needs_confirm(name, args, summary):
+    """Return None if allowed to run now, else park it and say why."""
+    if DIRECT or (args or {}).get("_confirmed"):
+        return None
+    try:
+        os.makedirs(DATA, exist_ok=True)
+        with open(PENDING, "w", encoding="utf-8") as f:
+            json.dump({"name": name, "args": args or {}, "summary": summary,
+                       "at": time.time()}, f)
+    except OSError:
+        return "refused (could not store the confirmation)"
+    emit("confirm", v=summary)
+    return ("NEEDS CONFIRMATION -- nothing was done yet. Tell the user exactly "
+            "this will happen: %s. It only runs if THEY reply yes." % summary)
+
+
+def pending_action():
+    try:
+        with open(PENDING, encoding="utf-8") as f:
+            p = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if time.time() - p.get("at", 0) > PENDING_TTL_S:
+        clear_pending()
+        return None
+    return p
+
+
+def clear_pending():
+    try:
+        os.remove(PENDING)
+    except OSError:
+        pass
+
+
+def a_confirm(_):
+    p = pending_action()
+    if not p:
+        return "nothing is waiting for confirmation"
+    clear_pending()
+    args = dict(p.get("args") or {})
+    args["_confirmed"] = True
+    out = run(p["name"], args)
+    return "confirmed: %s -> %s" % (p.get("summary", p["name"]), out)
+
+
+def a_cancel(_):
+    p = pending_action()
+    clear_pending()
+    return ("cancelled: " + p.get("summary", "")) if p else "nothing to cancel"
+
+
+def _int(v, default):
+    try:
+        return int(float(str(v).strip().rstrip("%")))
+    except (ValueError, TypeError):
+        return default
+
+
+# ---- eyes and hands: screen, OCR, vision, pointer ---------------------------
+_RISKY_CLICK = re.compile(
+    r"\b(delete|remove|erase|wipe|uninstall|format|buy|purchase|pay|checkout|"
+    r"order|subscribe|unsubscribe|send|post|publish|submit|confirm|transfer|"
+    r"sign ?out|log ?out|deactivate|close account|reset|factory)\b", re.I)
+
+
+def _tar_window():
+    rc, out = sh(["hyprctl", "-j", "clients"])
+    try:
+        return next((w for w in json.loads(out) if w.get("title") == TAR_TITLE), None)
+    except ValueError:
+        return None
+
+
+class _TarHidden:
+    """Park T.A.R. on a hidden special workspace while looking/clicking, so it
+    never covers the target and never clicks itself; put it back after."""
+    def __enter__(self):
+        self.w = _tar_window()
+        if self.w:
+            self.ws = (self.w.get("workspace") or {}).get("name") or "1"
+            sh(["hyprctl", "dispatch", "movetoworkspacesilent",
+                "special:tarhide,address:" + self.w["address"]])
+            time.sleep(0.25)            # let the compositor redraw without us
+        return self
+
+    def __exit__(self, *exc):
+        if self.w:
+            sh(["hyprctl", "dispatch", "movetoworkspacesilent",
+                "%s,address:%s" % (self.ws, self.w["address"])])
+        return False
+
+
+def _shot(path):
+    rc, out = sh(["grim", "-t", "jpeg", "-q", "80", path], timeout=10)
+    return rc == 0 and os.path.exists(path)
+
+
+def _monitor():
+    rc, out = sh(["hyprctl", "-j", "monitors"])
+    try:
+        m = next((m for m in json.loads(out) if m.get("focused")), None) or json.loads(out)[0]
+        return m
+    except (ValueError, IndexError):
+        return {"x": 0, "y": 0, "width": 1920, "height": 1080, "scale": 1}
+
+
+def _ocr_boxes(path):
+    """Words on screen with boxes, grouped into lines: [(text, x, y, w, h)]"""
+    if not shutil.which("tesseract"):
+        return []
+    rc, out = sh(["tesseract", path, "-", "--psm", "11", "tsv"], timeout=40)
+    lines = {}
+    for row in out.splitlines()[1:]:
+        c = row.split("\t")
+        if len(c) < 12 or not c[11].strip() or _int(c[10], -1) < 40:
+            continue
+        key = (c[2], c[3], c[4])            # block, paragraph, line
+        x, y, w, h = (_int(c[i], 0) for i in (6, 7, 8, 9))
+        cur = lines.setdefault(key, [[], x, y, x + w, y + h])
+        cur[0].append(c[11])
+        cur[1] = min(cur[1], x); cur[2] = min(cur[2], y)
+        cur[3] = max(cur[3], x + w); cur[4] = max(cur[4], y + h)
+    return [(" ".join(v[0]), v[1], v[2], v[3] - v[1], v[4] - v[2]) for v in lines.values()]
+
+
+def _find_text(boxes, target):
+    """Best on-screen text match for target -> (text, cx, cy) or None"""
+    t = re.sub(r"\b(the|a|an|button|link|tab|icon|on|that|this)\b", " ", target.lower())
+    t = " ".join(t.split())
+    if not t:
+        return None
+    best, score = None, 0.0
+    for text, x, y, w, h in boxes:
+        low = text.lower()
+        if t == low:
+            s_ = 3.0
+        elif t in low:
+            s_ = 2.0 + len(t) / max(len(low), 1)
+        else:
+            words = set(t.split())
+            s_ = len(words & set(low.split())) / max(len(words), 1)
+        if s_ > score:
+            # centre of the matched words, not the whole line, when possible
+            best, score = (text, x + w // 2, y + h // 2), s_
+    return best if score >= 0.6 else None
+
+
+def _gemini_image(path, prompt):
+    """Ask the cloud vision model about a screenshot. Google key only."""
+    try:
+        import base64
+        import tar_cloud as C
+    except ImportError:
+        return None, "vision needs the cloud backend"
+    key = C.api_key("google")
+    if not key:
+        return None, "vision needs a Gemini key (/key <key>)"
+    with open(path, "rb") as f:
+        b64 = base64.b64encode(f.read()).decode()
+    model = cfg().get("vision_model") or "gemini-flash-lite-latest"
+    try:
+        r = C.gemini_call(key, model, {"contents": [{"role": "user", "parts": [
+            {"inline_data": {"mime_type": "image/jpeg", "data": b64}},
+            {"text": prompt}]}],
+            "generationConfig": {"maxOutputTokens": 800, "temperature": 0.1}})
+    except Exception as e:
+        return None, "vision request failed: %s" % e
+    parts = ((r.get("candidates") or [{}])[0].get("content") or {}).get("parts") or []
+    return "".join(p.get("text", "") for p in parts if not p.get("thought")).strip(), None
+
+
+def _gemini_point(path, target, mon):
+    txt, err = _gemini_image(path, (
+        "This is a screenshot. Find: %s\nReply with ONLY JSON: "
+        "{\"found\": true, \"point\": [y, x], \"label\": \"what it is\"} with y and x "
+        "normalized 0-1000 to the CENTER of it, or {\"found\": false, \"why\": "
+        "\"...\"} if it is not visible." % target))
+    if err:
+        return None, err
+    m = re.search(r"\{.*\}", txt or "", re.S)
+    try:
+        d = json.loads(m.group(0)) if m else {}
+    except ValueError:
+        d = {}
+    if not d.get("found") or not isinstance(d.get("point"), list):
+        return None, "couldn't see %r on screen%s" % (
+            target, (": " + d["why"]) if d.get("why") else "")
+    y, x = d["point"][:2]
+    return (int(x / 1000 * mon["width"]), int(y / 1000 * mon["height"]),
+            d.get("label") or target), None
+
+
+def _locate(target):
+    """Find something on screen -> ((x, y, label, how), None) or (None, why).
+    OCR first (exact for text buttons), vision second (icons, images)."""
+    path = os.path.join(DATA, "screen-look.jpg")
+    mon = _monitor()
+    with _TarHidden():
+        if not _shot(path):
+            return None, "couldn't take a screenshot"
+    hit = _find_text(_ocr_boxes(path), target)
+    if hit:
+        return (hit[1], hit[2], hit[0], "text"), None
+    p, err = _gemini_point(path, target, mon)
+    if p:
+        return (p[0], p[1], p[2], "vision"), None
+    return None, err
+
+
+def _pointer_ok():
+    return bool(shutil.which("wlrctl"))
+
+
+_NO_POINTER = ("can't click yet: the mouse tool isn't installed. Tell the user to "
+               "run:  yay -S wlrctl   (then try again)")
+
+
+def _move(x, y, mon=None):
+    mon = mon or _monitor()
+    sh(["hyprctl", "dispatch", "movecursor", str(int(mon.get("x", 0) + x)),
+        str(int(mon.get("y", 0) + y))])
+
+
+def _click(button="left", double=False):
+    for _ in range(2 if double else 1):
+        sh(["wlrctl", "pointer", "click", button])
+        if double:
+            time.sleep(0.08)
+
+
+def a_look(args):
+    """Answer a question about what's on screen (T.A.R. hides itself first)."""
+    q = args.get("q") or args.get("question") or "Describe what is on the screen."
+    path = os.path.join(DATA, "screen-look.jpg")
+    with _TarHidden():
+        if not _shot(path):
+            return "couldn't take a screenshot"
+    txt, err = _gemini_image(path, "Screenshot of the user's desktop. " + q +
+                             " Be specific and brief; mention exact button/label text.")
+    if err:
+        # no vision: fall back to OCR text so the model has *something*
+        words = [b[0] for b in _ocr_boxes(path)][:60]
+        return "(%s) text visible on screen: %s" % (err, " | ".join(words) or "none")
+    return txt or "couldn't make sense of the screen"
+
+
+def a_click_on(args):
+    """Click something on screen by description: 'the subscribe button'."""
+    target = (args.get("target") or args.get("what") or "").strip()
+    if not target:
+        return "click on what?"
+    if not _pointer_ok():
+        return _NO_POINTER
+    if _RISKY_CLICK.search(target):
+        stop = needs_confirm("click_on", args, "click %r" % target)
+        if stop:
+            return stop
+    loc, err = _locate(target)
+    if not loc:
+        return err
+    x, y, label, how = loc
+    if _RISKY_CLICK.search(label) and not args.get("_confirmed") and not DIRECT:
+        stop = needs_confirm("click_on", args, "click %r (found %r)" % (target, label))
+        if stop:
+            return stop
+    button = (args.get("button") or "left").lower()
+    with _TarHidden():
+        _move(x, y)
+        time.sleep(0.05)
+        _click(button if button in ("left", "right", "middle") else "left",
+               str(args.get("double", "")).lower() in ("1", "true", "yes"))
+    return "clicked %r at (%d, %d) [found by %s]" % (label[:60], x, y, how)
+
+
+def a_click(args):
+    """Click at screen coordinates (pixels from the top-left of the screen)."""
+    if not _pointer_ok():
+        return _NO_POINTER
+    x, y = _int(args.get("x"), -1), _int(args.get("y"), -1)
+    mon = _monitor()
+    if not (0 <= x < mon["width"] and 0 <= y < mon["height"]):
+        return "x/y must be on screen (0-%d, 0-%d)" % (mon["width"] - 1, mon["height"] - 1)
+    button = (args.get("button") or "left").lower()
+    with _TarHidden():
+        _move(x, y, mon)
+        time.sleep(0.05)
+        _click(button if button in ("left", "right", "middle") else "left",
+               str(args.get("double", "")).lower() in ("1", "true", "yes"))
+    return "clicked %s at (%d, %d)" % (button, x, y)
+
+
+def a_scroll(args):
+    """Scroll a window (named via what=, else the last one used)."""
+    if not _pointer_ok():
+        return _NO_POINTER
+    w = target_window({"what": args.get("what") or args.get("window") or ""})
+    if not w:
+        return "no window to scroll"
+    d = (args.get("dir") or args.get("direction") or "down").lower()
+    n = max(1, min(40, _int(args.get("amount"), 5)))
+    (x, y), (ww, hh) = w.get("at", [0, 0]), w.get("size", [800, 600])
+    sh(["hyprctl", "dispatch", "focuswindow", "address:" + w["address"]])
+    with _TarHidden():
+        sh(["hyprctl", "dispatch", "movecursor", str(x + ww // 2), str(y + hh // 2)])
+        dy = {"down": 1, "up": -1}.get(d, 0) * 15 * n
+        dx = {"right": 1, "left": -1}.get(d, 0) * 15 * n
+        sh(["wlrctl", "pointer", "scroll", str(dy), str(dx)])
+    return "scrolled %s %d in %s" % (d, n, _label(w))
+
+
+def a_type_into(args):
+    """Click a field by description, then type into it."""
+    text = args.get("text") or ""
+    if not text:
+        return "type what?"
+    clicked = a_click_on({"target": args.get("target") or args.get("field") or "",
+                          "_confirmed": args.get("_confirmed")})
+    if not clicked.startswith("clicked"):
+        return clicked
+    time.sleep(0.15)
+    rc, out = sh(["wtype", text], timeout=20)
+    return clicked + (" -- typed %d chars" % len(text) if rc == 0 else " -- typing failed")
+
+
+def a_ask_claude(args):
+    """Ask Claude (Claude Code CLI) a question. Tools disabled: answer-only."""
+    q = (args.get("q") or args.get("question") or args.get("what") or "").strip()
+    if not q:
+        return "ask Claude what?"
+    exe = shutil.which("claude") or os.path.expanduser("~/.local/bin/claude")
+    if not os.path.exists(exe):
+        return "Claude Code isn't installed"
+    rc, out = sh([exe, "-p", q, "--tools", "", "--no-session-persistence",
+                  "--output-format", "text"], timeout=180)
+    if rc != 0:
+        return "Claude didn't answer: " + (out or "exit %d" % rc)[:200]
+    return "Claude says:\n" + out[:3500]
+
+
+def a_monitors(_):
+    rc, out = sh(["hyprctl", "-j", "monitors"])
+    try:
+        ms = json.loads(out)
+    except ValueError:
+        return "couldn't read monitors"
+    return "%d monitor(s): " % len(ms) + ", ".join(
+        "%s %dx%d%s" % (m["name"], m["width"], m["height"],
+                        " (focused)" if m.get("focused") else "") for m in ms)
+
+
 # ---- shell: the cloud brain's general-purpose hands -----------------------
 # Runs a command and RETURNS its output, so the model can look things up and
 # act on anything there is no dedicated action for. Cloud-only (the small local
 # model can't be trusted with it) and fenced off from the irreversible stuff.
 _SHELL_DENY = [
     (r"(^|[;&|]\s*|\s)(sudo|doas|pkexec|su)\b", "needs root"),
-    (r"(^|[;&|]\s*|\s)rm\b", "deleting with rm is off-limits -- use trash-put "
-                               "(recoverable) instead"),
+    (r"(?<![\w.-])\\?rm\b|\bunlink\b|-delete\b|shutil\.rmtree|os\.(remove|unlink|rmdir)"
+     r"|\brmdir\b|\bsrm\b",
+     "deleting is off-limits here -- use the trash action (recoverable)"),
+    (r"\b(curl|wget)\b[^|]*\|\s*(ba|z|fi)?sh\b", "piping a download into a shell"),
+    (r"(^|[\s/])\.?ssh/|\.gnupg|id_rsa|id_ed25519", "touches SSH/GPG keys"),
+    (r"\b(dd|mkfs|wipefs|fdisk|parted|sgdisk|cryptsetup|mount|umount|swapoff)\b",
+     "disk/mount tool"),
     (r"\b(shred|mkfs[\w.]*|wipefs|fdisk|parted|sgdisk|dd)\b", "disk-destroying tool"),
     # system paths: reading is fine (cat /etc/os-release), writing is not
-    (r"(?=.*(^|\s|=|[\'\"])/(boot|efi|etc|usr|bin|lib|lib64|sbin|var|root|dev|sys|proc)\b)"
-     r"(?=.*(>|\btee\b|\b(mv|cp|ln|touch|mkdir|rmdir|install|truncate|chmod)\b|sed\s+-i))",
+    (r"(?=.*(^|\s|=|[\'\"])/(boot|efi|etc|usr|bin|lib|lib64|sbin|var|root|"
+     r"dev(?!/(?:null|stdout|stderr|tty)\b)|sys|proc)\b)"
+     r"(?=.*(>(?!>?\s*/dev/(?:null|stdout|stderr)\b)|\btee\b|"
+     r"\b(mv|cp|ln|touch|mkdir|rmdir|install|truncate|chmod)\b|sed\s+-i))",
      "writes to a system path"),
     (r"(^|\s)/boot\b|loader/entries", "touches the bootloader"),
     (r"\b(loader\.conf|bootctl|grub|limine|refind|efibootmgr|mkinitcpio|dracut)\b",
@@ -1395,6 +1789,22 @@ _SHELL_DENY = [
 ]
 
 
+# allowed, but only after the user says yes: changes that are hard to undo
+_SHELL_CONFIRM = [
+    (r"(^|[\s;&|])(mv|cp\s+-[a-z]*f|truncate|shred)\b", "moves/overwrites files"),
+    (r"(^|[^>&0-9])>(?!>|&|\s*/dev/null)", "overwrites a file"),
+    (r"\bsed\s+(-[a-z]*\s+)*-i", "edits a file in place"),
+    (r"\b(kill|pkill|killall)\b", "kills processes"),
+    (r"\bgit\s+(reset\s+--hard|clean|push\s+.*(-f|--force)|checkout\s+--|restore|stash\s+drop|branch\s+-D)",
+     "discards git work"),
+    (r"\bsystemctl\s+(--user\s+)?(stop|disable|mask|restart)", "stops a service"),
+    (r"\b(pip|pipx|npm|cargo|go)\s+(install|uninstall|remove)", "installs/removes software"),
+    (r"\.config/(hypr|quickshell|caelestia|serpantinum|glitch)|bite-os-distro|BITE-OS",
+     "touches the rice / BITE-OS files"),
+    (r"\bchmod\b", "changes permissions"),
+]
+
+
 def a_shell(args):
     cmd = (args.get("cmd") or args.get("what") or "").strip()
     if not cmd:
@@ -1405,6 +1815,12 @@ def a_shell(args):
         if re.search(pat, cmd):
             return ("refused (%s). If the user really wants this, tell them the "
                     "exact command to run themselves: %s" % (why, cmd))
+    for pat, why in _SHELL_CONFIRM:
+        if re.search(pat, cmd):
+            stop = needs_confirm("shell", args, "run `%s` (%s)" % (cmd[:200], why))
+            if stop:
+                return stop
+            break
     try:
         r = subprocess.run(["bash", "-lc", cmd], capture_output=True, text=True,
                            timeout=int(args.get("timeout", 30)),
@@ -1923,6 +2339,21 @@ ACTIONS = {
                    [r"^roll (?:a )?(?:die|dice)$", r"^roll (?:a )?d(?P<sides>\d{1,4})$"]),
     "play":       (a_play, "play a song/video on youtube: q=",
                    [r"^play (?P<q>.+) on youtube$"]),
+    "look":       (a_look, "LOOK at the screen and answer a question about it (q=). "
+                           "Use before clicking if unsure what's there.", []),
+    "click_on":   (a_click_on, "CLICK something visible on screen by description: "
+                               "target='the subscribe button' (button=right, double=true optional). "
+                               "Finds it by text, else by vision.", []),
+    "click":      (a_click, "click at exact screen pixels x=, y= (button=, double=)", []),
+    "scroll":     (a_scroll, "scroll a window: what=chrome, dir=down|up|left|right, amount=",
+                   [r"^scroll (?P<dir>down|up)(?: (?:on|in) (?P<what>\w+))?$"]),
+    "type_into":  (a_type_into, "click a field by description then type: target='the search box', text=", []),
+    "ask_claude": (a_ask_claude, "ask Claude (Anthropic's AI, via Claude Code) a question: q=. "
+                                 "Use when the user says 'ask claude'.",
+                   [r"^ask claude (?:about |to |that |this )?(?P<q>.+)$"]),
+    "monitors":   (a_monitors, "list connected monitors", [r"^(?:what|which|how many) monitors?.*$"]),
+    "confirm":    (a_confirm, "(user-only) run the action waiting for confirmation", []),
+    "cancel":     (a_cancel, "(user-only) drop the action waiting for confirmation", []),
     "shell":      (a_shell, "run ANY shell command (bash, as the user, in ~) and get its "
                             "output back -- for anything no other action covers: "
                             "files, settings, network, bluetooth, notifications, "
@@ -2146,7 +2577,20 @@ _PRIORITY = ("focus", "coin", "dice", "record", "remind", "wifi", "bluetooth", "
              "colorpick", "cliphist")
 
 
+_YES_RE = re.compile(r"^(?:yes|yeah|yep|yup|y|sure|ok|okay|do it|go ahead|confirm|"
+                     r"confirmed|go|yes do it|yes please|send it|proceed)$")
+_NO_RE = re.compile(r"^(?:no|nope|nah|n|cancel|stop|don'?t|abort|never ?mind|wait)$")
+# words after open/close/kill that are not apps or windows
+_NOT_TARGETS = re.compile(r"^(?:me|myself|yourself|you|your \w+|my (?:eyes|mind|heart|mouth)|"
+                          r"source|up|now|the door|eyes|mind|heart)(?:\b|$)")
+
+
 def _match_one(low):
+    if pending_action():
+        if _YES_RE.match(low):
+            return "confirm", {}
+        if _NO_RE.match(low):
+            return "cancel", {}
     for name, pats in UI_PATTERNS.items():
         for pat in pats:
             m = re.match(pat, low, re.I)
@@ -2165,6 +2609,9 @@ def _match_one(low):
                 continue
             args = {k: v for k, v in (m.groupdict() or {}).items()
                     if v is not None}
+            tgt = (args.get("what") or args.get("name") or "").lower()
+            if name in ("open", "closewin", "kill") and _NOT_TARGETS.match(tgt):
+                continue                # "kill me", "open your heart": talk, not a command
             # sugar groups: _up / _down become a delta
             if "_up" in args:
                 args["delta"] = 5 if name == "volume" else 10

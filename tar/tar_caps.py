@@ -947,6 +947,13 @@ def main():
         cfg = config()
         cfg["backend"] = a[0]
         save_config(cfg)
+        if a[0] == "claude":
+            # cloud brain answers now: free the RAM a local model is holding
+            try:
+                import tar_brain
+                tar_brain.unload_except(None)
+            except Exception:
+                pass
         emit("ok", v="brain: " + a[0])
 
     elif cmd == "start-mode":
