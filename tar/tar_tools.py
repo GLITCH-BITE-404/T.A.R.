@@ -748,7 +748,17 @@ def a_patch(args):
 
 # ----------------------------------------------------------------- media / system
 
+def _pct_arg(args):
+    for k in ("pct", "level", "value", "percent", "volume", "brightness", "to", "amount"):
+        v = args.get(k)
+        if v not in (None, "") and re.match(r"^\s*\d+(\.\d+)?\s*%?\s*$", str(v)):
+            return v
+    return None
+
+
 def a_volume(args):
+    if args.get("pct") is None and _pct_arg(args) is not None:
+        args = dict(args, pct=_pct_arg(args))
     if args.get("mute"):
         sh(["pactl", "set-sink-mute", "@DEFAULT_SINK@", "toggle"])
         return "mute toggled"
@@ -762,6 +772,8 @@ def a_volume(args):
 
 
 def a_bright(args):
+    if args.get("pct") is None and _pct_arg(args) is not None:
+        args = dict(args, pct=_pct_arg(args))
     d = args.get("delta")
     if not shutil.which("brightnessctl"):
         return "brightnessctl isn't installed"
@@ -1097,17 +1109,48 @@ def main_profile():
             else None) or next((p for p in profs if p["dir"] == "Default"), None)
 
 
+USER_PROFILE = None          # the ONE account the user named this turn, if any
+
+
+def profile_from_message(text):
+    """The single Chrome account a message names ('rephael', 'learning',
+    'student', 'my main account'...), or None if none / more than one."""
+    low = re.sub(r"[\u200e\u200f\u202a-\u202e]", "", (text or "").lower())
+    found = {}
+    for p in chrome_profiles():
+        names = {p["name"].lower(), p["given"].lower()} - {""}
+        if any(re.search(r"(?<!\w)%s(?!\w)" % re.escape(n), low) for n in names):
+            q = resolve_profile(p["given"] or p["name"]) if not p["managed"] or \
+                p["name"].lower() in low else p
+            if q:
+                found[q["dir"]] = q
+    if re.search(r"\b(student|school|class(?:room)? account|learning)\b", low):
+        q = resolve_profile("school")
+        if q:
+            found[q["dir"]] = q
+    if re.search(r"\b(main|normal|personal|regular|own) (?:chrome )?(?:account|profile)\b", low):
+        q = main_profile()
+        if q:
+            found[q["dir"]] = q
+    return next(iter(found.values())) if len(found) == 1 else None
+
+
 def open_url(url, prof=None, want_browser=None):
     """Open a URL. In Chrome it ALWAYS goes to an explicit profile -- the one
     asked for, else the main account -- so a fresh Chrome start can't land in
     whatever profile happened to be used last."""
     b = (want_browser if want_browser and shutil.which(want_browser) else preferred_browser())
     if b and ("chrome" in b or "chromium" in b):
+        if USER_PROFILE:                # the account the USER named beats the model's guess
+            prof = USER_PROFILE
         prof = prof or main_profile()
         if prof:
             sh(_profile_argv(prof, url), detach=True)
             return "opened %s in the %r Chrome profile%s" % (
-                url[:70], prof["name"], " (school)" if prof["managed"] else " (main)" if prof["dir"] == "Default" else "")
+                url[:70], prof["name"],
+                " (school/learning account)" if prof["managed"]
+                else (" (main -- the user's %r account)" % prof["given"] if prof["given"] else " (main)")
+                if prof["dir"] == "Default" else "")
     sh([b, url] if b else ["xdg-open", url], detach=True)
     return "opened %s in %s" % (url[:70], b or "the browser")
 
@@ -2585,6 +2628,19 @@ def a_browser(args):
     """Browser controls: action=new_tab|reopen_tab|reload|back|forward|next_tab|
     prev_tab|zoom_in|zoom_out|zoom_reset|private|bookmark|find (text=)|tab (q=)|tabs"""
     act = (args.get("action") or args.get("what") or "").lower().replace(" ", "_")
+    if args.get("profile") or USER_PROFILE or act in ("new_window", "private"):
+        # a tab in a SPECIFIC account can't be a Ctrl+T in whatever window is in
+        # front -- launch it in that profile instead
+        prof = resolve_profile(args.get("profile")) if args.get("profile") else None
+        if args.get("profile") and not prof:
+            return "no Chrome profile matching %r. profiles: %s" % (
+                args.get("profile"), ", ".join(p["name"] for p in chrome_profiles()))
+        if act in ("new_tab", "new_window", "private", "") or prof:
+            if act == "private":
+                b = preferred_browser() or "google-chrome-stable"
+                sh([b, "--incognito"] if "chrom" in b else [b, "--private-window"], detach=True)
+                return "opened a private window"
+            return open_url("chrome://newtab/", prof)
     w, err = _browser_window(args)
     if err:
         return err
@@ -3251,7 +3307,8 @@ ACTIONS = {
     "close_tab":  (a_close_tab, "close browser TABS whose title contains q= (e.g. q='cookie "
                                 "clicker'). Use this for tabs -- NEVER close a browser window "
                                 "to get rid of a tab.",
-                   [r"^close (?:all )?(?:of )?(?:the |my )?(?P<q>.+?) tabs?$"]),
+                   [r"^close (?:all )?(?:of )?(?:the |my )?(?P<q>(?!(?:those|these|them|it|that|this|"
+                    r"the|my|all|both|new|other|extra)\b).+?) tabs?$"]),
     "closewin":   (a_closewin, "close an app window (a browser window = ALL its tabs; use "
                                "close_tab for tabs): what=kitty/firefox/... or "
                                "what=them for everything YOU opened, "
@@ -3498,7 +3555,8 @@ ACTIONS = {
     "unminimize": (a_unminimize, "bring minimized windows back (what= optional)", []),
     "layout":     (a_layout, "what=split toggles split direction; what=monitor moves the window "
                              "to the next monitor", []),
-    "browser":    (a_browser, "browser controls on the open browser: action=tab q=<title> (switch "
+    "browser":    (a_browser, "browser controls (profile=<account> opens new_tab/new_window IN that "
+                              "Chrome account): action=tab q=<title> (switch "
                               "to a tab), tabs (list them), new_tab, reopen_tab, reload, back, "
                               "forward, next_tab, prev_tab, find text=, zoom_in, zoom_out, "
                               "zoom_reset, private, bookmark", []),
@@ -3806,6 +3864,8 @@ def _match_one(low):
             tgt = (args.get("what") or args.get("name") or "").lower()
             if name in ("open", "closewin", "kill") and _NOT_TARGETS.match(tgt):
                 continue                # "kill me", "open your heart": talk, not a command
+            if name in ("closewin", "kill") and re.search(r"\btabs?$", tgt):
+                continue                # tabs are never windows -- the AI picks which tabs
             # sugar groups: _up / _down become a delta
             if "_up" in args:
                 args["delta"] = 5 if name == "volume" else 10

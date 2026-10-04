@@ -364,7 +364,9 @@ def live_status():
                       " = school/student account (managed)" if p["managed"]
                       else (" = MAIN/normal account, the user calls it '%s' -- used by default"
                             % p["given"] if p["dir"] == "Default" else ""))
-            for p in profs) + ". 'Rephael'/'my normal account'/'main' -> profile='main'.")
+            for p in profs) + ". 'Rephael'/'my normal account'/'main' -> profile='main'. "
+            "If the user NAMES the account, the name decides; 'my other account' only means "
+            "'not the one I'm looking at', never 'not main'.")
     out = "\n\nLIVE STATUS (checked just now -- this is the truth; ignore any "
     out += "older message or action result in this chat that says otherwise):\n- "
     return out + "\n- ".join(lines)
@@ -555,6 +557,59 @@ def _asks_action(text):
     return bool(_DO_RE.match((text or "").strip()))
 
 
+REVIEW_PROMPT = """You are T.A.R.'s self-check. Review one turn honestly and strictly.
+
+FACTS ABOUT THIS COMPUTER (trust these):
+{facts}
+
+USER ASKED:
+{ask}
+
+ACTIONS T.A.R. RAN (with their REAL results):
+{trace}
+
+T.A.R.'S DRAFT REPLY:
+{reply}
+
+Check:
+1. Did the actions actually do what the user asked? Watch for: wrong target
+   (wrong account/profile, wrong window, wrong tab, wrong file), a step skipped,
+   the request misunderstood, a result that says it failed / NOT VERIFIED /
+   NEEDS CONFIRMATION.
+2. Does the draft claim ANYTHING the results don't show? (e.g. says "in your main
+   account" but no result says "in the ... Chrome profile"; says "done" but a
+   result failed; invents details.)
+
+Reply with ONLY JSON:
+{{"ok": true}}
+or
+{{"ok": false, "problem": "<one short sentence>", "fix": "<what T.A.R. should do now, concretely, e.g. call open with profile=main>", "honest_reply": "<a short truthful reply to the user describing what really happened>"}}"""
+
+
+def self_review(key, model, ask, trace, reply):
+    """Second opinion on a finished turn. Returns None if fine, else a dict."""
+    if not trace:
+        return None
+    lines = "\n".join("- %s %s -> %s" % (a, json.dumps(g, ensure_ascii=False)[:160], str(r)[:260])
+                      for a, g, r in trace)
+    try:
+        r = gemini_call(key, model, {"contents": [{"role": "user", "parts": [{"text":
+            REVIEW_PROMPT.format(facts=live_status().strip()[:1200], ask=ask[:800], trace=lines,
+                                 reply=reply[:600] or "(no reply)")}]}],
+            "generationConfig": {"temperature": 0, "maxOutputTokens": 400}})
+    except Exception:
+        return None                      # never block a reply on the reviewer
+    text = "".join(p.get("text", "") for p in
+                   ((r.get("candidates") or [{}])[0].get("content") or {}).get("parts") or [])
+    import re as _re
+    m = _re.search(r"\{.*\}", text, _re.S)
+    try:
+        d = json.loads(m.group(0)) if m else {}
+    except ValueError:
+        return None
+    return None if d.get("ok", True) else d
+
+
 def chat_gemini(message, model, max_turns=10):
     import time
     import tar_brain as B
@@ -563,6 +618,10 @@ def chat_gemini(message, model, max_turns=10):
     # personal info against this, so the model can't invent an email
     T.USER_SAID = " \n ".join([h["content"] for h in B.history_tail(6)
                                if h.get("role") == "user"] + [message])
+    try:
+        T.USER_PROFILE = T.profile_from_message(message)   # the account THEY named
+    except Exception:
+        T.USER_PROFILE = None
 
     key = api_key("google")
     if not key:
@@ -590,6 +649,8 @@ def chat_gemini(message, model, max_turns=10):
     tools = gemini_tools()
     nudged = False
     last_check = None           # "ok" / "failed" from the latest verified action
+    trace = []                  # (action, args, result) -- for the self-check
+    reviewed = 0
 
     for _turn in range(max_turns):
         try:
@@ -642,6 +703,26 @@ def chat_gemini(message, model, max_turns=10):
                     "Tell me exactly what you want (and anything I'd need, "
                     "like the text to type) and I'll do it for real.")
             parts = [{"text": said}]
+        if not calls and trace and reviewed < 2:
+            draft = "".join(p.get("text", "") for p in parts if not p.get("thought")).strip()
+            verdict = self_review(key, model, message, trace, draft)
+            if verdict and reviewed == 0 and _turn + 1 < max_turns:
+                # first miss: let it actually fix the mistake
+                reviewed = 1
+                emit("info", v="self-check: " + str(verdict.get("problem", ""))[:120])
+                contents.append(content)
+                contents.append({"role": "user", "parts": [{"text": (
+                    "[self-check] Something is wrong with what you did or said: %s\n"
+                    "Fix it NOW with actions: %s\nThen reply truthfully, claiming only "
+                    "what the action results show." % (verdict.get("problem", ""),
+                                                        verdict.get("fix", "")))}]})
+                continue
+            if verdict:
+                # still wrong after one fix attempt: tell the truth instead
+                reviewed = 2
+                honest = (verdict.get("honest_reply") or
+                          "I didn't manage that correctly: %s" % verdict.get("problem", ""))
+                parts = [{"text": honest}]
         for p in parts:
             if p.get("text") and not p.get("thought"):
                 if first is None:
@@ -671,6 +752,7 @@ def chat_gemini(message, model, max_turns=10):
             B.act_log(act, _a or {}, out)
             emit("acted", action=act, args=payload.get("args") or {},
                  v=out, direct=False)
+            trace.append((act, _a or {}, out))
             results.append({"functionResponse": {
                 "name": c.get("name"), "response": {"result": str(out)}}})
         contents.append({"role": "user", "parts": results})
