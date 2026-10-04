@@ -77,7 +77,17 @@ for f in MatugenColors.qml Scaler.qml WindowRegistry.js; do
     fi
 done
 
-chmod +x "$DEST/tar/bin/tar-ai" "$DEST"/tar/*.py "$DEST/tar/tar_say.sh"
+chmod +x "$DEST/tar/bin/tar-ai" "$DEST/tar/bin/aur-user-install" "$DEST"/tar/*.py "$DEST/tar/tar_say.sh"
+
+# mouse: T.A.R. clicks through wlrctl (AUR). Build it for this user -- no sudo.
+if command -v wlrctl >/dev/null || [[ -x "$BIN/wlrctl" ]]; then
+    ok "mouse tool (wlrctl) present"
+elif "$DEST/tar/bin/aur-user-install" wlrctl wlrctl; then
+    ok "mouse tool (wlrctl) built into $BIN"
+else
+    warn "couldn't set up the mouse tool -- clicking stays off until you install"
+    warn "wlrctl (or use T.A.R. -> SETUP -> Mouse later)"
+fi
 ln -sf "$DEST/tar/bin/tar-ai" "$BIN/tar-ai"
 ok "linked $BIN/tar-ai"
 

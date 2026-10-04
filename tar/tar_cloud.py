@@ -283,6 +283,34 @@ SYSTEM = (
 )
 
 
+def live_status():
+    """What T.A.R. can do RIGHT NOW, checked fresh every message. Overrides
+    anything older in the conversation (e.g. 'mouse tool isn't installed'
+    from before it was installed)."""
+    import tar_tools as T
+    try:
+        click = T._pointer_ok()
+    except Exception:
+        click = False
+    try:
+        mons = T.a_monitors({})
+    except Exception:
+        mons = "unknown"
+    vision = bool(api_key("google"))
+    lines = [
+        "clicking/scrolling with the mouse: %s" % (
+            "AVAILABLE -- use click_on / click / scroll" if click else
+            "NOT available yet -- tell the user to open SETUP and install "
+            "the Mouse capability (one click, no password)"),
+        "seeing the screen (look, click by description): %s" % (
+            "AVAILABLE" if vision else "text-only (OCR), no vision key"),
+        "monitors: %s" % mons,
+    ]
+    out = "\n\nLIVE STATUS (checked just now -- this is the truth; ignore any "
+    out += "older message or action result in this chat that says otherwise):\n- "
+    return out + "\n- ".join(lines)
+
+
 def chat(message, model=None, max_turns=6):
     import tar_brain as B
     model = model or B.config().get("cloud_model") or default_model()
@@ -308,6 +336,7 @@ def chat(message, model=None, max_turns=6):
 
     system = SYSTEM.format(user=cfg.get("user", "the user"), voice=B.voice_block(cfg)) + B.mem_block()
     system += B.act_block_context(n=40, within_s=None)
+    system += live_status()
     system += B.persona_tail(cfg)
 
     history = B.history_tail(int(cfg.get("cloud_history_turns", 40)))
@@ -479,6 +508,7 @@ def chat_gemini(message, model, max_turns=6):
     cfg = B.config()
     system = SYSTEM.format(user=cfg.get("user", "the user"), voice=B.voice_block(cfg)) + B.mem_block()
     system += B.act_block_context(n=40, within_s=None)
+    system += live_status()
     system += B.persona_tail(cfg)
 
     contents = []

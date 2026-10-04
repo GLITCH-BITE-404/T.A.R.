@@ -178,6 +178,23 @@
           "desc": "Official Anthropic SDK. Installed into T.A.R.'s own venv, never the system python."
         }
       }
+    },
+    "mouse": {
+      "label": "Mouse",
+      "blurb": "Lets T.A.R. click, scroll and press buttons on screen for you.",
+      "icon": "󰍽",
+      "device_kind": null,
+      "engines": {
+        "wlrctl": {
+          "bin": "wlrctl",
+          "pkg": "wlrctl",
+          "source": "aur-user",
+          "size_mb": 1,
+          "quality": "native",
+          "recommended": true,
+          "desc": "Tiny Wayland tool for a virtual mouse. Built for your user only -- no password needed."
+        }
+      }
     }
   },
   "voices": {

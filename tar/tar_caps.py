@@ -181,6 +181,10 @@ def have(binname):
     for n in names:
         if n and shutil.which(n):
             return n
+        # tools built for the user (aur-user installs) live in ~/.local/bin,
+        # which isn't always on the PATH T.A.R. is launched with
+        if n and os.access(os.path.expanduser("~/.local/bin/" + n), os.X_OK):
+            return n
     return None
 
 
@@ -613,6 +617,21 @@ def install(cap, engine, want_voice=None, want_model=None):
         else:
             emit("install_done", cap=cap, engine=engine, ok=True,
                  v=cspec["label"] + " ready")
+        return 0
+
+    # ---- user-built AUR tools: no sudo, lands in ~/.local/bin
+    if spec.get("source") == "aur-user":
+        if not have(spec["bin"]):
+            script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                  "bin", "aur-user-install")
+            b = spec["bin"] if isinstance(spec["bin"], str) else spec["bin"][0]
+            rc = _stream([script, spec["pkg"], b], cap)
+            if rc != 0 or not have(spec["bin"]):
+                emit("install_done", cap=cap, engine=engine, ok=False,
+                     v="building %s failed (exit %s) -- see the log above" % (spec["pkg"], rc))
+                return 1
+        _choose(cap, engine)
+        emit("install_done", cap=cap, engine=engine, ok=True, v=cspec["label"] + " ready")
         return 0
 
     # ---- package engines

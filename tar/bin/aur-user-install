@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# Build an AUR package as the normal user and drop its binary in ~/.local/bin.
+# No sudo, no pacman database changes -- used by T.A.R.'s setup and install.sh
+# for small tools like wlrctl that aren't in the official repos.
+#
+#   aur-user-install <aur-package> <binary-name>
+#
+# Needs: git, makepkg, and the package's build tools already installed (the
+# script checks and says which are missing instead of failing halfway).
+set -euo pipefail
+
+pkg="${1:?usage: aur-user-install <aur-package> <binary>}"
+bin="${2:-$1}"
+dest="$HOME/.local/bin"
+keep="$HOME/.local/share/bite-os/pkgs"
+
+for t in git makepkg bsdtar; do
+    command -v "$t" >/dev/null || { echo "missing build tool: $t"; exit 2; }
+done
+
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+cd "$work"
+
+echo "fetching $pkg from the AUR..."
+ok=""
+for i in 1 2 3; do
+    git clone -q --depth 1 "https://aur.archlinux.org/$pkg.git" && { ok=1; break; }
+    sleep 3
+done
+[ -n "$ok" ] || { echo "couldn't reach the AUR -- check your internet"; exit 3; }
+cd "$pkg"
+
+# make sure the build dependencies are already present (we can't install them
+# without sudo)
+missing="$(makepkg --printsrcinfo | awk -F' = ' '/^\t(makedepends|depends) = /{print $2}' \
+          | sed 's/[<>=].*//' | while read -r d; do pacman -T "$d" >/dev/null || echo "$d"; done)"
+if [ -n "$missing" ]; then
+    echo "needs these packages first (install with pacman): $(echo $missing)"
+    exit 4
+fi
+
+echo "building $pkg..."
+if ! makepkg -f --noconfirm >"$work/build.log" 2>&1; then
+    echo "build failed -- last lines:"; tail -8 "$work/build.log"; exit 6
+fi
+file="$(ls ./*.pkg.tar.zst | head -1)"
+[ -n "$file" ] || { echo "build produced no package"; exit 5; }
+
+mkdir -p "$dest" "$keep"
+bsdtar -xOf "$file" "usr/bin/$bin" > "$dest/$bin"
+chmod +x "$dest/$bin"
+cp "$file" "$keep/"
+echo "installed $bin to $dest/$bin"
+echo "(system-wide instead: sudo pacman -U $keep/$(basename "$file"))"

@@ -1651,7 +1651,8 @@ def _pointer_ok():
 
 
 _NO_POINTER = ("can't click yet: the mouse tool isn't installed. Tell the user to "
-               "run:  yay -S wlrctl   (then try again)")
+               "open SETUP and install the Mouse capability (one click, no "
+               "password), then try again")
 
 
 def _move(x, y, mon=None):
