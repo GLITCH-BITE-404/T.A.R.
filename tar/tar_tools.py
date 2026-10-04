@@ -498,6 +498,8 @@ SITES = {
     "gemini": "https://gemini.google.com/", "whatsapp": "https://web.whatsapp.com/",
     "discord web": "https://discord.com/app", "spotify web": "https://open.spotify.com/",
     "cookie clicker": "https://orteil.dashnet.org/cookieclicker/",
+    "classroom": "https://classroom.google.com/", "google classroom": "https://classroom.google.com/",
+    "calendar": "https://calendar.google.com/", "google calendar": "https://calendar.google.com/",
     "2048": "https://play2048.co/", "chess": "https://www.chess.com/play/computer",
     "wordle": "https://www.nytimes.com/games/wordle/", "monkeytype": "https://monkeytype.com/",
     "google docs": "https://docs.google.com/", "google drive": "https://drive.google.com/",
@@ -518,6 +520,18 @@ def a_open(args):
     what = re.sub(r"^(?:the|a|an|my|some)\s+", "", what, flags=re.I).strip()
     what = re.sub(r"\s+(?:please|now|for me|on it|in it)$", "", what,
                   flags=re.I).strip()
+    # "classroom on my student chrome account" -> that Chrome profile
+    prof = resolve_profile(args.get("profile")) if args.get("profile") else None
+    mp = re.search(r"\s+(?:on|in|with|using|from)\s+(?:my\s+|the\s+)?([\w-]+(?:\s+[\w-]+)?)\s+"
+                   r"(?:chrome\s+)?(?:account|profile|user)$", what, flags=re.I)
+    if mp:
+        prof = resolve_profile(mp.group(1)) or prof
+        if not prof:
+            return ("no Chrome profile matching %r. profiles: %s" % (
+                mp.group(1), ", ".join(p["name"] + (" (school/managed)" if p["managed"] else "")
+                                       for p in chrome_profiles()) or "none found"))
+        what = what[:mp.start()].strip()
+        low = what.lower()
     # "cookie clicker on chrome" -> the site, opened in chrome
     want_browser = None
     mb = re.search(r"\s+(?:on|in|with|using)\s+(?:my\s+|the\s+)?(chrome|google chrome|firefox|"
@@ -566,6 +580,14 @@ def a_open(args):
 
     # "open youtube" is a website, not a binary
     site = SITES.get(low) or SITES.get(re.sub(r"\.com$", "", low))
+    if prof and (site or re.match(r"^(https?://|www\.)", low)):
+        url = site or (what if low.startswith("http") else "https://" + what)
+        sh(_profile_argv(prof, url), detach=True)
+        return "opening %s in the %r Chrome profile" % (url.split("//")[1].rstrip("/"), prof["name"])
+    if prof and not site:
+        # unknown site name: search it inside that profile
+        sh(_profile_argv(prof, "https://duckduckgo.com/?q=" + urlquote("\\" + what)), detach=True)
+        return "opening %r in the %r Chrome profile" % (what, prof["name"])
     if site and _already_open(low):
         w = _already_open(low)
         sh(["hyprctl", "dispatch", "focuswindow", "address:" + w["address"]])
@@ -973,6 +995,50 @@ def a_dns(args):
     return "%s -> %s" % (host, ", ".join(ips[:4]) if ips else "no records")
 
 
+# ---- Chrome profiles: "open classroom on my student account" -----------------
+def chrome_profiles():
+    """[{dir, name, given, managed}] from Chrome's Local State (names only)."""
+    out = []
+    for base in ("~/.config/google-chrome", "~/.config/chromium"):
+        p = os.path.expanduser(base + "/Local State")
+        try:
+            with open(p, encoding="utf-8") as f:
+                ic = json.load(f).get("profile", {}).get("info_cache", {})
+        except (OSError, ValueError):
+            continue
+        for d, v in ic.items():
+            out.append({"dir": d, "name": (v.get("name") or "").replace("\u200f", "").strip(),
+                        "given": v.get("gaia_given_name") or "",
+                        "managed": bool(v.get("is_managed")),
+                        "browser": "chromium" if "chromium" in base else "google-chrome-stable"})
+        if out:
+            break
+    return out
+
+
+def resolve_profile(want):
+    """'student' / 'school' -> the managed profile, 'main' -> Default, or a name."""
+    want = (want or "").strip().lower()
+    want = re.sub(r"\b(my|the|chrome|google|account|profile|user)\b", " ", want).strip()
+    if not want:
+        return None
+    profs = chrome_profiles()
+    for p in profs:                         # an exact name wins
+        if want in (p["name"].lower(), p["given"].lower(), p["dir"].lower()):
+            return p
+    if re.search(r"\b(student|school|work|managed|class|edu|learning)\b", want):
+        m = [p for p in profs if p["managed"]]
+        if m:
+            return m[0]
+    if re.search(r"\b(main|personal|default|normal|regular|own)\b", want):
+        return next((p for p in profs if p["dir"] == "Default"), None)
+    return next((p for p in profs if want in p["name"].lower() or want in p["given"].lower()), None)
+
+
+def _profile_argv(prof, url):
+    return [prof["browser"], "--profile-directory=" + prof["dir"], url]
+
+
 def _already_open(q):
     """A browser window whose title already shows this site/game -> it, else None."""
     words = re.sub(r"https?://|www\.|\.com|\.org|\.net|/.*$|\b(game|site|website|online|play)\b",
@@ -991,7 +1057,12 @@ def a_web(args):
     q = (args.get("q") or args.get("what") or "").strip()
     if not q:
         return "open what?"
-    if not str(args.get("new", "")).lower() in ("1", "true", "yes"):
+    prof = resolve_profile(args.get("profile")) if args.get("profile") else None
+    if args.get("profile") and not prof:
+        return ("no Chrome profile matching %r. profiles: %s" % (
+            args.get("profile"), ", ".join(p["name"] + (" (school/managed)" if p["managed"] else "")
+                                           for p in chrome_profiles()) or "none found"))
+    if not prof and not str(args.get("new", "")).lower() in ("1", "true", "yes"):
         w = _already_open(q)
         if w:
             sh(["hyprctl", "dispatch", "focuswindow", "address:" + w["address"]])
@@ -1007,6 +1078,9 @@ def a_web(args):
             q = "\\" + q
         url = "https://duckduckgo.com/?q=" + urlquote(q)
     browser = preferred_browser()
+    if prof:
+        sh(_profile_argv(prof, url), detach=True)
+        return "opened %s in the %r Chrome profile" % (url[:70], prof["name"])
     if browser:
         sh([browser, url], detach=True)
     else:
@@ -1495,7 +1569,7 @@ def a_keep_doing(args):
     old = loop_running()
     if old:
         a_stop_task({})
-    every = max(5, min(300, _int(args.get("every"), 10)))
+    every = max(3, min(300, _int(args.get("every"), 3)))
     minutes = max(1, min(120, _int(args.get("minutes"), 20)))
     here = os.path.dirname(os.path.abspath(__file__))
     log = open(os.path.join(DATA, "loop.log"), "a")
@@ -1506,7 +1580,7 @@ def a_keep_doing(args):
     with open(LOOP, "w", encoding="utf-8") as f:
         json.dump({"pid": p.pid, "task": task, "started": time.time(),
                    "until": time.time() + minutes * 60, "every": every,
-                   "round": 0, "status": "starting", "last": "", "paused": False,
+                   "round": 0, "status": "starting", "last": "", "paused": False, "feed": [],
                    "beat": time.time()}, f)
     sh(["notify-send", "-a", "T.A.R.", "T.A.R. is working", task[:120] + "  (say stop to end)"])
     return ("started in the background: %r -- a round every %ds for up to %d min. "
@@ -1962,6 +2036,56 @@ def _click_and_check(x, y, button, double, times=1, fast=False):
     return _verdict(_screen_change(b_path, a_path, x, y))
 
 
+# ---- remembered positions: don't re-find the same button every click ---------
+LOC_CACHE = os.path.join(DATA, "loc-cache.json")
+LOC_TTL_S = 900
+
+
+def _layout_sig():
+    """Changes whenever any window moves/resizes or another workspace shows."""
+    try:
+        ws = json.loads(sh(["hyprctl", "-j", "activeworkspace"])[1]).get("id")
+    except (ValueError, TypeError):
+        ws = None
+    geo = sorted((w.get("address"), tuple(w.get("at") or ()), tuple(w.get("size") or ()))
+                 for w in _clients())
+    return "%s|%s" % (ws, hash(str(geo)))
+
+
+def _loc_key(target):
+    return " ".join(re.sub(r"\b(the|a|an|that|this|button|on)\b", " ", target.lower()).split())
+
+
+def _loc_get(target):
+    try:
+        with open(LOC_CACHE, encoding="utf-8") as f:
+            c = json.load(f)
+    except (OSError, ValueError):
+        return None
+    e = c.get(_loc_key(target))
+    if e and time.time() - e.get("at", 0) < LOC_TTL_S and e.get("sig") == _layout_sig():
+        return e
+    return None
+
+
+def _loc_set(target, x, y, label, drop=False):
+    try:
+        with open(LOC_CACHE, encoding="utf-8") as f:
+            c = json.load(f)
+    except (OSError, ValueError):
+        c = {}
+    k = _loc_key(target)
+    if drop:
+        c.pop(k, None)
+    else:
+        c[k] = {"x": x, "y": y, "label": label, "at": time.time(), "sig": _layout_sig()}
+    try:
+        with open(LOC_CACHE, "w", encoding="utf-8") as f:
+            json.dump(c, f)
+    except OSError:
+        pass
+
+
 def a_click_on(args):
     """Click something on screen by description: 'the subscribe button'."""
     target = (args.get("target") or args.get("what") or "").strip()
@@ -1992,7 +2116,11 @@ def a_click_on(args):
         stop = needs_confirm("click_on", args, "click %r" % target)
         if stop:
             return stop
-    loc, err = _locate(target)
+    cached = _loc_get(target)
+    if cached:
+        loc, err = (cached["x"], cached["y"], cached["label"], "memory"), None
+    else:
+        loc, err = _locate(target)
     if not loc:
         return err
     x, y, label, how = loc
@@ -2005,10 +2133,20 @@ def a_click_on(args):
             return stop
     button = (args.get("button") or "left").lower()
     times = max(1, min(50, _int(args.get("times"), 1)))
-    check = _click_and_check(
-        x, y, button if button in ("left", "right", "middle") else "left",
-        str(args.get("double", "")).lower() in ("1", "true", "yes"), times,
-        str(args.get("fast", "")).lower() in ("1", "true", "yes"))
+    btn = button if button in ("left", "right", "middle") else "left"
+    dbl = str(args.get("double", "")).lower() in ("1", "true", "yes")
+    fast = str(args.get("fast", "")).lower() in ("1", "true", "yes")
+    check = _click_and_check(x, y, btn, dbl, times, fast)
+    if check.startswith("NOT VERIFIED") and how == "memory":
+        # the remembered spot is stale (page scrolled/changed): find it fresh
+        _loc_set(target, 0, 0, "", drop=True)
+        loc, err = _locate(target)
+        if not loc:
+            return err
+        x, y, label, how = loc
+        check = _click_and_check(x, y, btn, dbl, times, fast)
+    if check.startswith("VERIFIED"):
+        _loc_set(target, x, y, label)       # next time: straight there
     return "clicked %r%s at (%d, %d) [found by %s] -- %s" % (
         label[:60], (" %d times" % times) if times > 1 else "", x, y, how, check)
 
@@ -2569,7 +2707,8 @@ ACTIONS = {
                     r"^open (?:the )?(?:flash |thumb )?drive$"]),
 
     # launch
-    "open":       (a_open, "open an app, file or url",
+    "open":       (a_open, "open an app, file, url or known site (profile=<chrome profile> "
+                          "for a specific Chrome account)",
                    [r"^(?:open|launch|start|run) (?P<what>.+)$"]),
 
     # code
@@ -2737,7 +2876,9 @@ ACTIONS = {
     "dns":        (a_dns, "DNS lookup",
                    [r"^(?:dns|nslookup|lookup|resolve) (?P<host>\S+)$"]),
     "web":        (a_web, "open a site or search the web (lucky=true opens the first "
-                         "result -- use it to open a named site/web game you don't know the URL of)",
+                         "result -- use it to open a named site/web game you don't know the URL of; "
+                         "profile=<chrome profile name, or 'student'/'school'/'main'> to use "
+                         "that Chrome account -- never tell the user to log in instead)",
                    [r"^(?:google|search the web for|look up online)(?: up)? (?P<q>.+)$",
                     r"^(?:go to|browse|visit) (?P<q>\S+)$"]),
     "usb":        (a_usb, "list attached removable drives",

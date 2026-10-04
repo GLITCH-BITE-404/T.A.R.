@@ -343,6 +343,16 @@ def live_status():
             "AVAILABLE" if vision else "text-only (OCR), no vision key"),
         "monitors: %s" % mons,
     ]
+    try:
+        profs = T.chrome_profiles()
+    except Exception:
+        profs = []
+    if profs:
+        lines.append("Chrome profiles (use profile=<name> on open/web): " + ", ".join(
+            "%s%s" % (p["name"] or p["dir"],
+                      " = school/student account (managed)" if p["managed"]
+                      else (" = main account (%s)" % p["given"] if p["dir"] == "Default" and p["given"] else ""))
+            for p in profs))
     out = "\n\nLIVE STATUS (checked just now -- this is the truth; ignore any "
     out += "older message or action result in this chat that says otherwise):\n- "
     return out + "\n- ".join(lines)
@@ -695,20 +705,40 @@ def background_loop(task, every, minutes):
         T.loop_update(round=n, status="working", beat=time.time())
         before = len(open(B.ACTLOG_PATH).readlines()) if os.path.exists(B.ACTLOG_PATH) else 0
         captured = []
+        thought = []
         _emit = globals()["emit"]
+        t0 = time.time()
 
-        def tee(t, **kw):                       # remember what happened this round
-            if t == "acted":
-                captured.append("%s: %s" % (kw.get("action"), str(kw.get("v", ""))[:90]))
+        def push(kind, text):
+            d = T.loop_running() or {}
+            feed = (d.get("feed") or []) + [{"r": n, "k": kind, "t": text[:220],
+                                              "at": time.time()}]
+            T.loop_update(feed=feed[-14:], beat=time.time())
+
+        def tee(t, **kw):                       # the live feed the tasks tab shows
+            if t == "token":
+                thought.append(kw.get("v", ""))
+            elif t == "acted":
+                if thought and "".join(thought).strip():
+                    push("think", "".join(thought).strip())
+                    thought.clear()
+                v = str(kw.get("v", ""))
+                captured.append("%s: %s" % (kw.get("action"), v[:90]))
+                kind = "warn" if "NOT VERIFIED" in v or v.startswith(("couldn't", "refused")) else "act"
+                short = v.split(" -- ")[0][:110]
+                tail = " \u2713" if "-- VERIFIED" in v else (" \u2717" if kind == "warn" else "")
+                push(kind, "%s: %s%s" % (kw.get("action"), short, tail))
             _emit(t, **kw)
         globals()["emit"] = tee
         try:
             rc = chat_gemini(
                 "[background task, round %d] Task: %s\nDo the next round NOW: FIRST "
                 "call look to read the current state (numbers, prices, what's "
-                "affordable/lit up, any popup), THEN act on what you actually see -- "
-                "click things by their real names (e.g. 'Cursor'), not guesses. "
-                "Then stop. Keep any reply to a few words." % (n, task),
+                "affordable/lit up, any popup). Then write ONE short line of "
+                "reasoning -- what you see and what you'll do (e.g. '202 cookies, "
+                "Grandma 100 is affordable -> buy it, then click'). THEN act on what "
+                "you actually see -- click things by their real names (e.g. 'Cursor'), "
+                "not guesses. Then stop." % (n, task),
                 (B.config().get("cloud_model") or default_model()), max_turns=8)
         except Exception as e:
             rc = 1
@@ -717,6 +747,9 @@ def background_loop(task, every, minutes):
             globals()["emit"] = _emit
         after = len(open(B.ACTLOG_PATH).readlines()) if os.path.exists(B.ACTLOG_PATH) else 0
         fails = fails + 1 if (rc or after == before) else 0
+        if thought and "".join(thought).strip():
+            push("think", "".join(thought).strip())
+        push("round", "round %d done in %ds" % (n, time.time() - t0))
         T.loop_update(last=(captured[-1] if captured else "no actions this round"),
                       fails=fails, beat=time.time())
         if fails >= 3:

@@ -304,6 +304,8 @@ Item {
     onViewModeChanged: focusTimer.restart()
     Component.onCompleted: {
         focusTimer.restart();
+        // back after 30+ idle minutes? start a fresh chat (old one stays in CHATS)
+        window.panelRun(["session-auto"]);
         probe.running = true;
         introSeq.start();
         window.capsRefresh();     // know what's locked before the user asks
@@ -426,6 +428,22 @@ Item {
         window.panelRun(["session-open", sid]);
         window.historyOpen = false;
     }
+    // "24 minutes ago" for the chats list
+    function ago(ts) {
+        var d = Math.max(0, Date.now() / 1000 - Number(ts || 0));
+        if (d < 60) return "just now";
+        if (d < 3600) { var m = Math.floor(d / 60); return m + " minute" + (m === 1 ? "" : "s") + " ago"; }
+        if (d < 86400) { var h = Math.floor(d / 3600); return h + " hour" + (h === 1 ? "" : "s") + " ago"; }
+        var dd = Math.floor(d / 86400);
+        return dd === 1 ? "yesterday" : dd + " days ago";
+    }
+    function startedLabel(sid) {        // "20261004-111639" -> "4 Oct 11:16"
+        var m = String(sid).match(/^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})/);
+        if (!m) return sid;
+        var mon = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][parseInt(m[2]) - 1];
+        return parseInt(m[3]) + " " + mon + " " + m[4] + ":" + m[5];
+    }
+
     function newSession() {
         chatModel.clear();
         window.lastUser = ""; window.lastReply = "";
@@ -1932,7 +1950,7 @@ Item {
 
                     delegate: Rectangle {
                         width: ListView.view.width
-                        implicitHeight: window.s(42)
+                        implicitHeight: window.s((model.last || "") !== "" ? 56 : 42)
                         color: model.current
                             ? Qt.rgba(window.accent.r, window.accent.g,
                                       window.accent.b, 0.14)
@@ -1967,8 +1985,18 @@ Item {
                                     font.pixelSize: window.s(11)
                                 }
                                 Text {
-                                    text: model.id + "   ·   " + model.turns
+                                    Layout.fillWidth: true
+                                    visible: (model.last || "") !== ""
+                                    text: "\u21B3 " + model.last
+                                    color: theme.subtext0
+                                    elide: Text.ElideRight
+                                    font.family: "JetBrains Mono"
+                                    font.pixelSize: window.s(9)
+                                }
+                                Text {
+                                    text: window.ago(model.at) + "   \u00B7   " + model.turns
                                           + " msg" + (model.turns === 1 ? "" : "s")
+                                          + "   \u00B7   started " + window.startedLabel(model.id)
                                     color: theme.overlay1
                                     font.family: "JetBrains Mono"
                                     font.pixelSize: window.s(9)
@@ -2576,9 +2604,6 @@ Item {
     // ---- background tasks tab: docks to the right edge while a task runs
     TarTasks {
         id: tasksTab
-        anchors.right: parent.right
-        anchors.top: parent.top
-        anchors.topMargin: window.s(96)
         z: 900
         theme: theme
         accent: window.accent

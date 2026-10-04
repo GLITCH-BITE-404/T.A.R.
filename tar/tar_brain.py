@@ -759,7 +759,8 @@ def session_turns(sid):
                 except ValueError:
                     continue
                 if d.get("role") in ("user", "assistant") and d.get("content"):
-                    out.append({"role": d["role"], "content": d["content"]})
+                    out.append({"role": d["role"], "content": d["content"],
+                                "at": d.get("at")})
     except OSError:
         pass
     return out
@@ -779,16 +780,43 @@ def session_list():
                 continue
             sid = fn[:-6]
             turns = session_turns(sid)
-            first = next((t["content"] for t in turns if t["role"] == "user"), "")
+            users = [t["content"] for t in turns if t["role"] == "user"]
+            first = users[0] if users else ""
+            last = users[-1] if len(users) > 1 else ""
+            # last activity = newest message timestamp (fallback: file time)
+            at = max([float(t.get("at") or 0) for t in turns] or [0]) \
+                or os.path.getmtime(os.path.join(SESS_DIR, fn))
             rows.append({
                 "id": sid,
                 "title": (first[:58] + ("…" if len(first) > 58 else ""))
                          or "(empty)",
+                "last": last[:70] + ("…" if len(last) > 70 else ""),
                 "turns": len(turns),
                 "current": sid == cur,
-                "at": os.path.getmtime(os.path.join(SESS_DIR, fn)),
+                "at": at,
             })
+    rows.sort(key=lambda r: r["at"], reverse=True)    # most recently used first
     return rows
+
+
+IDLE_NEW_CHAT_S = 30 * 60
+
+
+def session_auto():
+    """Coming back after a while starts a fresh chat, so unrelated requests
+    don't pile into one endless session (and the old one stays findable)."""
+    try:
+        p = session_path()
+        turns = session_turns(session_id())
+    except Exception:
+        return False
+    if not turns:
+        return False
+    last = max(float(t.get("at") or 0) for t in turns) or os.path.getmtime(p)
+    if time.time() - last > IDLE_NEW_CHAT_S:
+        session_new(quiet=True)
+        return True
+    return False
 
 
 def history_tail(n):
@@ -1567,6 +1595,7 @@ def main():
                    help="unload the model and release its RAM/CPU")
     sub.add_parser("sessions", help="list past conversations")
     sub.add_parser("session-new", help="start a fresh conversation")
+    sub.add_parser("session-auto", help="new conversation if the current one is idle 30+ min")
     p = sub.add_parser("session-open", help="reopen a past conversation")
     p.add_argument("id")
     p = sub.add_parser("mem")
@@ -1769,6 +1798,10 @@ def main():
 
     elif a.cmd == "sessions":
         emit("sessions", rows=session_list())
+
+    elif a.cmd == "session-auto":
+        if session_auto():
+            emit("session", id=session_id(), turns=None, v="new chat (the last one was a while ago)")
 
     elif a.cmd == "session-new":
         session_new()
