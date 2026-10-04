@@ -4,13 +4,28 @@
 #   tar-ai new    open / focus AND start a new chat
 HARNESS="$HOME/.config/hypr/scripts/quickshell/TarHarness.qml"
 BRAIN="$HOME/.config/hypr/scripts/quickshell/tar/tar_brain.py"
-running() { hyprctl clients -j | jq -e '.[] | select(.title == "T.A.R.")' >/dev/null 2>&1; }
 
-if running; then
-    hyprctl dispatch focuswindow 'title:^(T\.A\.R\.)$' >/dev/null
+# every running T.A.R. instance (newest last)
+pids=$(qs list --all 2>/dev/null | awk '/Process ID/{pid=$3} /Config path/{if ($3 ~ /TarHarness/) print pid}')
+n=$(printf '%s\n' "$pids" | grep -c .)
+if [ "$n" -gt 1 ]; then
+    # duplicates pile up (crashed reloads, stuck windows): keep the newest only
+    printf '%s\n' "$pids" | head -n $((n - 1)) | xargs -r kill 2>/dev/null
+    sleep 0.5
+fi
+
+win=$(hyprctl clients -j | jq -r '.[] | select(.title == "T.A.R.") | .address' | tail -1)
+if [ -n "$pids" ] && [ -n "$win" ]; then
+    ws=$(hyprctl clients -j | jq -r --arg a "$win" '.[] | select(.address == $a) | .workspace.name')
+    case "$ws" in
+        special:*)  # left hidden by an interrupted look/click: bring it back here
+            cur=$(hyprctl activeworkspace -j | jq -r .id)
+            hyprctl dispatch movetoworkspacesilent "$cur,address:$win" >/dev/null ;;
+    esac
+    hyprctl dispatch focuswindow "address:$win" >/dev/null
     [ "$1" = "new" ] && qs ipc -p "$HARNESS" call tar newChat >/dev/null 2>&1
     exit 0
 fi
-# not open yet: start the fresh session first so it opens empty
+[ -n "$pids" ] && printf '%s\n' "$pids" | xargs -r kill 2>/dev/null   # running but no window: restart
 [ "$1" = "new" ] && python3 "$BRAIN" session-new >/dev/null 2>&1
 setsid -f qs -p "$HARNESS" >/dev/null 2>&1

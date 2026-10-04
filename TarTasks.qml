@@ -68,7 +68,7 @@ Item {
          : (now - (task.beat || now) > 120 ? "not responding" : (task.status || "running")))
     readonly property real elapsed: active
         ? (paused ? (task.paused_at || now) : now) - (task.started || now) : 0
-    readonly property real left: active && task.until
+    readonly property real timeLeft: active && task.until
         ? (task.until - (paused ? (task.paused_at || now) : now)) : -1
 
     // ---------------------------------------------------------------- chrome
@@ -162,7 +162,7 @@ Item {
                     ["status", tasks.status],
                     ["round", tasks.active ? String(tasks.task.round || 0) : ""],
                     ["running", tasks.fmt(tasks.elapsed)],
-                    ["left", tasks.left >= 0 ? tasks.fmt(tasks.left) : "no limit"],
+                    ["left", tasks.timeLeft >= 0 ? tasks.fmt(tasks.timeLeft) : "no limit"],
                     ["next", tasks.active && tasks.task.status === "waiting" && !tasks.paused
                              ? "in " + tasks.fmt((tasks.task.next_at || tasks.now) - tasks.now) : "—"]
                 ]
