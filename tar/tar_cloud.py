@@ -696,6 +696,12 @@ def chat_gemini(message, model, max_turns=10):
     for h in B.history_tail(int(cfg.get("cloud_history_turns", 40))):
         role = "model" if h["role"] == "assistant" else "user"
         contents.append({"role": role, "parts": [{"text": h["content"]}]})
+    if os.environ.get("TAR_VOICE") == "1":
+        system += ("\n\nVOICE INPUT: this message was SPOKEN and machine-transcribed from a "
+                   "quiet mic -- it may be misheard. If it is gibberish, a fragment, a random "
+                   "word/name, or doesn't clearly ask for something (e.g. 'love love', 'uh', "
+                   "'open up'), DO NOT run any action and DO NOT search the web for it: say "
+                   "what you heard in quotes and ask what they meant. Only act on a clear request.")
     contents.append({"role": "user", "parts": [{"text": message}]})
 
     emit("state", v="thinking", model=model, tier="cloud", lane="api",

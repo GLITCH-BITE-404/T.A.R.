@@ -1578,6 +1578,8 @@ def main():
     p.add_argument("--no-act", action="store_true",
                    help="disable tool use for this turn")
     p.add_argument("--attach", help="a file (image or text) to include")
+    p.add_argument("--voice", action="store_true",
+                   help="the message came from the microphone (may be misheard)")
     p = sub.add_parser("act", help="run an action directly")
     p.add_argument("action")
     p.add_argument("args", nargs="*", help="key=value pairs")
@@ -1708,6 +1710,8 @@ def main():
             pull(model)
 
     elif a.cmd == "chat":
+        if a.voice:
+            os.environ["TAR_VOICE"] = "1"
         chat(a.message, a.no_history, a.no_memory, a.no_act, a.attach)
 
     elif a.cmd == "act":

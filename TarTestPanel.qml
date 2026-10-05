@@ -40,6 +40,7 @@ Item {
     property int wakeHits: 0
     property string wakeWord: "hey_jarvis"
     property string wakeEngine: "builtin"
+    property string wakePhrase: ""
     property real wakeSens: 0.5
     property bool wakeTraining: false
     property var heardLines: []
@@ -390,13 +391,15 @@ Item {
                 Layout.fillWidth: true
                 spacing: root.s(5)
                 Repeater {
-                    model: [["hey_jarvis", "HEY JARVIS"], ["alexa", "ALEXA"],
+                    model: [["__heytar__", "HEY TAR"], ["hey_jarvis", "HEY JARVIS"], ["alexa", "ALEXA"],
                             ["hey_mycroft", "HEY MYCROFT"], ["hey_rhasspy", "HEY RHASSPY"]]
                     TarConsoleChip {
                         required property var modelData
                         theme: root.theme; accent: root.accent; scaleFn: root.scaleFn
                         text: modelData[1]
-                        active: root.wakeEngine === "builtin" && root.wakeWord === modelData[0]
+                        active: modelData[0] === "__heytar__"
+                            ? (root.wakeEngine === "voice" && /tar/i.test(root.wakePhrase))
+                            : (root.wakeEngine === "builtin" && root.wakeWord === modelData[0])
                         onTapped: root.setWakeWord(modelData[0])
                     }
                 }

@@ -48,7 +48,7 @@ Item {
     signal refresh()
 
     property real launchBlockHeight: 0
-    readonly property var capOrder: ["cloud", "tts", "stt", "wakeword", "camera", "vision", "mouse"]
+    readonly property var capOrder: ["tts", "stt", "wakeword", "camera", "vision", "mouse"]
 
     function devListFor(kind) {
         if (!devices) return [];

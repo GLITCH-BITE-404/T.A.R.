@@ -355,8 +355,45 @@ def a_close_tab(args):
         "VERIFIED: none left" if not left else "NOT VERIFIED: one still shows")
 
 
+_TERMINALS = ("kitty", "foot", "alacritty", "wezterm", "konsole", "gnome-terminal",
+              "xterm", "ghostty", "terminator", "tilix", "st")
+
+
+def _last_action(within_s=300):
+    """The last thing T.A.R. did (from actions.jsonl), if recent."""
+    try:
+        with open(os.path.join(DATA, "actions.jsonl"), "rb") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - 4000))
+            lines = f.read().decode("utf-8", "ignore").strip().splitlines()
+        for ln in reversed(lines):
+            try:
+                d = json.loads(ln)
+            except ValueError:
+                continue
+            if d.get("action") in ("closewin", "close"):
+                continue
+            return d if time.time() - d.get("at", 0) < within_s else None
+    except OSError:
+        pass
+    return None
+
+
 def a_closewin(args):
     what = (args.get("what") or "").strip().lower()
+    if what in ("it", "that", "this", "this one", "that one"):
+        # "close it" means the last thing T.A.R. showed/opened -- its OWN viewer
+        # included. It once closed the user's terminal (with Claude Code in it)
+        # right after "show me my camera".
+        last = _last_action()
+        if last and last.get("action") in ("camera_live", "cam_view", "camera_look",
+                                           "cam_snap", "look", "snip"):
+            emit("ui", action="camlive", state="off")
+            emit("ui", action="viewer", state="off")
+            return "closed T.A.R.'s camera/viewer panel -- VERIFIED"
+        if not last or not any(w["address"] in {o["address"] for o in tar_opened()} for w in _clients()):
+            return ("NOT DONE: 'it' is unclear -- I didn't just open a window. Ask the user "
+                    "which window to close (open: %s)" % ", ".join(_label(w) for w in _clients()))
     if what in _EVERYTHING:
         wins = _clients()               # already excludes T.A.R.
         if not wins:
@@ -387,6 +424,14 @@ def a_closewin(args):
         return "no app window to close"
     if w is False:
         return "no window matching %r" % (args.get("what") or args.get("q"))
+    cls = (w.get("class") or "").lower()
+    if any(t == cls or cls.endswith("." + t) for t in _TERMINALS) and \
+            w["address"] not in {o["address"] for o in tar_opened()}:
+        # a terminal may be running anything (an editor, a build, Claude Code)
+        stop = needs_confirm("closewin", args, "close the %s terminal %r -- whatever is "
+                             "running in it stops" % (_label(w), (w.get("title") or "")[:40]))
+        if stop:
+            return stop
     if _is_browser(w):
         # a browser window holds MANY tabs -- closing it to close one tab is
         # how T.A.R. once wiped the user's whole Chrome
@@ -3617,7 +3662,8 @@ ACTIONS = {
                                    "'show me the camera', 'watch me', 'can you see me'. No app opens.",
                     [r"^(?:show (?:me )?(?:the )?(?:camera|webcam)|watch me|camera on|turn on the camera)$",
                      r"^(?:camera|webcam) (?P<state>off)$",
-                     r"^(?P<state>close|stop|turn off) (?:the )?(?:camera|webcam)$"]),
+                     r"^(?P<state>close|stop|turn off|hide) (?:the |my )?(?:live )?(?:camera|webcam|cam)(?: feed| view| panel| stream)?$",
+                     r"^(?:show (?:me )?)?(?:my |the )?(?:live )?(?:camera|webcam) (?:feed|view|stream)$"]),
     "camera_look": (a_camera_look, "take a WEBCAM photo and answer about it (q=) -- for anything "
                                    "about the user or the room: 'am I smiling', 'what am I "
                                    "holding', 'how do I look'. NOT look (that's the screen).",
@@ -4032,6 +4078,8 @@ def _pre_verify(name, args):
 
 def _post_verify(name, args, pre, out):
     """Append a real check of the result. Never raises."""
+    if str(out).startswith(("NOT DONE", "NEEDS CONFIRMATION")) or "VERIFIED" in str(out):
+        return ""
     try:
         if name in _WINDOW_OPENERS and pre is not None:
             for _ in range(10):             # up to ~5s for the app/page to show up

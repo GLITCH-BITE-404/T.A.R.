@@ -381,7 +381,7 @@ def main():
         w = wake_cfg()
         emit("wake_status", module=module_present(), models=models_present(),
              engine=w["engine"], word=w["word"], voice=os.path.exists(VOICE_FILE),
-             sensitivity=w["sensitivity"])
+             sensitivity=w["sensitivity"], phrase=w.get("phrase", ""))
         return 0
     if "--set" in a:
         # --set word=alexa  sensitivity=0.7  engine=builtin|voice  phrase="..."

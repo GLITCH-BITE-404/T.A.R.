@@ -148,11 +148,25 @@ def record(max_s, silence_s):
 
     frames = bytearray()
     chunk = RATE // 20                     # 50ms
+    manual = silence_s is None             # voice note: stop/cancel come on stdin
+    ctl = {"cmd": None}
+    if manual:
+        import threading
+
+        def _stdin():
+            for line in sys.stdin:
+                if line.strip() in ("stop", "cancel"):
+                    ctl["cmd"] = line.strip()
+                    return
+            ctl["cmd"] = ctl["cmd"] or "cancel"     # UI went away
+        threading.Thread(target=_stdin, daemon=True).start()
     started = time.time()
     last_loud = None
     spoke = False
     try:
         while time.time() - started < max_s:
+            if ctl["cmd"]:
+                break
             raw = p.stdout.read(chunk * 2)
             if not raw:
                 break
@@ -168,7 +182,7 @@ def record(max_s, silence_s):
                 spoke = True
                 last_loud = now
             # stop once they've clearly stopped talking
-            if spoke and last_loud and (now - last_loud) > silence_s:
+            if not manual and spoke and last_loud and (now - last_loud) > silence_s:
                 break
     except (OSError, KeyboardInterrupt):
         pass
@@ -179,13 +193,35 @@ def record(max_s, silence_s):
             pass
         restore_gain(dev, prev_gain)
 
+    if ctl["cmd"] == "cancel":
+        emit("transcript", v="", ok=False, cancelled=True, v_reason="cancelled")
+        return None
     if not spoke:
         emit("transcript", v="", ok=False, v_reason="no speech detected")
         return None
     return bytes(frames)
 
 
+def _too_quiet(pcm):
+    """Loudest 300ms of the clip. Near-silence makes transcribers invent words
+    ('love love', 'tawfiq') -- never send those as commands."""
+    import array
+    a = array.array("h", pcm)
+    if not a:
+        return True
+    win, best = RATE * 3 // 10, 0
+    for i in range(0, max(1, len(a) - win), win // 2):
+        seg = a[i:i + win]
+        if seg:
+            best = max(best, (sum(x * x for x in seg[::4]) / len(seg[::4])) ** 0.5)
+    return best < 250
+
+
 def transcribe(pcm):
+    if _too_quiet(pcm):
+        emit("transcript", v="", ok=False,
+             v_reason="didn't hear any speech (mic too quiet?) -- nothing sent")
+        return
     model = model_path()                # may be None: the cloud path doesn't need it
     binary = None
     for c in ("whisper-cli", "whisper-cpp", "main"):
@@ -263,6 +299,8 @@ def main():
         max_s = float(sys.argv[sys.argv.index("--seconds") + 1])
     if "--silence" in sys.argv:
         sil = float(sys.argv[sys.argv.index("--silence") + 1])
+    if "--manual" in sys.argv:            # voice note: record until stop/cancel
+        max_s, sil = 180.0, None
     pcm = record(max_s, sil)
     if pcm:
         transcribe(pcm)

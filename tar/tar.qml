@@ -109,6 +109,9 @@ Item {
     // ---- wake word: "hey jarvis" -> come to the front and start listening
     property bool wakeOn: false
     property bool wakePaused: false
+    property bool voiceNext: false
+    // setup / tests own the mic: the background wake listener stays off
+    readonly property bool wakeBlocked: window.settingsOpen || window.testMode !== ""
     readonly property string wakePath: Quickshell.env("HOME")
         + "/.config/hypr/scripts/quickshell/tar/tar_wake.py"
 
@@ -151,7 +154,8 @@ Item {
             onRead: data => {
                 var d; try { d = JSON.parse(data); } catch (e) { return; }
                 if (d.t === "level") testPanel.pushLevel(d.v);
-                else if (d.t === "enroll_prompt") window.testStatus = "\u25CF " + d.v;
+                else if (d.t === "enroll_prompt") window.testStatus = "\u25CF " + (window.trainPhrase
+                    ? "say \"" + window.trainPhrase + "\" now (" + d.n + "/" + d.of + ")" : d.v);
                 else if (d.t === "enroll_got") { window.testStatus = "\u2713 got sample " + d.n + "/" + d.of;
                                                  window.sfx("act"); }
                 else if (d.t === "ok") { window.testStatus = "\u2713 " + d.v;
@@ -179,6 +183,7 @@ Item {
                     if (w.word) testPanel.wakeWord = w.word;
                     if (w.engine) testPanel.wakeEngine = w.engine;
                     if (w.sensitivity) testPanel.wakeSens = w.sensitivity;
+                    if (w.phrase !== undefined) testPanel.wakePhrase = w.phrase || "";
                     if (d.t === "ok") window.testStatus = "\u2713 " + d.v;
                 } else if (d.t === "error") window.testStatus = "\u2717 " + d.v;
                 else if (d.t === "install_log") window.testStatus = d.v;
@@ -194,6 +199,7 @@ Item {
         }
     }
     property bool wakeRestartAfterCtl: false
+    property string trainPhrase: ""
     function wakeCtl(args) {
         if (wakeCtlProc.running) { window.wakeCtlQueue.push(args); return; }
         wakeCtlProc.argv = args; wakeCtlProc.running = true;
@@ -244,7 +250,7 @@ Item {
     }
     Process {
         id: wakeProc
-        running: window.wakeOn && !window.wakePaused
+        running: window.wakeOn && !window.wakePaused && !window.wakeBlocked
         command: ["python3", Quickshell.env("HOME")
                   + "/.config/hypr/scripts/quickshell/tar/tar_wake.py"]
         stdout: SplitParser {
@@ -253,14 +259,15 @@ Item {
                 var d;
                 try { d = JSON.parse(data); } catch (e) { return; }
                 if (d.t === "wake") {
-                    if (listenProc.running || window.busy) return;
+                    if (listenProc.running || window.busy || window.wakeBlocked) return;
+                    window.historyOpen = false;
                     Quickshell.execDetached(["hyprctl", "dispatch", "focuswindow",
                                              "title:^(T\\.A\\.R\\.)$"]);
                     fx.play("shock");
                     window.sfx("boot");
                     window.listen();
                 } else if (d.t === "wake_ready") {
-                    window.statusNote = "wake word on -- say \"hey jarvis\"";
+                    window.statusNote = "wake word on -- " + (d.v || "listening");
                 } else if (d.t === "error") {
                     window.say("sys", "wake word: " + (d.v || "failed"));
                     window.wakeOn = false;
@@ -410,6 +417,7 @@ Item {
         choiceOpen || historyOpen || settingsOpen || testMode !== ""
 
     function escapeLayer() {
+        if (window.noteRec) { window.noteCancel(); return; }
         if (window.choiceOpen)     { window.choiceOpen = false;   return; }
         if (window.testMode !== "") { window.closeTest();         return; }
         if (window.historyOpen)    { window.historyOpen = false;  return; }
@@ -672,6 +680,11 @@ Item {
     function playUiAction(name, d) {
         if (name === "close")           { window.close(); return; }
         if (name === "newchat")         { window.newSession(); return; }
+        if (name === "viewer") {
+            window.viewerOpen = String(d.state || "on") !== "off";
+            if (!window.viewerOpen) window.viewerLive = false;
+            return;
+        }
         if (name === "camlive") {
             var on = String(d.state || "on") !== "off";
             window.viewerLive = on;
@@ -1261,6 +1274,7 @@ Item {
                     window.micLevel = 0;
                     if (d.ok && d.v) {
                         window.sfx("ok");
+                        window.voiceNext = true;      // tell the brain it was spoken
                         window.submit(d.v);
                     } else {
                         window.sfx("warn");
@@ -1275,6 +1289,77 @@ Item {
         }
         onExited: (c, st) => { window.listening = false; window.micLevel = 0; }
     }
+    // ---- VOICE NOTE (like WhatsApp/Discord/ChatGPT): the input bar fills with
+    // a live waveform. STOP transcribes into the box (after whatever you had
+    // typed), X throws the recording away. Nothing is sent until you press Enter.
+    property bool noteRec: false
+    property bool noteBusy: false            // transcribing
+    property var noteLevels: []
+    property real noteStart: 0
+    property real noteNow: 0
+    property string noteDraft: ""
+    Process {
+        id: noteProc
+        stdinEnabled: true
+        command: ["python3", Quickshell.env("HOME")
+                  + "/.config/hypr/scripts/quickshell/tar/tar_listen.py", "--manual"]
+        stdout: SplitParser {
+            splitMarker: "\n"
+            onRead: data => {
+                var d; try { d = JSON.parse(data); } catch (e) { return; }
+                if (d.t === "level") {
+                    var a = window.noteLevels.slice();
+                    a.push(Math.min(1, Math.sqrt(d.v)));
+                    if (a.length > 160) a = a.slice(a.length - 160);
+                    window.noteLevels = a;
+                } else if (d.t === "listen" && d.v === "transcribing") {
+                    window.noteBusy = true;
+                } else if (d.t === "transcript") {
+                    window.noteRec = false; window.noteBusy = false;
+                    if (d.ok && d.v) {
+                        var base = window.noteDraft;
+                        input.text = base + (base && !/\s$/.test(base) ? " " : "") + d.v;
+                        input.cursorPosition = input.text.length;
+                        window.sfx("ok");
+                    } else {
+                        input.text = window.noteDraft;
+                        if (!d.cancelled) window.statusNote = d.v_reason || "didn't catch that";
+                    }
+                    input.forceActiveFocus();
+                } else if (d.t === "error") {
+                    window.noteRec = false; window.noteBusy = false;
+                    input.text = window.noteDraft;
+                    window.statusNote = d.v;
+                }
+            }
+        }
+        onExited: { window.noteRec = false; window.noteBusy = false; }
+    }
+    Timer {
+        interval: 250; repeat: true; running: window.noteRec
+        onTriggered: window.noteNow = Date.now()
+    }
+    function noteStartRec() {
+        if (window.noteRec || window.busy) return;
+        window.shutUp();
+        window.noteDraft = input.text;          // keep what you typed
+        window.noteLevels = [];
+        window.noteStart = Date.now(); window.noteNow = window.noteStart;
+        window.noteRec = true; window.noteBusy = false;
+        window.sfx("listen");
+        noteProc.running = true;
+    }
+    function noteStop()   { if (noteProc.running) noteProc.write("stop\n"); }
+    function noteCancel() {
+        if (noteProc.running) noteProc.write("cancel\n");
+        window.noteRec = false;
+        input.text = window.noteDraft;
+    }
+    function noteClock() {
+        var sec = Math.max(0, Math.floor((window.noteNow - window.noteStart) / 1000));
+        return Math.floor(sec / 60) + ":" + (sec % 60 < 10 ? "0" : "") + (sec % 60);
+    }
+
     function listen() {
         if (listenProc.running) { listenProc.running = false; return; }
         var stt = window.capsData ? window.capsData.stt : undefined;
@@ -1613,9 +1698,10 @@ Item {
             return;
         }
 
-        say("you", text);
+        say("you", (window.voiceNext ? "\u{f036c} " : "") + text);
         window.streamIndex = -1;
-        run(["chat", "-m", text]);
+        run(window.voiceNext ? ["chat", "--voice", "-m", text] : ["chat", "-m", text]);
+        window.voiceNext = false;
     }
 
     // ------------------------------------------------------------------ visuals
@@ -1776,10 +1862,23 @@ Item {
                 onClosed: window.closeTest()
                 onWakeStart: window.startWakeTest()
                 onWakeStop: window.stopWakeTest()
-                onSetWakeWord: w => w === "__voice__" ? window.applyWake(["engine=voice"])
-                                                      : window.applyWake(["word=" + w])
+                onSetWakeWord: w => {
+                    if (w === "__voice__") { window.applyWake(["engine=voice"]); return; }
+                    if (w === "__heytar__") {
+                        // no ready-made "hey tar" model exists -- so it learns YOUR voice saying it
+                        window.trainPhrase = "hey tar";
+                        window.wakeCtl(["--set", "phrase=hey tar"]);
+                        window.stopWakeTest();
+                        testPanel.wakeTraining = true;
+                        window.testStatus = "say \"hey tar\" 4 times when prompted";
+                        wakeEnrollProc.running = true;
+                        return;
+                    }
+                    window.applyWake(["word=" + w]);
+                }
                 onSetWakeSens: v => window.applyWake(["sensitivity=" + v])
                 onTrainVoice: {
+                    window.trainPhrase = "";
                     window.stopWakeTest();
                     testPanel.wakeTraining = true;
                     window.testStatus = "get ready -- say your phrase when prompted";
@@ -2618,8 +2717,61 @@ Item {
                         font.bold: true
                     }
 
+                    // recording: dot + timer + waveform (newest on the right)
+                    Row {
+                        visible: window.noteRec
+                        spacing: window.s(8)
+                        Layout.alignment: Qt.AlignVCenter
+                        Rectangle {
+                            width: window.s(8); height: width; radius: width / 2
+                            anchors.verticalCenter: parent.verticalCenter
+                            color: window.noteBusy ? window.accent : theme.red
+                            SequentialAnimation on opacity {
+                                loops: Animation.Infinite; running: window.noteRec
+                                NumberAnimation { to: 0.2; duration: 500 }
+                                NumberAnimation { to: 1; duration: 500 }
+                            }
+                        }
+                        Text {
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: window.noteBusy ? "transcribing\u2026" : window.noteClock()
+                            color: theme.text
+                            font.family: "JetBrains Mono"; font.pixelSize: window.s(12)
+                        }
+                    }
+                    Item {
+                        id: wave
+                        visible: window.noteRec
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        clip: true
+                        readonly property real step: window.s(4)
+                        Row {
+                            anchors.right: parent.right
+                            anchors.verticalCenter: parent.verticalCenter
+                            spacing: wave.step - window.s(2)
+                            Repeater {
+                                model: Math.max(1, Math.floor(wave.width / wave.step))
+                                Rectangle {
+                                    readonly property int n: Math.floor(wave.width / wave.step)
+                                    readonly property real v: {
+                                        var L = window.noteLevels, i = L.length - n + index;
+                                        return i >= 0 && i < L.length ? L[i] : 0;
+                                    }
+                                    width: window.s(2)
+                                    height: Math.max(window.s(2), wave.height * 0.8 * v)
+                                    radius: width / 2
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    color: window.noteBusy ? theme.overlay1 : window.accent
+                                    opacity: v > 0 ? 0.55 + 0.45 * v : 0.25
+                                }
+                            }
+                        }
+                    }
+
                     TextField {
                         id: input
+                        visible: !window.noteRec
                         Layout.fillWidth: true
                         Layout.fillHeight: true
                         background: Item {}
@@ -2672,6 +2824,29 @@ Item {
                             else { window.escapeLayer(); }
                             event.accepted = true;
                         }
+                    }
+
+                    // voice note controls: mic to start; X cancel / STOP transcribe
+                    TarHudButton {
+                        Layout.alignment: Qt.AlignVCenter
+                        visible: !window.busy && !window.noteRec
+                        theme: theme; accent: window.accent; scaleFn: window.s
+                        glyph: "\u{f036c}"; label: "VOICE"
+                        onClicked: window.noteStartRec()
+                    }
+                    TarHudButton {
+                        Layout.alignment: Qt.AlignVCenter
+                        visible: window.noteRec && !window.noteBusy
+                        theme: theme; accent: theme.red; scaleFn: window.s
+                        glyph: "\u{f0156}"; label: "CANCEL"
+                        onClicked: window.noteCancel()
+                    }
+                    TarHudButton {
+                        Layout.alignment: Qt.AlignVCenter
+                        visible: window.noteRec && !window.noteBusy
+                        theme: theme; accent: theme.green; scaleFn: window.s
+                        glyph: "\u{f04db}"; label: "STOP"
+                        onClicked: window.noteStop()
                     }
 
                     // Only STOP lives on the input bar now -- it is the one
