@@ -2252,8 +2252,34 @@ Item {
                 busyLabel: window.capLabel
 
                 onRefresh: { window.flashSetup(); window.capsRefresh(); }
-                onSetAutostart: (key, on) =>
-                    window.capsRun(["autostart", key, on ? "on" : "off"])
+                onSetAutostart: (key, on) => {
+                    window.capsRun(["autostart", key, on ? "on" : "off"]);
+                    // apply it NOW too, and say what changed -- toggles used to
+                    // only take effect on the next launch, which looked broken
+                    var now = "";
+                    if (key === "speak") {
+                        window.speakReplies = on;
+                        window.capsRun(["speak", on ? "on" : "off"]);
+                        now = on ? "replies will be spoken" : "replies stay silent";
+                    } else if (key === "wake") {
+                        window.wakeOn = on;
+                        now = on ? "wake word listening (paused while setup is open)" : "wake word off";
+                    } else if (key === "sfx") {
+                        window.sfxEnabled = on;
+                        if (on) window.sfx("ok");
+                        now = on ? "ui sounds on" : "ui sounds off";
+                    } else if (key === "mic") {
+                        now = on ? "the mic will start listening when T.A.R. opens"
+                                 : "the mic stays off when T.A.R. opens";
+                    } else if (key === "greet") {
+                        now = on ? "T.A.R. will greet you when it opens" : "no greeting";
+                    } else if (key === "warm") {
+                        now = window.cloudMode
+                            ? "saved -- preload only matters for local models"
+                            : (on ? "the local model loads at launch" : "the model loads on first use");
+                    }
+                    window.statusNote = "\u2713 " + now;
+                }
                 onSetStartMode: mode => window.capsRun(["start-mode", mode])
                 onConnectCap: cap => window.installRun(["connect", cap])
                 onChooseEngine: (cap, engine) => window.capsRun(["set-engine", cap, engine])
