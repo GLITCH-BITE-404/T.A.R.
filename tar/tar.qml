@@ -112,6 +112,12 @@ Item {
     property bool voiceNext: false
     // setup / tests own the mic: the background wake listener stays off
     readonly property bool wakeBlocked: window.settingsOpen || window.testMode !== ""
+    readonly property bool wakeShouldRun: wakeOn && !wakePaused && !wakeBlocked
+    onWakeShouldRunChanged: {
+        wakeProc.running = wakeShouldRun;       // explicit: (re)reads the config every start
+        if (!wakeShouldRun && /^wake word on/.test(window.statusNote))
+            window.statusNote = wakeOn ? "wake word paused while setup is open" : "wake word off";
+    }
     readonly property string wakePath: Quickshell.env("HOME")
         + "/.config/hypr/scripts/quickshell/tar/tar_wake.py"
 
@@ -250,7 +256,7 @@ Item {
     }
     Process {
         id: wakeProc
-        running: window.wakeOn && !window.wakePaused && !window.wakeBlocked
+        running: false
         command: ["python3", Quickshell.env("HOME")
                   + "/.config/hypr/scripts/quickshell/tar/tar_wake.py"]
         stdout: SplitParser {
@@ -261,11 +267,15 @@ Item {
                 if (d.t === "wake") {
                     if (listenProc.running || window.busy || window.wakeBlocked) return;
                     window.historyOpen = false;
+                    window.afterWake = true;
+                    window.statusNote = "\u25C9 heard the wake word -- listening";
                     Quickshell.execDetached(["hyprctl", "dispatch", "focuswindow",
                                              "title:^(T\\.A\\.R\\.)$"]);
                     fx.play("shock");
                     window.sfx("boot");
                     window.listen();
+                } else if (d.t === "muted") {
+                    window.statusNote = "\u2717 " + d.v;
                 } else if (d.t === "wake_ready") {
                     window.statusNote = "wake word on -- " + (d.v || "listening");
                 } else if (d.t === "error") {
@@ -275,9 +285,9 @@ Item {
             }
         }
         // crashed or the mic went away: try again in a moment while it's wanted
-        onExited: if (window.wakeOn) wakeRetry.restart()
+        onExited: if (window.wakeShouldRun) wakeRetry.restart()
     }
-    Timer { id: wakeRetry; interval: 5000; onTriggered: if (window.wakeOn && !wakeProc.running) wakeProc.running = true }
+    Timer { id: wakeRetry; interval: 5000; onTriggered: if (window.wakeShouldRun && !wakeProc.running) wakeProc.running = true }
     readonly property real targetW: windowed
         ? window.width - s(16)
         : Math.min(window.width * 0.62, s(900))
@@ -417,7 +427,7 @@ Item {
         choiceOpen || historyOpen || settingsOpen || testMode !== ""
 
     function escapeLayer() {
-        if (window.noteRec) { window.noteCancel(); return; }
+        if (window.hearing) { window.noteCancel(); return; }
         if (window.choiceOpen)     { window.choiceOpen = false;   return; }
         if (window.testMode !== "") { window.closeTest();         return; }
         if (window.historyOpen)    { window.historyOpen = false;  return; }
@@ -665,6 +675,9 @@ Item {
     IpcHandler {
         target: "tar"
         function newChat(): void { window.newSession(); }
+        // bindable from Hyprland: qs ipc -p TarHarness.qml call tar voice
+        function voice(): void { if (window.hearing) window.noteStop(); else window.noteStartRec(); }
+        function view(mode: string): void { if (mode === "orb" || mode === "chat") window.viewMode = mode; }
     }
 
     // Orb/panel effects an action can trigger. These are UI-only: tar_tools
@@ -1257,7 +1270,8 @@ Item {
         id: listenProc
         command: ["python3", Quickshell.env("HOME")
                   + "/.config/hypr/scripts/quickshell/tar/tar_listen.py",
-                  "--seconds", "15", "--silence", "1.3"]
+                  "--seconds", "15", "--silence", "1.3", "--ctl"]
+        stdinEnabled: true
         stdout: SplitParser {
             splitMarker: "\n"
             onRead: data => {
@@ -1265,17 +1279,33 @@ Item {
                 try { d = JSON.parse(data); } catch (e) { return; }
                 if (d.t === "level") {
                     window.micLevel = d.v;
+                    var lv = window.noteLevels.slice();
+                    lv.push(Math.min(1, Math.sqrt(d.v)));
+                    if (lv.length > 160) lv = lv.slice(lv.length - 160);
+                    window.noteLevels = lv;
                 } else if (d.t === "listen") {
+                    if (d.v === "transcribing") { window.listenBusy = true; window.listening = false; return; }
                     window.listening = true;
                     window.statusNote = d.v;
-                    if (d.v === "recording") window.sfx("listen");
+                    if (d.v === "recording") { window.noteLevels = []; window.sfx("listen"); }
                 } else if (d.t === "transcript") {
-                    window.listening = false;
+                    window.listening = false; window.listenBusy = false;
                     window.micLevel = 0;
-                    if (d.ok && d.v) {
+                    var heard = d.ok ? window.stripWake(d.v || "") : "";
+                    if (d.ok && window.afterWake && heard === "") {
+                        // you only said the wake word -- ask, and listen again
+                        window.afterWake = false;
+                        window.statusNote = "yes?";
+                        window.speakShort("yes?");
+                        listenRestart.start();
+                        return;
+                    }
+                    window.afterWake = false;
+                    if (d.cancelled) return;
+                    if (d.ok && heard) {
                         window.sfx("ok");
                         window.voiceNext = true;      // tell the brain it was spoken
-                        window.submit(d.v);
+                        window.submit(heard);
                     } else {
                         window.sfx("warn");
                         window.say("sys", d.v_reason || "didn't catch that");
@@ -1287,11 +1317,59 @@ Item {
                 }
             }
         }
-        onExited: (c, st) => { window.listening = false; window.micLevel = 0; }
+        onExited: (c, st) => { window.listening = false; window.listenBusy = false; window.micLevel = 0; }
+    }
+    Timer { id: listenRestart; interval: 900; onTriggered: if (!listenProc.running) listenProc.running = true }
+    property bool afterWake: false
+    // drop the wake phrase from the start of what was heard ("hey tar, open
+    // spotify" -> "open spotify"; "היטר" alone -> "")
+    function stripWake(t) {
+        var x = String(t).trim();
+        x = x.replace(/^(?:hey|hay|hi|hei|ok|okay)?[\s,]*(?:t\.?\s?a\.?\s?r\.?|tar|tarr|tahr|tao|tara|jarvis|mycroft|rhasspy|alexa)\b[\s,.!?]*/i, "");
+        x = x.replace(/^(?:היי?|הי|הלו)?\s*(?:טאר|טר|תאר|תר|ג'ארוויס|ג׳רוויס)[\s,.!?]*/, "");
+        x = x.replace(/^היטר[\s,.!?]*/, "");
+        return x.trim();
+    }
+    function speakShort(t) {
+        var tts = window.capsData ? window.capsData.tts : undefined;
+        if (tts && tts.ready && window.speakReplies) window.speak(t);
     }
     // ---- VOICE NOTE (like WhatsApp/Discord/ChatGPT): the input bar fills with
     // a live waveform. STOP transcribes into the box (after whatever you had
     // typed), X throws the recording away. Nothing is sent until you press Enter.
+    // ---- ONE draft for both views (chat + orb), kept when you switch views,
+    // open setup/chats, or close T.A.R. -- restored next time
+    property string draft: ""
+    property bool draftLoaded: false
+    readonly property string draftFile: (Quickshell.env("TAR_DATA") || (Quickshell.env("HOME")
+        + "/.local/share/bite-os/tar")) + "/draft.txt"
+    Process {
+        id: draftLoad
+        running: true
+        command: ["cat", window.draftFile]
+        stdout: StdioCollector {
+            onStreamFinished: {
+                if (window.draft === "") window.draft = (this.text || "").replace(/\n$/, "");
+                window.draftLoaded = true;
+            }
+        }
+        onExited: window.draftLoaded = true
+    }
+    Process {
+        id: draftSave
+        property string body: ""
+        command: ["python3", "-c", "import sys,os; p=sys.argv[1]; os.makedirs(os.path.dirname(p), exist_ok=True); open(p,'w').write(sys.argv[2])",
+                  window.draftFile, body]
+    }
+    Timer {
+        id: draftTimer; interval: 500
+        onTriggered: { draftSave.body = window.draft; draftSave.running = true; }
+    }
+    onDraftChanged: {
+        if (input.text !== window.draft) input.text = window.draft;
+        if (window.draftLoaded) draftTimer.restart();
+    }
+
     property bool noteRec: false
     property bool noteBusy: false            // transcribing
     property var noteLevels: []
@@ -1318,17 +1396,17 @@ Item {
                     window.noteRec = false; window.noteBusy = false;
                     if (d.ok && d.v) {
                         var base = window.noteDraft;
-                        input.text = base + (base && !/\s$/.test(base) ? " " : "") + d.v;
+                        window.draft = base + (base && !/\s$/.test(base) ? " " : "") + d.v;
                         input.cursorPosition = input.text.length;
                         window.sfx("ok");
                     } else {
-                        input.text = window.noteDraft;
+                        window.draft = window.noteDraft;
                         if (!d.cancelled) window.statusNote = d.v_reason || "didn't catch that";
                     }
                     input.forceActiveFocus();
                 } else if (d.t === "error") {
                     window.noteRec = false; window.noteBusy = false;
-                    input.text = window.noteDraft;
+                    window.draft = window.noteDraft;
                     window.statusNote = d.v;
                 }
             }
@@ -1342,18 +1420,34 @@ Item {
     function noteStartRec() {
         if (window.noteRec || window.busy) return;
         window.shutUp();
-        window.noteDraft = input.text;          // keep what you typed
+        window.noteDraft = window.draft;        // keep what you typed
         window.noteLevels = [];
         window.noteStart = Date.now(); window.noteNow = window.noteStart;
         window.noteRec = true; window.noteBusy = false;
         window.sfx("listen");
         noteProc.running = true;
     }
-    function noteStop()   { if (noteProc.running) noteProc.write("stop\n"); }
+    // "hearing" = the input bar shows the waveform: a voice note, or the mic
+    // listening on its own (wake word / MIC ON) -- in chat AND orb mode
+    readonly property bool hearing: noteRec || window.listening || listenBusy
+    property bool listenBusy: false
+    readonly property bool hearBusy: noteBusy || listenBusy
+    readonly property string hearLabel: hearBusy ? "transcribing\u2026"
+        : noteRec ? noteClock() : "listening\u2026"
+    function noteStop() {
+        if (noteProc.running) noteProc.write("stop\n");
+        else if (listenProc.running) listenProc.write("stop\n");
+    }
     function noteCancel() {
-        if (noteProc.running) noteProc.write("cancel\n");
-        window.noteRec = false;
-        input.text = window.noteDraft;
+        if (noteProc.running) {
+            noteProc.write("cancel\n");
+            window.noteRec = false;
+            window.draft = window.noteDraft;
+        } else if (listenProc.running) {
+            listenProc.write("cancel\n");
+            window.listening = false; window.listenBusy = false;
+            window.micEnabled = false;          // X means "stop listening"
+        }
     }
     function noteClock() {
         var sec = Math.max(0, Math.floor((window.noteNow - window.noteStart) / 1000));
@@ -2743,61 +2837,19 @@ Item {
                         font.bold: true
                     }
 
-                    // recording: dot + timer + waveform (newest on the right)
-                    Row {
-                        visible: window.noteRec
-                        spacing: window.s(8)
-                        Layout.alignment: Qt.AlignVCenter
-                        Rectangle {
-                            width: window.s(8); height: width; radius: width / 2
-                            anchors.verticalCenter: parent.verticalCenter
-                            color: window.noteBusy ? window.accent : theme.red
-                            SequentialAnimation on opacity {
-                                loops: Animation.Infinite; running: window.noteRec
-                                NumberAnimation { to: 0.2; duration: 500 }
-                                NumberAnimation { to: 1; duration: 500 }
-                            }
-                        }
-                        Text {
-                            anchors.verticalCenter: parent.verticalCenter
-                            text: window.noteBusy ? "transcribing\u2026" : window.noteClock()
-                            color: theme.text
-                            font.family: "JetBrains Mono"; font.pixelSize: window.s(12)
-                        }
-                    }
-                    Item {
-                        id: wave
-                        visible: window.noteRec
+                    TarVoiceStrip {
+                        visible: window.hearing
                         Layout.fillWidth: true
                         Layout.fillHeight: true
-                        clip: true
-                        readonly property real step: window.s(4)
-                        Row {
-                            anchors.right: parent.right
-                            anchors.verticalCenter: parent.verticalCenter
-                            spacing: wave.step - window.s(2)
-                            Repeater {
-                                model: Math.max(1, Math.floor(wave.width / wave.step))
-                                Rectangle {
-                                    readonly property int n: Math.floor(wave.width / wave.step)
-                                    readonly property real v: {
-                                        var L = window.noteLevels, i = L.length - n + index;
-                                        return i >= 0 && i < L.length ? L[i] : 0;
-                                    }
-                                    width: window.s(2)
-                                    height: Math.max(window.s(2), wave.height * 0.8 * v)
-                                    radius: width / 2
-                                    anchors.verticalCenter: parent.verticalCenter
-                                    color: window.noteBusy ? theme.overlay1 : window.accent
-                                    opacity: v > 0 ? 0.55 + 0.45 * v : 0.25
-                                }
-                            }
-                        }
+                        theme: theme; accent: window.accent; scaleFn: window.s
+                        levels: window.noteLevels
+                        busy: window.hearBusy
+                        label: window.hearLabel
                     }
 
                     TextField {
                         id: input
-                        visible: !window.noteRec
+                        visible: !window.hearing
                         Layout.fillWidth: true
                         Layout.fillHeight: true
                         background: Item {}
@@ -2811,7 +2863,10 @@ Item {
                         focus: true
 
                         // live filter as the command is typed
-                        onTextChanged: window.refreshCommands(text)
+                        onTextChanged: {
+                            window.refreshCommands(text);
+                            if (window.draft !== text) window.draft = text;
+                        }
 
                         Keys.onUpPressed: (event) => {
                             if (window.cmdOpen) {
@@ -2855,21 +2910,21 @@ Item {
                     // voice note controls: mic to start; X cancel / STOP transcribe
                     TarHudButton {
                         Layout.alignment: Qt.AlignVCenter
-                        visible: !window.busy && !window.noteRec
+                        visible: !window.busy && !window.hearing
                         theme: theme; accent: window.accent; scaleFn: window.s
                         glyph: "\u{f036c}"; label: "VOICE"
                         onClicked: window.noteStartRec()
                     }
                     TarHudButton {
                         Layout.alignment: Qt.AlignVCenter
-                        visible: window.noteRec && !window.noteBusy
+                        visible: window.hearing && !window.hearBusy
                         theme: theme; accent: theme.red; scaleFn: window.s
                         glyph: "\u{f0156}"; label: "CANCEL"
                         onClicked: window.noteCancel()
                     }
                     TarHudButton {
                         Layout.alignment: Qt.AlignVCenter
-                        visible: window.noteRec && !window.noteBusy
+                        visible: window.hearing && !window.hearBusy
                         theme: theme; accent: theme.green; scaleFn: window.s
                         glyph: "\u{f04db}"; label: "STOP"
                         onClicked: window.noteStop()
@@ -2945,6 +3000,15 @@ Item {
             volume: window.ttsVolume
 
             onSubmitted: (text) => window.submit(text)
+            draft: window.draft
+            onDraftEdited: t => window.draft = t
+            hearing: window.hearing
+            hearBusy: window.hearBusy
+            hearLabel: window.hearLabel
+            hearLevels: window.noteLevels
+            onVoiceStart: window.noteStartRec()
+            onVoiceStop: window.noteStop()
+            onVoiceCancel: window.noteCancel()
             onMicToggled: (on) => {
                 var stt = window.capsData ? window.capsData.stt : undefined;
                 if (on && (!stt || stt.locked)) {
@@ -3120,7 +3184,7 @@ Item {
         caption: window.viewerCaption
         shownAt: window.viewerAt
         live: window.viewerLive
-        onLiveChanged: window.viewerLive = live
+        onLiveToggled: on => window.viewerLive = on
         cameraId: (window.capsData && window.capsData.devices_chosen
                    && window.capsData.devices_chosen.video) || "/dev/video0"
         frameFile: (Quickshell.env("TAR_DATA") || (Quickshell.env("HOME")

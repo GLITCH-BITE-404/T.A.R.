@@ -987,22 +987,37 @@ def a_cam_off(_):
 # ydotool/dotool, and wtype cannot synthesise mouse clicks on Wayland, so
 # clicking at coordinates is NOT offered rather than silently failing.
 
-def _away_from_tar(args):
-    """Typing goes to the focused window -- which is T.A.R. while you talk to
-    it. Move focus to the target app first (named via into=/app=, else last)."""
+def _active_window():
     rc, out = sh(["hyprctl", "-j", "activewindow"])
     try:
-        active = json.loads(out).get("title") if rc == 0 else None
+        d = json.loads(out) if rc == 0 else {}
     except ValueError:
-        active = None
+        d = {}
+    return d if d.get("address") else None
+
+
+def _away_from_tar(args):
+    """Typing goes to the focused window -- which is T.A.R. while you talk to
+    it. Move focus to the target app first (named via into=/app=, else last).
+    Then REFUSE unless a real app window has focus: with nothing focused, keys
+    land on the desktop shell, and that once swapped the user's whole rice."""
+    act = _active_window()
     named = args.get("into") or args.get("app")
-    if active != TAR_TITLE and not named:
-        return None
-    _w, err = _focus_target({"what": named} if named else {})
-    if err:
-        return err
-    time.sleep(0.15)                # let the compositor move keyboard focus
+    if not act or act.get("title") == TAR_TITLE or named:
+        _w, err = _focus_target({"what": named} if named else {})
+        if err:
+            return err
+        time.sleep(0.15)                # let the compositor move keyboard focus
+        act = _active_window()
+    if not act or act.get("title") == TAR_TITLE:
+        return ("NOT DONE: no app window has keyboard focus, so the keys would hit the "
+                "desktop shell. Open/focus the app first (or name it with into=).")
     return None
+
+
+# combos that drive the desktop itself (rice/shell switch, logout, kill...) --
+# only when the user typed the request themselves
+_SYSTEM_COMBO = re.compile(r"(super|logo|win|meta|mod4)|ctrl\+alt\+(backspace|delete|del)", re.I)
 
 
 # What the user actually wrote recently -- set by the cloud backend before it
@@ -1050,6 +1065,11 @@ def a_key(args):
         return "which key?"
     if not shutil.which("wtype"):
         return "wtype isn't installed"
+    if _SYSTEM_COMBO.search(combo.replace(" ", "")):
+        stop = needs_confirm("key", args, "press %s -- a desktop shortcut (can switch your "
+                             "rice/shell, log out or close things)" % combo)
+        if stop:
+            return stop
     err = _away_from_tar(args)
     if err:
         return err

@@ -43,6 +43,17 @@ Item {
 
     // ---- outbound -----------------------------------------------------------
     signal submitted(string text)
+    // shared draft + voice input (same as chat mode)
+    property string draft: ""
+    signal draftEdited(string text)
+    property bool hearing: false
+    property bool hearBusy: false
+    property string hearLabel: ""
+    property var hearLevels: []
+    signal voiceStart()
+    signal voiceStop()
+    signal voiceCancel()
+    onDraftChanged: if (orbInput.text !== draft) orbInput.text = draft
     signal micToggled(bool on)
     signal speakToggled(bool on)
     signal volumeRequested(real v)
@@ -749,10 +760,22 @@ Item {
                 font.pixelSize: view.s(14)
                 font.bold: true
             }
+            TarVoiceStrip {
+                visible: view.hearing
+                anchors.verticalCenter: parent.verticalCenter
+                width: parent.width - view.s(30) - voiceBtns.width
+                height: view.s(30)
+                theme: view.theme; accent: view.accent; scaleFn: view.hostScale
+                levels: view.hearLevels
+                busy: view.hearBusy
+                label: view.hearLabel
+            }
             TextInput {
                 id: orbInput
+                visible: !view.hearing
                 anchors.verticalCenter: parent.verticalCenter
-                width: parent.width - view.s(52)
+                width: parent.width - view.s(30) - voiceBtns.width
+                onTextChanged: if (view.draft !== text) view.draftEdited(text)
                 color: view.theme.text
                 font.family: "JetBrains Mono"
                 font.pixelSize: view.s(13)
@@ -776,6 +799,33 @@ Item {
                         text = "";
                     }
                     event.accepted = true;
+                }
+                Keys.onEscapePressed: (event) => {
+                    if (view.hearing) { view.voiceCancel(); event.accepted = true; }
+                    else event.accepted = false;
+                }
+            }
+            Row {
+                id: voiceBtns
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: view.s(6)
+                TarHudButton {
+                    visible: !view.busy && !view.hearing
+                    theme: view.theme; accent: view.accent; scaleFn: view.hostScale
+                    glyph: "\u{f036c}"; label: "VOICE"
+                    onClicked: view.voiceStart()
+                }
+                TarHudButton {
+                    visible: view.hearing && !view.hearBusy
+                    theme: view.theme; accent: view.theme.red; scaleFn: view.hostScale
+                    glyph: "\u{f0156}"; label: "CANCEL"
+                    onClicked: view.voiceCancel()
+                }
+                TarHudButton {
+                    visible: view.hearing && !view.hearBusy
+                    theme: view.theme; accent: view.theme.green; scaleFn: view.hostScale
+                    glyph: "\u{f04db}"; label: "STOP"
+                    onClicked: view.voiceStop()
                 }
             }
         }

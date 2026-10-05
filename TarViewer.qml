@@ -16,7 +16,8 @@ TarDeck {
     property string source: ""          // camera | screen | click | image
     property string caption: ""
     property real shownAt: 0
-    property bool live: false
+    property bool live: false           // set by the host only
+    signal liveToggled(bool on)
     property string cameraId: ""        // e.g. /dev/video0 (setup's choice)
     property string frameFile: ""       // where live frames are saved
 
@@ -153,7 +154,7 @@ TarDeck {
                 glyph: viewer.live ? "\u{f0568}" : "\u{f0567}"
                 label: viewer.live ? "STOP CAMERA" : "LIVE CAMERA"
                 active: viewer.live
-                onClicked: viewer.live = !viewer.live
+                onClicked: viewer.liveToggled(!viewer.live)
             }
             TarHudButton {
                 visible: !viewer.live && viewer.path !== ""
@@ -170,5 +171,4 @@ TarDeck {
         NumberAnimation { target: flash; property: "opacity"; to: 0.25; duration: 60 }
         NumberAnimation { target: flash; property: "opacity"; to: 0; duration: 420 }
     }
-    onOpenChanged: if (!open) live = false     // closing the drawer turns the camera off
 }

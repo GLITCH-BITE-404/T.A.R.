@@ -907,7 +907,9 @@ def transcribe_wav(path):
         {"inline_data": {"mime_type": "audio/wav", "data": b64}},
         {"text": "Transcribe exactly what is said, in the language it is spoken "
                  "(Hebrew stays in Hebrew letters, English in English). Output ONLY "
-                 "the words. If there is no clear speech, output exactly: [none]"}]}],
+                 "the words. The assistant being spoken to is called T.A.R. (said 'tar'), "
+                 "so 'hey tar' is English, not Hebrew. If there is no clear speech, "
+                 "output exactly: [none]"}]}],
         "generationConfig": {"temperature": 0, "maxOutputTokens": 400}})
     parts = ((r.get("candidates") or [{}])[0].get("content") or {}).get("parts") or []
     text = "".join(p.get("text", "") for p in parts).strip()

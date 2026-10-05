@@ -98,6 +98,15 @@ def _vol(dev):
         return None
 
 
+def mic_muted(dev):
+    try:
+        r = subprocess.run(["pactl", "get-source-mute", dev or "@DEFAULT_SOURCE@"],
+                           capture_output=True, text=True, timeout=3)
+        return "yes" in r.stdout.lower()
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def ensure_gain(dev, target=100):
     """
     Make sure the chosen mic is actually loud enough to transcribe.
@@ -141,6 +150,9 @@ def record(max_s, silence_s):
         emit("error", v="no recorder (need pw-record, parecord or arecord)")
         return None
 
+    if mic_muted(dev):
+        emit("error", v="your microphone is muted -- unmute it to talk to T.A.R.", muted=True)
+        return None
     prev_gain = ensure_gain(dev)
     emit("listen", v="recording", device=dev or "default")
     p = subprocess.Popen(cmd, stdout=subprocess.PIPE,
@@ -150,7 +162,7 @@ def record(max_s, silence_s):
     chunk = RATE // 20                     # 50ms
     manual = silence_s is None             # voice note: stop/cancel come on stdin
     ctl = {"cmd": None}
-    if manual:
+    if manual or "--ctl" in sys.argv:      # the UI's X / STOP buttons
         import threading
 
         def _stdin():
@@ -308,6 +320,9 @@ def main():
 
 
 if __name__ == "__main__":
+    import signal
+    # killed by T.A.R. (closed / X): unwind normally so the mic gain is restored
+    signal.signal(signal.SIGTERM, lambda *a: (_ for _ in ()).throw(KeyboardInterrupt()))
     try:
         sys.exit(main())
     except KeyboardInterrupt:

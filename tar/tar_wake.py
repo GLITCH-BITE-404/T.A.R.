@@ -301,6 +301,14 @@ def listen(test=False):
     agc = AGC()
     seg = Segmenter()
     rec, dev = recorder()
+    parent = os.getppid()
+    try:
+        r = subprocess.run(["pactl", "get-source-mute", dev or "@DEFAULT_SOURCE@"],
+                           capture_output=True, text=True, timeout=3)
+        if "yes" in r.stdout.lower():
+            emit("muted", v="microphone is muted -- the wake word can't hear you")
+    except (OSError, subprocess.SubprocessError):
+        pass
     emit("wake_ready", v="listening for %s" % (
         ("\"%s\"" % w["word"].replace("_", " ")) if engine == "builtin"
         else ("your phrase" + (" (\"%s\")" % w["phrase"] if w.get("phrase") else ""))),
@@ -312,6 +320,8 @@ def listen(test=False):
             if not buf or len(buf) < CHUNK * 2:
                 emit("error", v="microphone stream ended")
                 return 1
+            if os.getppid() != parent:          # T.A.R. is gone: stop listening
+                return 0
             x, raw_rms = agc(np.frombuffer(buf, dtype=np.int16))
             brms = float(np.sqrt(np.mean(x.astype(np.float32) ** 2)))
             hit, score = False, 0.0
