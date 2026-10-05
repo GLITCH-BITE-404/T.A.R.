@@ -141,6 +141,37 @@ def restore_gain(dev, prev):
             pass
 
 
+def tts_playing():
+    """Is T.A.R. talking right now? (its own voice must never become input).
+    Only a real `tar_say.sh` process counts -- an argv element that IS the
+    script, not any command line that merely mentions it."""
+    me = os.getpid()
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit() or int(pid) == me:
+            continue
+        try:
+            with open("/proc/%s/cmdline" % pid, "rb") as f:
+                argv = f.read().split(b"\0")
+        except OSError:
+            continue
+        if any(x.endswith(b"/tar_say.sh") or x == b"tar_say.sh" for x in argv[:3]) \
+                and b"--stop" not in argv:
+            return True
+    return False
+
+
+def wait_for_quiet_tts(limit=30.0):
+    t0 = time.time()
+    waited = False
+    while tts_playing() and time.time() - t0 < limit:
+        if not waited:
+            emit("listen", v="waiting for T.A.R. to finish talking")
+            waited = True
+        time.sleep(0.15)
+    if waited:
+        time.sleep(0.5)                 # room echo
+
+
 def record(max_s, silence_s):
     """Record until `silence_s` of quiet after speech, or `max_s` total."""
     c = cfg()
@@ -150,6 +181,8 @@ def record(max_s, silence_s):
         emit("error", v="no recorder (need pw-record, parecord or arecord)")
         return None
 
+    if silence_s is not None:           # auto-listen (not a voice note you started)
+        wait_for_quiet_tts()
     if mic_muted(dev):
         emit("error", v="your microphone is muted -- unmute it to talk to T.A.R.", muted=True)
         return None
@@ -175,6 +208,7 @@ def record(max_s, silence_s):
     started = time.time()
     last_loud = None
     spoke = False
+    floor = None
     try:
         while time.time() - started < max_s:
             if ctl["cmd"]:
@@ -190,7 +224,10 @@ def record(max_s, silence_s):
             rms = math.sqrt(sum(v * v for v in a) / len(a)) / 32768.0
             emit("level", v=round(min(1.0, rms * 6), 4))
             now = time.time()
-            if rms > 0.02:
+            # loud = clearly above THIS room's noise (a fixed 0.02 never went
+            # quiet on a boosted mic, so listening ran the full 15 s)
+            floor = rms if floor is None else (min(rms, floor * 1.02) if rms < floor * 1.5 else floor * 1.003)
+            if rms > max(0.012, floor * 2.5):
                 spoke = True
                 last_loud = now
             # stop once they've clearly stopped talking

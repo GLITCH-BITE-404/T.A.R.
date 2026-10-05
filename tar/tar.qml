@@ -86,6 +86,7 @@ Item {
 
     // Applied once, after the first caps report tells us what the user wants
     // switched on at launch.
+    Timer { id: micAfterGreet; interval: 1200; onTriggered: if (!window.hearing) window.listen() }
     function applyAutostart() {
         var a = window.autostart || ({});
         window.sfxEnabled = a.sfx !== false;
@@ -95,7 +96,9 @@ Item {
         }
         if (a.mic) {
             var stt = window.capsData ? window.capsData.stt : undefined;
-            if (stt && stt.ready) { window.micEnabled = true; window.listen(); }
+            // after the greeting has STARTED playing (the recorder then waits for it
+            // to finish) -- it used to record its own "T.A.R. online" and act on it
+            if (stt && stt.ready) { window.micEnabled = true; micAfterGreet.start(); }
             else window.say("sys", "autostart wanted the mic, but no speech "
                                  + "engine is installed.");
         }
@@ -1270,7 +1273,7 @@ Item {
         id: listenProc
         command: ["python3", Quickshell.env("HOME")
                   + "/.config/hypr/scripts/quickshell/tar/tar_listen.py",
-                  "--seconds", "15", "--silence", "1.3", "--ctl"]
+                  "--seconds", "25", "--silence", "2.2", "--ctl"]
         stdinEnabled: true
         stdout: SplitParser {
             splitMarker: "\n"
@@ -1292,6 +1295,11 @@ Item {
                     window.listening = false; window.listenBusy = false;
                     window.micLevel = 0;
                     var heard = d.ok ? window.stripWake(d.v || "") : "";
+                    if (heard && window.isOwnEcho(heard)) {
+                        window.statusNote = "ignored my own voice (\"" + heard + "\")";
+                        window.afterWake = false;
+                        return;
+                    }
                     if (d.ok && window.afterWake && heard === "") {
                         // you only said the wake word -- ask, and listen again
                         window.afterWake = false;
@@ -1329,6 +1337,16 @@ Item {
         x = x.replace(/^(?:היי?|הי|הלו)?\s*(?:טאר|טר|תאר|תר|ג'ארוויס|ג׳רוויס)[\s,.!?]*/, "");
         x = x.replace(/^היטר[\s,.!?]*/, "");
         return x.trim();
+    }
+    // what T.A.R. said out loud recently -- a transcript made only of those
+    // words is the speakers being picked up, not you
+    function isOwnEcho(heard) {
+        var spoken = (String(window.lastReply || "") + " t.a.r. tar online yes " +
+                      String(tts.say || "")).toLowerCase();
+        var words = String(heard).toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, " ").split(/\s+/)
+                        .filter(w => w.length > 0);
+        if (!words.length || words.length > 8) return false;
+        return words.every(w => spoken.indexOf(w) >= 0);
     }
     function speakShort(t) {
         var tts = window.capsData ? window.capsData.tts : undefined;

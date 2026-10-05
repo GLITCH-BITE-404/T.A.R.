@@ -407,6 +407,27 @@ def enroll(n=4):
 
 
 # ---- the listener ------------------------------------------------------------
+def _single_listener():
+    """Exactly ONE wake listener on the system: the newest replaces any other
+    (several T.A.R. windows each ran one, with different words)."""
+    import signal
+    pf = os.path.join(DATA, "wake.pid")
+    try:
+        old = int(open(pf).read().strip())
+        if old != os.getpid():
+            with open("/proc/%d/cmdline" % old, "rb") as f:
+                if b"tar_wake.py" in f.read():
+                    os.kill(old, signal.SIGTERM)
+    except (OSError, ValueError):
+        pass
+    try:
+        os.makedirs(DATA, exist_ok=True)
+        with open(pf, "w") as f:
+            f.write(str(os.getpid()))
+    except OSError:
+        pass
+
+
 def listen(test=False):
     if not module_present():
         emit("error", v="openwakeword isn't installed (python-openwakeword)")
@@ -435,6 +456,7 @@ def listen(test=False):
         threshold = voice["threshold"] * (0.7 + 0.6 * sens)   # eager -> looser match
     agc = AGC()
     seg = Utterances()
+    _single_listener()
     rec, dev = recorder()
     parent = os.getppid()
     try:

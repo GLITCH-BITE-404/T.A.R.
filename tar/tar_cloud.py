@@ -218,6 +218,38 @@ def normalize_call(name, payload):
     return action, args
 
 
+# Spoken requests must name what to do. Outward actions whose text/target
+# isn't in what the user just SAID are refused (it once opened GitHub for a
+# spoken "okay go ahead and do it", and re-ran an old request on "online").
+VOICE_MSG = ""
+_GROUNDED = {"open": ("what", "app", "q"), "web": ("q", "what"), "open_url": ("url", "q"),
+             "type": ("text", "what"), "type_into": ("text", "target"), "key": ("combo", "what"),
+             "click_on": ("target", "what"), "run": ("cmd", "what"), "shell": ("cmd",),
+             "email": ("to", "subject"), "whatsapp": ("to", "text"), "browser": ("q", "url"),
+             "write_file": ("path",), "files": ("q", "path"), "kill": ("what",),
+             "closewin": ("what",), "close_tab": ("q", "what"), "play": ("q", "what")}
+_FILLER = {"the", "a", "an", "my", "your", "it", "this", "that", "and", "for", "with", "to",
+           "of", "on", "in", "up", "please", "can", "you", "open", "go", "new", "tab"}
+
+
+def _voice_grounding(action, args):
+    if os.environ.get("TAR_VOICE") != "1" or action not in _GROUNDED:
+        return None
+    import re as _re
+    said = set(_re.findall(r"[\w']+", VOICE_MSG.lower()))
+    for k in _GROUNDED[action]:
+        v = str(args.get(k) or "").lower()
+        if not v:
+            continue
+        words = [w for w in _re.findall(r"[\w']+", v) if len(w) > 2 and w not in _FILLER]
+        if words and not any(w in said or any(w[:4] == s[:4] for s in said if len(s) > 3)
+                             for w in words):
+            return ("NOT DONE: this was a SPOKEN message and %r isn't something they said "
+                    "(they said: %r). Don't guess from older messages -- ask them what they "
+                    "want." % (v[:60], VOICE_MSG[:80]))
+    return None
+
+
 def run_tool(name, payload):
     os.environ["TAR_BACKEND"] = "cloud"     # unlocks the shell action
     import tar_tools as T
@@ -234,6 +266,9 @@ def run_tool(name, payload):
         # only the USER can approve a parked action, by replying yes
         return ("you can't confirm actions yourself -- ask the user to reply "
                 "'yes' to go ahead or 'no' to cancel")
+    stop = _voice_grounding(action, args)
+    if stop:
+        return stop
     try:
         out = T.run(action, args)
     except Exception as e:          # never let a tool crash the turn
@@ -693,10 +728,28 @@ def chat_gemini(message, model, max_turns=10):
     system += B.persona_tail(cfg)
 
     contents = []
-    for h in B.history_tail(int(cfg.get("cloud_history_turns", 40))):
+    hist = B.history_tail(int(cfg.get("cloud_history_turns", 40)))
+    for h in hist:
         role = "model" if h["role"] == "assistant" else "user"
         contents.append({"role": role, "parts": [{"text": h["content"]}]})
-    if os.environ.get("TAR_VOICE") == "1":
+    # Old requests are FINISHED. After a restart T.A.R. heard itself say
+    # "online" and picked an unfinished request from 15 min earlier back up.
+    try:
+        last_at = float(hist[-1].get("at") or 0) if hist else 0
+    except (TypeError, ValueError):
+        last_at = 0
+    gap = time.time() - last_at if last_at else 0
+    system += ("\n\nEVERY request in the history above is DONE or ABANDONED. Act ONLY on the "
+               "latest message. Never redo or 'finish' an earlier request unless the latest "
+               "message explicitly asks for it again.")
+    if gap > 300:
+        system += (" The conversation was idle for %d minutes -- treat the latest message as "
+                   "a fresh start." % int(gap // 60))
+    voice = os.environ.get("TAR_VOICE") == "1"
+    global VOICE_MSG
+    VOICE_MSG = message if voice else ""
+    short_voice = voice and len(message.split()) < 2
+    if voice:
         system += ("\n\nVOICE INPUT: this message was SPOKEN and machine-transcribed from a "
                    "quiet mic -- it may be misheard. If it is gibberish, a fragment, a random "
                    "word/name, or doesn't clearly ask for something (e.g. 'love love', 'uh', "
@@ -711,6 +764,12 @@ def chat_gemini(message, model, max_turns=10):
     started = time.time()
     first = None
     tools = gemini_tools()
+    if short_voice:
+        # 1-2 spoken words ("online", "uh") are never enough to act on -- in
+        # CODE, not just a prompt rule: no tools offered for this turn
+        tools = None
+        system += ("\n\nYou heard only %r. You can't run actions for this. Reply with what you "
+                   "heard and ask what they want." % message)
     nudged = False
     last_check = None           # "ok" / "failed" from the latest verified action
     trace = []                  # (action, args, result) -- for the self-check
@@ -721,7 +780,7 @@ def chat_gemini(message, model, max_turns=10):
             resp = gemini_call(key, model, {
                 "systemInstruction": {"parts": [{"text": system}]},
                 "contents": contents,
-                "tools": tools,
+                **({"tools": tools} if tools else {}),
                 "generationConfig": {"maxOutputTokens": 4000},
             })
         except Exception as e:

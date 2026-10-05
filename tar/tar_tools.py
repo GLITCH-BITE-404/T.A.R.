@@ -1012,6 +1012,13 @@ def _away_from_tar(args):
     if not act or act.get("title") == TAR_TITLE:
         return ("NOT DONE: no app window has keyboard focus, so the keys would hit the "
                 "desktop shell. Open/focus the app first (or name it with into=).")
+    cls = (act.get("class") or "").lower()
+    if any(t == cls or cls.endswith("." + t) for t in _TERMINALS) and \
+            act.get("address") not in {o["address"] for o in tar_opened()}:
+        # the user's own terminal may be running anything (it typed a URL into
+        # the terminal running Claude Code) -- keys go there only with a yes
+        return needs_confirm("type", args, "type/press keys into YOUR %s terminal %r" % (
+            _label(act), (act.get("title") or "")[:40]))
     return None
 
 

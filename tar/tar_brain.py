@@ -832,7 +832,7 @@ def history_tail(n):
         try:
             d = json.loads(ln)
             if d.get("role") in ("user", "assistant") and d.get("content"):
-                out.append({"role": d["role"], "content": d["content"]})
+                out.append({"role": d["role"], "content": d["content"], "at": d.get("at")})
         except json.JSONDecodeError:
             continue
     return out
