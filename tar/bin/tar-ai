@@ -26,6 +26,14 @@ if [ -n "$pids" ] && [ -n "$win" ]; then
     [ "$1" = "new" ] && qs ipc -p "$HARNESS" call tar newChat >/dev/null 2>&1
     exit 0
 fi
-[ -n "$pids" ] && printf '%s\n' "$pids" | xargs -r kill 2>/dev/null   # running but no window: restart
+if [ -n "$pids" ]; then
+    # running in the background (window closed, wake word on): just show it
+    pid=$(printf '%s\n' "$pids" | tail -1)
+    if qs ipc --pid "$pid" call tar summon >/dev/null 2>&1; then
+        [ "$1" = "new" ] && qs ipc --pid "$pid" call tar newChat >/dev/null 2>&1
+        exit 0
+    fi
+    printf '%s\n' "$pids" | xargs -r kill 2>/dev/null   # unresponsive: restart
+fi
 [ "$1" = "new" ] && python3 "$BRAIN" session-new >/dev/null 2>&1
 setsid -f qs -p "$HARNESS" >/dev/null 2>&1

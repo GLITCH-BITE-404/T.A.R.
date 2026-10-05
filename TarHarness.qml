@@ -32,6 +32,16 @@ ShellRoot {
         implicitWidth: workW
         implicitHeight: workH
 
+        // Closed from the compositor (your close keybind): with the wake word on,
+        // T.A.R. keeps listening in the background and "hey tar" brings this
+        // window back; otherwise closing quits like before.
+        property bool reopening: false
+        onVisibleChanged: {
+            if (visible || reopening) return;
+            if (loader.item && loader.item.wakeOn) loader.item.backgrounded = true;
+            else Qt.quit();
+        }
+
         // Every dispatch below is targeted BY TITLE. Untargeted dispatchers act
         // on the active window, which at startup is the terminal you launched
         // from -- targeting by title makes hitting the wrong window impossible.
@@ -112,6 +122,15 @@ ShellRoot {
                 item.hostHandlesClose = true;
                 item.windowed = true;
                 item.closed.connect(function () { Qt.quit(); });
+                item.showRequested.connect(function () {
+                    item.backgrounded = false;
+                    // after a compositor close `visible` can still read true while
+                    // the surface is gone -- cycle it to really map a new one
+                    win.reopening = true;
+                    win.visible = false;
+                    win.visible = true;
+                    win.reopening = false;
+                });
                 item.sizeRequested.connect(function (w, h) {
                     if (!win.settled) return;   // don't fight the intro
                     win.sizeTo(w, h);

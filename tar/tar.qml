@@ -272,8 +272,7 @@ Item {
                     window.historyOpen = false;
                     window.afterWake = true;
                     window.statusNote = "\u25C9 heard the wake word -- listening";
-                    Quickshell.execDetached(["hyprctl", "dispatch", "focuswindow",
-                                             "title:^(T\\.A\\.R\\.)$"]);
+                    window.summon();
                     fx.play("shock");
                     window.sfx("boot");
                     window.listen();
@@ -682,6 +681,7 @@ Item {
         function newChat(): void { window.newSession(); }
         // bindable from Hyprland: qs ipc -p TarHarness.qml call tar voice
         function voice(): void { if (window.hearing) window.noteStop(); else window.noteStartRec(); }
+        function summon(): void { window.summon(); }
         function view(mode: string): void { if (mode === "orb" || mode === "chat") window.viewMode = mode; }
     }
 
@@ -1349,6 +1349,24 @@ Item {
                         .filter(w => w.length > 0);
         if (!words.length || words.length > 8) return false;
         return words.every(w => spoken.indexOf(w) >= 0);
+    }
+    // bring T.A.R. to YOU: onto the workspace you're looking at (also out of
+    // a special/hidden workspace), then focus it
+    signal showRequested()
+    property bool backgrounded: false
+    function summon() {
+        window.showRequested();             // re-create the window if it was closed
+        summonTimer.restart();
+    }
+    Timer { id: summonTimer; interval: 350; onTriggered: window.summonNow() }
+    function summonNow() {
+        Quickshell.execDetached(["sh", "-c",
+            "a=$(hyprctl clients -j | jq -r '[.[]|select(.title==\"T.A.R.\")][-1].address // empty'); " +
+            "[ -n \"$a\" ] || exit 0; " +
+            "cur=$(hyprctl activeworkspace -j | jq -r .id); " +
+            "ws=$(hyprctl clients -j | jq -r --arg a \"$a\" '.[]|select(.address==$a)|.workspace.id'); " +
+            "[ \"$ws\" != \"$cur\" ] && hyprctl dispatch movetoworkspacesilent \"$cur,address:$a\" >/dev/null; " +
+            "hyprctl dispatch focuswindow \"address:$a\" >/dev/null"]);
     }
     function speakShort(t) {
         var tts = window.capsData ? window.capsData.tts : undefined;

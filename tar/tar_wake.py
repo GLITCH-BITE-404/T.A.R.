@@ -475,6 +475,7 @@ def listen(test=False):
         else ("your phrase" + (" (\"%s\")" % w["phrase"] if w.get("phrase") else ""))),
         device=dev or "default", engine=engine)
     last, last_level = 0.0, 0.0
+    calls, last_check = [], [0.0]
     try:
         while True:
             buf = rec.stdout.read(CHUNK * 2)
@@ -493,22 +494,33 @@ def listen(test=False):
             s = seg.push(x, brms)
             if s is not None:
                 if engine == "voice":
-                    e = embed_segment(af, s)
-                    dist = min(_dtw(e, t) for t in voice["templates"]) if len(e) >= 3 else 9
-                    score = max(0.0, 1.0 - dist / max(threshold, 1e-6) * 0.5)
-                    # stage 1 (voice match) is loose; stage 2 (what was SAID)
-                    # decides -- "hey jarvis" in your voice matched "hey tar"
-                    if dist <= threshold * 1.5 and len(s) <= RATE * 2.5:
+                    # The voice-embedding match proved useless on short clips
+                    # (silence, "lo", "00" all matched). Gate on the SHAPE of a
+                    # wake phrase (short, clearly spoken), then check WHAT was
+                    # said -- rate-limited, and never waking on a failed check.
+                    dur = len(s) / RATE
+                    xs = s.astype(np.float32)
+                    pk = float(np.max([np.sqrt(np.mean(xs[i:i + 640] ** 2))
+                                       for i in range(0, max(1, len(xs) - 640), 640)]))
+                    clear = pk > max(1200.0, (seg.floor or 1.0) * 5.0)
+                    now_t = time.time()
+                    calls[:] = [t for t in calls if now_t - t < 3600]
+                    if 0.4 <= dur <= 1.8 and clear and now_t - last_check[0] >= 4 \
+                            and len(calls) < 40:
+                        last_check[0] = now_t
+                        calls.append(now_t)
+
                         def _yes():
-                            emit("wake", score=round(score, 2))
-                        confirm_async(s, w.get("phrase") or "hey tar", dist, _yes)
+                            emit("wake", score=1.0)
+                        confirm_async(s, w.get("phrase") or "hey tar", 0.0, _yes)
+                        score = 0.6
                     else:
-                        wlog(ev="phrase", dist=round(dist, 3), need=round(threshold * 1.5, 3))
+                        wlog(ev="skip", dur=round(dur, 2), clear=clear,
+                             peak=int(pk), floor=int(seg.floor or 0), checks_last_hour=len(calls))
                         if test:
                             _transcribe_async(s)
                     if test:
-                        emit("wake_score", v=round(score, 2), dist=round(dist, 3),
-                             need=round(threshold, 3))
+                        emit("wake_score", v=round(score, 2), dist=0, need=0)
                 elif test:
                     _transcribe_async(s)
             if test:
@@ -579,7 +591,7 @@ def confirm_async(seg, phrase, dist, on_yes):
                 os.unlink(p)
         except Exception as e:
             wlog(ev="confirm_error", err=str(e)[:120])
-        ok = phrase_heard(text, phrase) if text is not None else dist <= 0.06
+        ok = phrase_heard(text, phrase) if text else False   # failed check = no wake
         wlog(ev="candidate", dist=round(dist, 3), heard=text, woke=ok)
         emit("heard", v=(text or "(no transcript)") + ("  \u2713" if ok else "  \u2717 not the wake phrase"))
         if ok:
