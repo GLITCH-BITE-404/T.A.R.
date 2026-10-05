@@ -70,7 +70,9 @@ Item {
     property bool tasksOpen: false
     property bool tasksActive: false
 
-    readonly property color accent: mode === "error" ? theme.red
+    property bool evil: false
+    readonly property color accent: evil ? (mode === "thinking" ? "#ff7a3d" : "#ff2a3d")
+                                  : mode === "error" ? theme.red
                                   : mode === "thinking" ? theme.blue
                                   : mode === "listening" ? theme.teal
                                   : theme.mauve

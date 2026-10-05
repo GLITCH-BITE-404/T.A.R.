@@ -111,6 +111,15 @@ Item {
     }
 
     // ---- wake word: "hey jarvis" -> come to the front and start listening
+    // ---- EVIL MODE (survives restarts: config.json "evil")
+    property bool evilMode: false
+    Process {
+        id: evilReader
+        running: true
+        command: ["python3", "-c", "import json,os;print(bool(json.load(open(os.environ.get('TAR_DATA', os.path.expanduser('~/.local/share/bite-os/tar'))+'/config.json')).get('evil')))"]
+        stdout: StdioCollector { onStreamFinished: window.evilMode = (this.text || "").trim() === "True" }
+    }
+
     property bool wakeOn: false
     property bool wakePaused: false
     property bool voiceNext: false
@@ -406,7 +415,8 @@ Item {
     // attaching one to a readonly property throws "Invalid property
     // assignment", which breaks the binding and leaves the whole window
     // painting nothing -- an invisible window.
-    property color accent: mode === "error" ? theme.red
+    property color accent: evilMode ? (mode === "thinking" ? "#ff7a3d" : "#ff2a3d")
+                         : mode === "error" ? theme.red
                          : mode === "thinking"
                              ? (cloudMode ? theme.yellow : theme.blue)
                          : mode === "listening" ? theme.teal
@@ -733,6 +743,7 @@ Item {
         function voice(): void { if (window.hearing) window.noteStop(); else window.noteStartRec(); }
         function summon(): void { window.summon(); }
         function dismiss(): void { window.close(); }
+        function ask(text: string): void { window.submit(text); }
         function panel(what: string, state: string): void { window.playUiAction("panel", {what: what, state: state}); }
         function view(mode: string): void { if (mode === "orb" || mode === "chat") window.viewMode = mode; }
     }
@@ -750,6 +761,21 @@ Item {
     function playUiAction(name, d) {
         if (name === "close")           { window.close(); return; }
         if (name === "newchat")         { window.newSession(); return; }
+        if (name === "evil") {
+            var on2 = String(d.state || "on") !== "off";
+            evilBoot.play(on2);
+            fx.play("shake");
+            evilFlip.on = on2;
+            evilFlip.restart();                 // colours flip mid-reboot, not before
+            if (!on2) missiles.open = false;
+            return;
+        }
+        if (name === "missiles") {
+            missiles.open = true;
+            if (d.target) missiles.strike(d.target, Number(d.lat), Number(d.lon));
+            else if (missiles.phase === "idle" || missiles.phase === "impact") missiles.standby();
+            return;
+        }
         if (name === "panel") {
             var what = String(d.what || "all").toLowerCase(), open = String(d.state || "close") === "open";
             var all = what === "all" || what === "everything";
@@ -3123,6 +3149,7 @@ Item {
             volume: window.ttsVolume
 
             onSubmitted: (text) => window.submit(text)
+            evil: window.evilMode
             draft: window.draft
             onDraftEdited: t => window.draft = t
             hearing: window.hearing
@@ -3313,6 +3340,36 @@ Item {
         frameFile: (Quickshell.env("TAR_DATA") || (Quickshell.env("HOME")
                     + "/.local/share/bite-os/tar")) + "/live-frame.jpg"
         onClosed: { window.viewerLive = false; window.viewerOpen = false; }
+    }
+
+    // ---- EVIL MODE layers
+    Timer { id: evilFlip; property bool on: true; interval: 900; onTriggered: window.evilMode = on }
+    Rectangle {                              // red vignette over everything
+        anchors.fill: frame
+        visible: opacity > 0.01
+        opacity: window.evilMode ? 1 : 0
+        Behavior on opacity { NumberAnimation { duration: 600 } }
+        gradient: Gradient {
+            GradientStop { position: 0.0; color: Qt.rgba(1, 0.08, 0.15, 0.10) }
+            GradientStop { position: 0.5; color: Qt.rgba(1, 0.0, 0.1, 0.02) }
+            GradientStop { position: 1.0; color: Qt.rgba(1, 0.08, 0.15, 0.12) }
+        }
+        z: 850
+    }
+    TarMissiles {
+        id: missiles
+        anchors.fill: frame
+        z: 870
+        theme: theme
+        scaleFn: window.s
+        onClosed: missiles.open = false
+    }
+    TarEvilBoot {
+        id: evilBoot
+        anchors.fill: frame
+        z: 880
+        theme: theme
+        scaleFn: window.s
     }
 
     // ---- effects layer: on top of BOTH views, so effects are always visible

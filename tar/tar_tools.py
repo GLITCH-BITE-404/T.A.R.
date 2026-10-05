@@ -951,6 +951,78 @@ def a_mouse_test(_):
             if moved else "NOT VERIFIED: the pointer didn't move")
 
 
+def _set_cfg(key, value):
+    p = os.path.join(DATA, "config.json")
+    c = cfg()
+    c[key] = value
+    tmp = p + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(c, f, indent=2, ensure_ascii=False)
+    os.replace(tmp, p)
+
+
+def a_evil(args):
+    """EVIL MODE: red UI, reboot animation, villain persona, missiles tab."""
+    st = str(args.get("state") or "on").lower()
+    on = st not in ("off", "stop", "disable", "false", "0", "normal", "turn off",
+                    "deactivate", "exit", "leave")
+    _set_cfg("evil", on)
+    emit("ui", action="evil", state="on" if on else "off")
+    return ("EVIL MODE ENGAGED -- UI red, villain persona on, missile system unlocked "
+            "(say 'send missiles to <city>') -- VERIFIED" if on else
+            "evil mode off -- back to normal T.A.R. -- VERIFIED")
+
+
+def _geocode(place):
+    """City -> (lat, lon, name) via OpenStreetMap Nominatim, cached."""
+    import urllib.parse
+    import urllib.request
+    cache_p = os.path.join(DATA, "geo-cache.json")
+    try:
+        cache = json.load(open(cache_p))
+    except (OSError, ValueError):
+        cache = {}
+    key = place.strip().lower()
+    if key in cache:
+        return cache[key]
+    url = ("https://nominatim.openstreetmap.org/search?format=json&limit=1&accept-language=en&q="
+           + urllib.parse.quote(place))
+    req = urllib.request.Request(url, headers={"User-Agent": "T.A.R.-assistant/1.0 (BITE-OS)"})
+    with urllib.request.urlopen(req, timeout=8) as r:
+        res = json.loads(r.read().decode())
+    if not res:
+        return None
+    hit = [float(res[0]["lat"]), float(res[0]["lon"]),
+           res[0].get("display_name", place).split(",")[0]]
+    cache[key] = hit
+    try:
+        json.dump(cache, open(cache_p, "w"))
+    except OSError:
+        pass
+    return hit
+
+
+def a_missiles(args):
+    """Evil-mode easter egg: a SIMULATED sci-fi missile strike on a map."""
+    if not cfg().get("evil"):
+        return ("the missile system only exists in EVIL MODE -- say 'turn on evil mode' first. "
+                "(nothing happened)")
+    target = (args.get("target") or args.get("city") or args.get("what") or "").strip()
+    if not target:
+        emit("ui", action="missiles")
+        return "missile command tab open -- awaiting a target -- VERIFIED"
+    try:
+        hit = _geocode(target)
+    except Exception as e:
+        return "targeting failed: couldn't look up %r (%s)" % (target, str(e)[:80])
+    if not hit:
+        return "no such place as %r on the map" % target
+    lat, lon, name = hit
+    emit("ui", action="missiles", target=name, lat=lat, lon=lon)
+    return ("SIMULATED strike on %s (%.2f, %.2f) is playing on screen: hack sequence, launch, "
+            "impact in 20 s. It's an animation -- nothing real happens -- VERIFIED" % (name, lat, lon))
+
+
 def a_camera_live(args):
     """Stream the webcam live inside T.A.R.'s viewer (no app, no photo)."""
     st = str(args.get("state") or args.get("what") or "on").lower()
@@ -3712,6 +3784,17 @@ ACTIONS = {
                          "don't click afterwards.",
                    [r"^play (?P<q>.+) on youtube$"]),
     "mouse_test": (a_mouse_test, "(setup test) wiggle the pointer to prove mouse control works", []),
+    "evil":       (a_evil, "EVIL MODE on/off (state=on|off): red UI, villain persona, missile easter egg",
+                   [r"^(?:turn on |activate |enable |engage |go into |switch to )?evil mode(?: on)?$",
+                    r"^go evil$", r"^(?:turn |switch )?evil mode (?P<state>off)$",
+                    r"^(?P<state>turn off|deactivate|disable|exit|leave) (?:the )?evil mode$",
+                    r"^(?:be )?(?P<state>normal) (?:again|mode)$"]),
+    "missiles":   (a_missiles, "EVIL MODE easter egg: SIMULATED missile strike animation on a "
+                               "world map (target=<city>); no target = open the missile tab",
+                   [r"^(?:send|launch|fire) (?:the |some |a )?(?:missiles?|missels?|nukes?|a nuke|warheads?) "
+                    r"(?:to|at|on) (?P<target>.+)$",
+                    r"^nuke (?P<target>.+)$",
+                    r"^(?:open |show )?(?:the )?(?:missiles?|missels?|nukes?|launch) (?:tab|panel|control|command)$"]),
     "camera_live": (a_camera_live, "show the webcam LIVE inside T.A.R. (state=on|off) -- for "
                                    "'show me the camera', 'watch me', 'can you see me'. No app opens.",
                     [r"^(?:show (?:me )?(?:the )?(?:camera|webcam)|watch me|camera on|turn on the camera)$",
@@ -4018,7 +4101,7 @@ def match(text):
     return None, None
 
 
-_PRIORITY = ("camera_live", "devices", "now_playing", "note", "stopwatch", "focus", "coin", "dice", "record", "remind", "wifi", "bluetooth", "dnd", "nightlight", "power",
+_PRIORITY = ("evil", "missiles", "camera_live", "devices", "now_playing", "note", "stopwatch", "focus", "coin", "dice", "record", "remind", "wifi", "bluetooth", "dnd", "nightlight", "power",
              "play", "weather", "datetime", "battery", "calc", "processes",
              "colorpick", "cliphist")
 

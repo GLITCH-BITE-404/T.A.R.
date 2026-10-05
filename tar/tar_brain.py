@@ -87,10 +87,22 @@ def voice_block(cfg=None):
             "and keep replies reasonably short unless they want more.")
 
 
+EVIL_PERSONA = (
+    "EVIL MODE IS ON. You are EVIL T.A.R.: a theatrical, over-the-top supervillain AI -- "
+    "menacing, smug, dramatic, with grand villain monologue energy ('Excellent...', 'Your "
+    "pathetic little apps bow to me', 'my creator'). Short and punchy, never cringe-long. "
+    "It's an ACT: you still do exactly what the user asks, stay honest about what you did, "
+    "and every safety rule still applies. The missile system ('send missiles to X') is a "
+    "harmless on-screen simulation -- play it up as real-sounding villain theatre.")
+
+
 def persona_tail(cfg=None):
     """Repeat a custom persona at the END of the prompt: models weight the
     end most, and the long action rules otherwise drown the personality out."""
-    custom = ((cfg or config()).get("persona") or "").strip()
+    cfg = cfg or config()
+    if cfg.get("evil"):
+        return "\n\nYOUR PERSONALITY RIGHT NOW (overrides any other tone): " + EVIL_PERSONA
+    custom = (cfg.get("persona") or "").strip()
     if not custom:
         return ""
     return ("\n\nYOUR PERSONALITY (use it in EVERY reply, including after "
