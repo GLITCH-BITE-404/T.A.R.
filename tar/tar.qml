@@ -86,7 +86,40 @@ Item {
             var tts = window.capsData ? window.capsData.tts : undefined;
             if (tts && tts.ready) window.speak("T.A.R. online.");
         }
+        if (a.wake) window.wakeOn = true;
     }
+
+    // ---- wake word: "hey jarvis" -> come to the front and start listening
+    property bool wakeOn: false
+    Process {
+        id: wakeProc
+        running: window.wakeOn
+        command: ["python3", Quickshell.env("HOME")
+                  + "/.config/hypr/scripts/quickshell/tar/tar_wake.py"]
+        stdout: SplitParser {
+            splitMarker: "\n"
+            onRead: data => {
+                var d;
+                try { d = JSON.parse(data); } catch (e) { return; }
+                if (d.t === "wake") {
+                    if (listenProc.running || window.busy) return;
+                    Quickshell.execDetached(["hyprctl", "dispatch", "focuswindow",
+                                             "title:^(T\\.A\\.R\\.)$"]);
+                    fx.play("shock");
+                    window.sfx("boot");
+                    window.listen();
+                } else if (d.t === "wake_ready") {
+                    window.statusNote = "wake word on -- say \"hey jarvis\"";
+                } else if (d.t === "error") {
+                    window.say("sys", "wake word: " + (d.v || "failed"));
+                    window.wakeOn = false;
+                }
+            }
+        }
+        // crashed or the mic went away: try again in a moment while it's wanted
+        onExited: if (window.wakeOn) wakeRetry.restart()
+    }
+    Timer { id: wakeRetry; interval: 5000; onTriggered: if (window.wakeOn && !wakeProc.running) wakeProc.running = true }
     readonly property real targetW: windowed
         ? window.width - s(16)
         : Math.min(window.width * 0.62, s(900))
@@ -387,6 +420,7 @@ Item {
         { cmd: "stop",     args: "",            desc: "stop the reply in progress" },
         { cmd: "cloud",    args: "[off]",       desc: "switch to the cloud brain (Gemini/Claude)" },
         { cmd: "new",      args: "",            desc: "start a new chat" },
+        { cmd: "wake",     args: "[off]",       desc: "\"hey jarvis\" wake word on/off" },
         { cmd: "persona",  args: "<how to talk> | reset", desc: "change how T.A.R. talks" },
         { cmd: "key",      args: "<api-key>",   desc: "save your Anthropic API key" },
         { cmd: "model",    args: "<name>",      desc: "pin a specific local model" },
@@ -1371,6 +1405,13 @@ Item {
                 return;
             }
             if (cmd === "new" || cmd === "newchat") { window.newSession(); return; }
+            if (cmd === "wake") {
+                var on = arg !== "off";
+                window.wakeOn = on;
+                window.capsRun(["autostart", "wake", on ? "on" : "off"]);
+                window.say("sys", on ? "wake word on -- say \"hey jarvis\"" : "wake word off");
+                return;
+            }
             if (cmd === "clear") { chatModel.clear(); window.lastUser = "";
                                    window.lastReply = ""; return; }
 

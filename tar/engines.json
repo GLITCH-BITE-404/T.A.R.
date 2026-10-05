@@ -117,6 +117,14 @@
       "icon": "󰋩",
       "device_kind": null,
       "engines": {
+        "gemini": {
+          "cloud_vision": true,
+          "size_mb": 0,
+          "quality": "excellent",
+          "recommended": true,
+          "source": "cloud",
+          "desc": "Gemini sees your screen and camera (cloud mode, uses your free Gemini key)."
+        },
         "moondream": {
           "ollama_model": "moondream:1.8b",
           "size_mb": 1700,
@@ -156,7 +164,9 @@
           "size_mb": 90,
           "quality": "ok",
           "recommended": true,
-          "desc": "Small always-on wake-word spotter. Custom phrases supported."
+          "desc": "Local 'hey jarvis' detector (openWakeWord). Runs offline, ~1-2% CPU.",
+          "sys_module": "openwakeword",
+          "needs_wake_models": true
         }
       }
     },

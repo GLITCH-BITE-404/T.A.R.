@@ -142,6 +142,15 @@ def _has_key():
         return False
 
 
+def _google_key():
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import tar_cloud
+        return tar_cloud.api_key("google")
+    except Exception:
+        return ""
+
+
 def _cloud_status():
     """(ready, reason) for the selected cloud model -- Gemini needs no SDK."""
     try:
@@ -195,7 +204,26 @@ def ollama_models():
         return {m["name"] for m in d.get("models", [])} | \
                {m["name"].split(":")[0] for m in d.get("models", [])}
     except Exception:
-        return set()
+        pass
+    # ollama isn't running (it no longer starts at boot): read what's on disk
+    found = set()
+    base = os.path.expanduser("~/.ollama/models/manifests")
+    for root, dirs, files in os.walk(base):
+        for f in files:
+            rel = os.path.relpath(os.path.join(root, f), base).split(os.sep)
+            if len(rel) >= 3:
+                name = rel[-2] if rel[-3] == "library" else "/".join(rel[-3:-1])
+                found |= {name, "%s:%s" % (name, rel[-1])}
+    return found
+
+
+def _sys_module(name):
+    """Importable by the SYSTEM python (pacman python-* packages land there)."""
+    try:
+        return subprocess.run(["python3", "-c", "import " + name], capture_output=True,
+                              timeout=20).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 def voice_files():
@@ -228,6 +256,28 @@ def engine_state(cap, key, spec, have_ollama):
         "recommended": bool(spec.get("recommended")),
         "source": spec.get("source", "repo"),
     }
+    if spec.get("cloud_vision"):
+        st["kind"] = "cloud"
+        st["ref"] = "gemini"
+        st["pkg"] = None
+        st["installed"] = _cloud_status()[0] or bool(_google_key())
+        st["ready"] = st["installed"]
+        st["missing_asset"] = None if st["ready"] else "gemini key"
+        return st
+
+    if spec.get("sys_module"):
+        st["kind"] = "python"
+        st["ref"] = spec["sys_module"]
+        st["pkg"] = spec.get("pkg")
+        st["installed"] = _sys_module(spec["sys_module"])
+        st["ready"] = st["installed"]
+        if st["installed"] and spec.get("needs_wake_models"):
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            import tar_wake
+            st["ready"] = tar_wake.models_present()
+            st["missing_asset"] = None if st["ready"] else "wake model (~3 MB)"
+        return st
+
     if spec.get("python_module"):
         # Not a binary: the cloud SDK lives in T.A.R.'s own venv.
         st["kind"] = "python"
@@ -617,6 +667,24 @@ def install(cap, engine, want_voice=None, want_model=None):
         else:
             emit("install_done", cap=cap, engine=engine, ok=True,
                  v=cspec["label"] + " ready")
+        return 0
+
+    # ---- wake word: package present -> fetch its model files (no sudo)
+    if spec.get("sys_module") and _sys_module(spec["sys_module"]):
+        if spec.get("needs_wake_models"):
+            rc = _stream([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                      "tar_wake.py"), "--setup"], cap)
+            if rc != 0:
+                emit("install_done", cap=cap, engine=engine, ok=False, v="model download failed")
+                return 1
+        _choose(cap, engine)
+        emit("install_done", cap=cap, engine=engine, ok=True, v=cspec["label"] + " ready")
+        return 0
+
+    # ---- cloud vision needs nothing installed
+    if spec.get("cloud_vision"):
+        _choose(cap, engine)
+        emit("install_done", cap=cap, engine=engine, ok=True, v="Gemini vision ready")
         return 0
 
     # ---- user-built AUR tools: no sudo, lands in ~/.local/bin
