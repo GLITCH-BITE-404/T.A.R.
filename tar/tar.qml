@@ -282,8 +282,10 @@ Item {
                 } else if (d.t === "wake_ready") {
                     window.statusNote = "wake word on -- " + (d.v || "listening");
                 } else if (d.t === "error") {
-                    window.say("sys", "wake word: " + (d.v || "failed"));
-                    window.wakeOn = false;
+                    // say it, but keep trying (it used to switch itself off for good)
+                    window.statusNote = "\u2717 wake word: " + (d.v || "failed") + " -- retrying";
+                    if (/train your voice|no voice samples|isn't installed/.test(d.v || ""))
+                        window.wakeOn = false;
                 }
             }
         }
@@ -1273,7 +1275,7 @@ Item {
         id: listenProc
         command: ["python3", Quickshell.env("HOME")
                   + "/.config/hypr/scripts/quickshell/tar/tar_listen.py",
-                  "--seconds", "25", "--silence", "2.2", "--ctl"]
+                  "--seconds", "25", "--silence", "1.5", "--ctl"]
         stdinEnabled: true
         stdout: SplitParser {
             splitMarker: "\n"

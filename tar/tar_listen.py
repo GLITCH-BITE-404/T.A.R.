@@ -209,6 +209,8 @@ def record(max_s, silence_s):
     last_loud = None
     spoke = False
     floor = None
+    hist = []
+    peak = 0.0
     try:
         while time.time() - started < max_s:
             if ctl["cmd"]:
@@ -223,11 +225,25 @@ def record(max_s, silence_s):
                 continue
             rms = math.sqrt(sum(v * v for v in a) / len(a)) / 32768.0
             emit("level", v=round(min(1.0, rms * 6), 4))
-            now = time.time()
+            now = len(frames) / 2.0 / RATE      # audio time, not wall time
             # loud = clearly above THIS room's noise (a fixed 0.02 never went
             # quiet on a boosted mic, so listening ran the full 15 s)
-            floor = rms if floor is None else (min(rms, floor * 1.02) if rms < floor * 1.5 else floor * 1.003)
-            if rms > max(0.012, floor * 2.5):
+            # room noise = the quiet end (20th percentile) of the last 3 s
+            hist.append(rms)
+            if len(hist) > 60:
+                hist.pop(0)
+            floor = sorted(hist)[len(hist) // 5]
+            sm = sum(hist[-5:]) / len(hist[-5:])            # 250 ms average
+            if spoke:
+                peak = max(peak, sm)
+            # measured room: floor ~0.016 with bumps to 0.04-0.08 (fan, keys).
+            # Speech starts well above that; it has ENDED once the level falls
+            # under a quarter of your own speech peak.
+            start_thr = max(0.03, floor * 3.5)
+            keep_thr = max(0.02, floor * 2.5, peak * 0.25)
+            if len(hist) >= 6 and sm > (keep_thr if spoke else start_thr):
+                if not spoke:
+                    peak = sm
                 spoke = True
                 last_loud = now
             # stop once they've clearly stopped talking

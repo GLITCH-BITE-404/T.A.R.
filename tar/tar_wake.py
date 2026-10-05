@@ -233,9 +233,13 @@ class Utterances:
     def push(self, chunk, rms):
         import numpy as np
         r = max(1.0, rms)
-        self.floor = r if self.floor is None else (
-            min(r, self.floor * 1.01) if r < self.floor * 1.6 else self.floor * 1.002)
+        # room noise = quiet end (20th pct) of the last ~4 s -- the old creeping
+        # estimate started near 0 and called everything "speech" for a minute
+        self.hist = (getattr(self, "hist", []) + [r])[-50:]
+        self.floor = sorted(self.hist)[len(self.hist) // 5]
         self.buf = np.concatenate([self.buf, chunk])[-self.n:]
+        if len(self.hist) < 8:
+            return None
         self.pos += len(chunk)
         self.tick += 1
         if len(self.buf) < RATE // 2 or self.tick % 2:
@@ -492,11 +496,20 @@ def listen(test=False):
                     e = embed_segment(af, s)
                     dist = min(_dtw(e, t) for t in voice["templates"]) if len(e) >= 3 else 9
                     score = max(0.0, 1.0 - dist / max(threshold, 1e-6) * 0.5)
-                    hit = dist <= threshold
+                    # stage 1 (voice match) is loose; stage 2 (what was SAID)
+                    # decides -- "hey jarvis" in your voice matched "hey tar"
+                    if dist <= threshold * 1.5 and len(s) <= RATE * 2.5:
+                        def _yes():
+                            emit("wake", score=round(score, 2))
+                        confirm_async(s, w.get("phrase") or "hey tar", dist, _yes)
+                    else:
+                        wlog(ev="phrase", dist=round(dist, 3), need=round(threshold * 1.5, 3))
+                        if test:
+                            _transcribe_async(s)
                     if test:
                         emit("wake_score", v=round(score, 2), dist=round(dist, 3),
                              need=round(threshold, 3))
-                if test:
+                elif test:
                     _transcribe_async(s)
             if test:
                 now = time.time()
@@ -511,6 +524,67 @@ def listen(test=False):
                 emit("wake", score=round(score, 2))
     finally:
         rec.terminate()
+
+
+def wlog(**kw):
+    """Every wake decision, so a miss/false wake can be explained later."""
+    try:
+        kw["at"] = time.strftime("%H:%M:%S")
+        with open(os.path.join(DATA, "wake.log"), "a", encoding="utf-8") as f:
+            f.write(json.dumps(kw, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
+_OTHER_WAKE = ("jarvis", "alexa", "siri", "google", "mycroft", "rhasspy", "cortana",
+               "ג'ארוויס", "ג׳רוויס", "אלקסה", "סירי")
+_TAR_LIKE = ("tar", "tarr", "tahr", "tao", "tara", "t.a.r", "t.a.r.", "טאר", "טר", "תאר", "תר", "היטר")
+
+
+def phrase_heard(text, phrase):
+    """Does a transcript contain the wake phrase's key word (not another
+    assistant's name)? Fuzzy, since 'tar' gets written many ways."""
+    import difflib
+    import re as _re
+    t = (text or "").lower()
+    if not t or any(w in t for w in _OTHER_WAKE):
+        return False
+    key = (phrase or "hey tar").lower().split()[-1]
+    toks = _re.findall(r"[\w.']+", t)
+    cands = set(_TAR_LIKE) if key in ("tar", "t.a.r.", "t.a.r") else {key}
+    for tok in toks:
+        tok = tok.strip(".'")
+        if tok in cands or any(difflib.SequenceMatcher(None, tok, c).ratio() >= 0.75 for c in cands):
+            return True
+    return False
+
+
+def confirm_async(seg, phrase, dist, on_yes):
+    """Stage 2: transcribe the candidate; wake only if it really was the phrase."""
+    import threading
+
+    def run():
+        text = None
+        try:
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            import tar_cloud
+            tar_cloud.emit = lambda *a, **k: None
+            if tar_cloud.api_key("google"):
+                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tf:
+                    p = tf.name
+                with wave.open(p, "wb") as wv:
+                    wv.setnchannels(1); wv.setsampwidth(2); wv.setframerate(RATE)
+                    wv.writeframes(seg.tobytes())
+                text = tar_cloud.transcribe_wav(p)
+                os.unlink(p)
+        except Exception as e:
+            wlog(ev="confirm_error", err=str(e)[:120])
+        ok = phrase_heard(text, phrase) if text is not None else dist <= 0.06
+        wlog(ev="candidate", dist=round(dist, 3), heard=text, woke=ok)
+        emit("heard", v=(text or "(no transcript)") + ("  \u2713" if ok else "  \u2717 not the wake phrase"))
+        if ok:
+            on_yes()
+    threading.Thread(target=run, daemon=True).start()
 
 
 def _transcribe_async(seg):
@@ -595,7 +669,18 @@ def main():
 
 
 if __name__ == "__main__":
+    import signal
+    signal.signal(signal.SIGTERM, lambda *a: (_ for _ in ()).throw(KeyboardInterrupt()))
+    wlog(ev="start", argv=sys.argv[1:], ppid=os.getppid())
     try:
-        sys.exit(main())
+        rc = main()
+        wlog(ev="exit", rc=rc)
+        sys.exit(rc)
     except KeyboardInterrupt:
+        wlog(ev="stopped")
         sys.exit(130)
+    except Exception as e:
+        import traceback
+        wlog(ev="crash", err=traceback.format_exc()[-600:])
+        emit("error", v="wake listener crashed: %s" % e)
+        sys.exit(1)
