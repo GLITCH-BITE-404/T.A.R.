@@ -906,6 +906,14 @@ def a_cam_view(args):
 
 
 def a_cam_snap(_):
+    # the live view holds the camera -- take the photo FROM it instead
+    live = os.path.join(DATA, "live-frame.jpg")
+    if os.path.exists(live) and time.time() - os.path.getmtime(live) < 3:
+        os.makedirs(SHOTS, exist_ok=True)
+        p = os.path.join(SHOTS, time.strftime("cam-%Y%m%d-%H%M%S.jpg"))
+        shutil.copyfile(live, p)
+        emit("image", path=p, source="camera", caption="photo from the live camera")
+        return "captured %s (from the live view) -- VERIFIED. To SEE it: look path=%s" % (p, p)
     dev = effective_device("video")
     if not dev:
         return "no camera found"
@@ -4195,8 +4203,18 @@ def run(name, args):
                 emit("ui", action="alert")
             emit("ui", action="banner", text=line if len(line) < 28 else line.split(".")[0] + ".")
             return line
+        if name == "close" and not DIRECT and not re.search(
+                r"\b(close|quit|exit|shut down|turn off)\b.{0,20}\b(yourself|tar|t\.a\.r\.?|you)\b"
+                r"|\b(go away|bye tar|goodbye)\b", (USER_SAID or "").split(" \n ")[-1].lower()):
+            # it once closed ITSELF when asked to "close the camera feed"
+            return ("NOT DONE: 'close' shuts T.A.R. itself down -- the user didn't ask for that. "
+                    "For the camera/preview use camera_live state=off or panel what=viewer state=close.")
         emit("ui", action=name, **args)
-        return EGG_REPLY.get(name) or UI_ACTIONS[name]
+        if name == "panel":
+            return "%s T.A.R.'s %s panel%s -- VERIFIED (done instantly, don't repeat it)" % (
+                "opened" if str(args.get("state", "close")) == "open" else "closed",
+                args.get("what", "all"), "s" if args.get("what", "all") == "all" else "")
+        return EGG_REPLY.get(name) or ("done: %s -- VERIFIED (T.A.R.'s own UI, don't repeat it)" % name)
     entry = ACTIONS.get(name)
     if not entry:
         return None

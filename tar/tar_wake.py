@@ -505,8 +505,8 @@ def listen(test=False):
                     clear = pk > max(1200.0, (seg.floor or 1.0) * 5.0)
                     now_t = time.time()
                     calls[:] = [t for t in calls if now_t - t < 3600]
-                    if 0.4 <= dur <= 1.8 and clear and now_t - last_check[0] >= 4 \
-                            and len(calls) < 40:
+                    if 0.4 <= dur <= 1.8 and clear and now_t - last_check[0] >= 8 \
+                            and len(calls) < 20 and _day_budget():
                         last_check[0] = now_t
                         calls.append(now_t)
 
@@ -569,6 +569,27 @@ def phrase_heard(text, phrase):
         if tok in cands or any(difflib.SequenceMatcher(None, tok, c).ratio() >= 0.75 for c in cands):
             return True
     return False
+
+
+def _day_budget(limit=150):
+    """At most `limit` wake checks per day, across restarts -- they share the
+    free Gemini quota with chatting (room noise used to burn hundreds)."""
+    p = os.path.join(DATA, "wake-budget.json")
+    day = time.strftime("%Y-%m-%d")
+    try:
+        d = json.load(open(p))
+    except (OSError, ValueError):
+        d = {}
+    if d.get("day") != day:
+        d = {"day": day, "n": 0}
+    if d["n"] >= limit:
+        return False
+    d["n"] += 1
+    try:
+        json.dump(d, open(p, "w"))
+    except OSError:
+        pass
+    return True
 
 
 def confirm_async(seg, phrase, dist, on_yes):
