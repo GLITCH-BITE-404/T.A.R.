@@ -1019,9 +1019,9 @@ def main():
 
     elif cmd == "autostart":
         if len(a) < 2 or a[1] not in ("on", "off"):
-            die("usage: autostart <speak|mic|wake|warm|sfx|greet> on|off")
+            die("usage: autostart <speak|mic|wake|wake_listen|warm|sfx|greet> on|off")
         key = a[0]
-        if key not in ("speak", "mic", "wake", "warm", "sfx", "greet"):
+        if key not in ("speak", "mic", "wake", "wake_listen", "warm", "sfx", "greet"):
             die("unknown autostart key: " + key)
         cfg = config()
         cfg["autostart"][key] = (a[1] == "on")

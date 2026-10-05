@@ -309,7 +309,7 @@ def a_center(args):
 
 
 # "them" = what T.A.R. opened. "everything" = every window except T.A.R.
-_PLURAL = ("them", "those", "these", "both", "both of them", "all of them",
+_PLURAL = ("them", "em", "'em", "those", "these", "both", "both of them", "all of them",
            "everything you opened", "all of those", "what you opened",
            "the ones you opened")
 _EVERYTHING = ("everything", "all", "all windows", "all apps", "everything else",
@@ -379,8 +379,24 @@ def _last_action(within_s=300):
     return None
 
 
+def _own_panels():
+    """T.A.R.'s own open side panels (from the UI's ui-state.json)."""
+    try:
+        with open(os.path.join(DATA, "ui-state.json"), encoding="utf-8") as f:
+            ui = json.load(f)
+        return [k for k in ("viewer", "test", "console", "tasks", "setup", "chats") if ui.get(k)]
+    except (OSError, ValueError):
+        return []
+
+
 def a_closewin(args):
     what = (args.get("what") or "").strip().lower()
+    if what in _PLURAL + ("it", "that", "this", "this one", "that one") and not tar_opened():
+        panels = _own_panels()
+        if panels:
+            # nothing T.A.R. opened is open, but its own panels are: those are "them"
+            emit("ui", action="panel", what="all", state="close")
+            return "closed T.A.R.'s own panels (%s) -- VERIFIED" % ", ".join(panels)
     if what in ("it", "that", "this", "this one", "that one"):
         # "close it" means the last thing T.A.R. showed/opened -- its OWN viewer
         # included. It once closed the user's terminal (with Claude Code in it)
@@ -3446,6 +3462,9 @@ UI_ACTIONS = {
     "setup":     "open T.A.R.'s own SETUP pane",
     "console":   "toggle T.A.R.'s console (models, voice, memory)",
     "chats":     "open T.A.R.'s past chats",
+    "panel":     "open/close one of T.A.R.'s OWN panels: what=viewer (the preview/'sees' tab "
+                 "with photos/camera) | test (setup test bay) | console | tasks | setup | chats "
+                 "| all, state=open|close. 'close the preview tab / that panel / em' = THIS.",
     # visual effects (TarFx layer) -- fine to use for fun or to celebrate
     "shock":     "fx: shockwave ring",
     "flash":     "fx: white flash",

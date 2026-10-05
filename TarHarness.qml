@@ -59,8 +59,9 @@ ShellRoot {
             // in the same batch: applying `setfloating` restores Hyprland's own
             // remembered floating size, which lands after our resize and undoes
             // it. Hence the deferral.
-            win.pendW = Math.round(w);
-            win.pendH = Math.round(h);
+            var sc = win.screen;
+            win.pendW = Math.round(sc ? Math.min(w, sc.width * 0.98) : w);
+            win.pendH = Math.round(sc ? Math.min(h, sc.height * 0.94) : h);
             if (!win.floated) {
                 // Only once. Re-issuing setfloating on an already-floating
                 // window makes Hyprland re-apply its remembered floating
@@ -97,6 +98,11 @@ ShellRoot {
             interval: 90
             onTriggered: win.hypr(["centerwindow", win.sel])
         }
+        Timer {
+            id: reapply; interval: 120
+            onTriggered: win.sizeTo(win.pendW > 0 ? win.pendW : win.workW,
+                                    win.pendH > 0 ? win.pendH : win.workH)
+        }
         function goBig() {
             var sc = win.screen;
             win.sizeTo(sc ? sc.width * 0.96 : 1600,
@@ -121,7 +127,13 @@ ShellRoot {
             onLoaded: {
                 item.hostHandlesClose = true;
                 item.windowed = true;
-                item.closed.connect(function () { Qt.quit(); });
+                item.closed.connect(function () {
+                    // wake word on: hide and keep listening ("hey tar" brings it
+                    // back); everything else was already stopped by shutdown()
+                    if (item.wakeOn) { item.backgrounded = true; win.reopening = true;
+                                       win.visible = false; win.reopening = false; }
+                    else Qt.quit();
+                });
                 item.showRequested.connect(function () {
                     item.backgrounded = false;
                     // after a compositor close `visible` can still read true while
@@ -130,6 +142,10 @@ ShellRoot {
                     win.visible = false;
                     win.visible = true;
                     win.reopening = false;
+                    // a freshly mapped window is TILED by Hyprland -- re-apply
+                    // the start mode (it came back squished as a tile before)
+                    win.floated = false;
+                    if (item.startMode !== "window") reapply.restart();
                 });
                 item.sizeRequested.connect(function (w, h) {
                     if (!win.settled) return;   // don't fight the intro

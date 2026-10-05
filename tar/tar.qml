@@ -86,6 +86,7 @@ Item {
 
     // Applied once, after the first caps report tells us what the user wants
     // switched on at launch.
+    Timer { id: wakeListen; interval: 450; onTriggered: if (!listenProc.running) window.listen() }
     Timer { id: micAfterGreet; interval: 1200; onTriggered: if (!window.hearing) window.listen() }
     function applyAutostart() {
         var a = window.autostart || ({});
@@ -268,14 +269,27 @@ Item {
                 var d;
                 try { d = JSON.parse(data); } catch (e) { return; }
                 if (d.t === "wake") {
-                    if (listenProc.running || window.busy || window.wakeBlocked) return;
+                    if (window.wakeBlocked) return;
+                    window.summon();                    // show the window, wherever it is
+                    fx.play("shock");
+                    window.sfx("boot");
+                    if (listenProc.running || window.noteRec) {
+                        window.statusNote = "\u25C9 already listening";
+                        return;
+                    }
+                    if (window.busy) {
+                        window.statusNote = "\u25C9 heard you -- still working on the last one";
+                        return;
+                    }
+                    window.shutUp();                    // stop talking: you're about to speak
+                    if ((window.autostart || {}).wake_listen === false) {
+                        window.statusNote = "\u25C9 heard the wake word";
+                        return;
+                    }
                     window.historyOpen = false;
                     window.afterWake = true;
                     window.statusNote = "\u25C9 heard the wake word -- listening";
-                    window.summon();
-                    fx.play("shock");
-                    window.sfx("boot");
-                    window.listen();
+                    wakeListen.restart();               // after the window is up
                 } else if (d.t === "muted") {
                     window.statusNote = "\u2717 " + d.v;
                 } else if (d.t === "wake_ready") {
@@ -320,6 +334,23 @@ Item {
     property real viewerAt: 0
     property bool viewerLive: false
     readonly property bool leftOpen: viewerOpen || (tasksOpen && tasksActive)
+    // what's open in T.A.R.'s own UI -> ui-state.json, so the brain knows "the
+    // preview tab" is ITS viewer, not a browser tab
+    readonly property string uiState: JSON.stringify({
+        view: viewMode, setup: settingsOpen, chats: historyOpen, console: consoleOpen,
+        viewer: viewerOpen ? (viewerLive ? "live camera" : (viewerSource || "image")) : false,
+        test: testMode || false, tasks: tasksOpen && tasksActive })
+    onUiStateChanged: uiStateTimer.restart()
+    Timer {
+        id: uiStateTimer; interval: 300
+        onTriggered: { uiStateWriter.body = window.uiState; uiStateWriter.running = false; uiStateWriter.running = true; }
+    }
+    Process {
+        id: uiStateWriter
+        property string body: "{}"
+        command: ["python3", "-c", "import sys,os; p=sys.argv[1]; open(p,'w').write(sys.argv[2])",
+                  (Quickshell.env("TAR_DATA") || (Quickshell.env("HOME") + "/.local/share/bite-os/tar")) + "/ui-state.json", body]
+    }
     onViewerOpenChanged: window.autoSize()
     readonly property real sideW: (consoleOpen ? consoleW + consoleGap : 0)
                                 + (leftOpen ? tasksW + consoleGap : 0)
@@ -350,15 +381,19 @@ Item {
     // Opening a side panel should make the window BIGGER, not squash the chat.
     onConsoleOpenChanged: window.autoSize()
     onTasksOpenChanged: window.autoSize()
-    onSettingsOpenChanged: window.autoSize()
-    onHistoryOpenChanged: window.autoSize()
+    onSettingsOpenChanged: { window.autoSize(); window.maybeReturn(); }
+    onHistoryOpenChanged: { window.autoSize(); window.maybeReturn(); }
     onTestModeChanged: window.autoSize()
     function autoSize() {
         if (!window.windowed) return;
-        var wide = window.consoleOpen || window.settingsOpen
-                   || window.historyOpen || window.testMode !== ""
-                   || window.leftOpen;
-        window.requestSize(wide ? 1420 : 1040, wide ? 860 : 760);
+        // grow with what's open instead of squeezing it in: each side panel
+        // (console, viewer/tasks, test bay) adds its width; the harness caps
+        // it to the screen
+        var sides = (window.consoleOpen ? 1 : 0) + (window.leftOpen ? 1 : 0)
+                  + (window.testMode !== "" ? 1 : 0);
+        var wide = sides > 0 || window.settingsOpen || window.historyOpen;
+        window.requestSize(1040 + sides * 400 + (window.settingsOpen && sides === 0 ? 380 : 0),
+                           wide ? 860 : 760);
     }
     property bool autotier: true
     ListModel { id: modelsModel }
@@ -397,6 +432,13 @@ Item {
         command: ["python3", window.brainPath, "shutdown"]
     }
     function shutdown() {
+        // stop T.A.R.'s background tasks too (keep_doing loops)
+        Quickshell.execDetached(["python3", Quickshell.env("HOME")
+            + "/.config/hypr/scripts/quickshell/tar/tar_tools.py", "run", "stop_task"]);
+        window.shutUp();
+        if (noteProc.running)   noteProc.write("cancel\n");
+        window.viewerLive = false;
+        if (wakeTestProc.running) wakeTestProc.running = false;
         if (brain.running)      brain.running = false;
         if (panelProc.running)  panelProc.running = false;
         if (capsProc.running)   capsProc.running = false;
@@ -642,8 +684,16 @@ Item {
     property string choiceCap: ""
     property string choiceTitle: ""
 
+    property string returnView: ""
+    function leaveOrbFor() { if (window.viewMode === "orb") window.returnView = "orb"; window.viewMode = "chat"; }
+    function maybeReturn() {
+        if (!window.settingsOpen && !window.historyOpen && window.returnView !== "") {
+            window.viewMode = window.returnView;
+            window.returnView = "";
+        }
+    }
     function openHistory() {
-        window.viewMode = "chat";
+        window.leaveOrbFor();
         window.settingsOpen = false;
         window.historyOpen = true;
         window.panelRun(["sessions"]);
@@ -682,6 +732,8 @@ Item {
         // bindable from Hyprland: qs ipc -p TarHarness.qml call tar voice
         function voice(): void { if (window.hearing) window.noteStop(); else window.noteStartRec(); }
         function summon(): void { window.summon(); }
+        function dismiss(): void { window.close(); }
+        function panel(what: string, state: string): void { window.playUiAction("panel", {what: what, state: state}); }
         function view(mode: string): void { if (mode === "orb" || mode === "chat") window.viewMode = mode; }
     }
 
@@ -698,6 +750,21 @@ Item {
     function playUiAction(name, d) {
         if (name === "close")           { window.close(); return; }
         if (name === "newchat")         { window.newSession(); return; }
+        if (name === "panel") {
+            var what = String(d.what || "all").toLowerCase(), open = String(d.state || "close") === "open";
+            var all = what === "all" || what === "everything";
+            if (all || /view|preview|sees|photo|camera|image/.test(what)) {
+                window.viewerOpen = open && !all; if (!open) window.viewerLive = false; }
+            if (all || /test/.test(what)) { if (!open) window.closeTest(); }
+            if (all || /console/.test(what)) window.consoleOpen = open && !all;
+            if (all || /task/.test(what)) window.tasksOpen = open && !all;
+            if (all || /setup|setting/.test(what)) {
+                if (open && !all) { window.leaveOrbFor(); window.settingsOpen = true; window.capsRefresh(); }
+                else window.settingsOpen = false; }
+            if (all || /chat|history/.test(what)) {
+                if (open && !all) window.openHistory(); else window.historyOpen = false; }
+            return;
+        }
         if (name === "viewer") {
             window.viewerOpen = String(d.state || "on") !== "off";
             if (!window.viewerOpen) window.viewerLive = false;
@@ -709,7 +776,7 @@ Item {
             if (on) window.viewerOpen = true;
             return;
         }
-        if (name === "setup")           { window.viewMode = "chat"; window.historyOpen = false;
+        if (name === "setup")           { window.leaveOrbFor(); window.historyOpen = false;
                                           window.settingsOpen = true; window.capsRefresh(); return; }
         if (name === "console")         { window.consoleOpen = !window.consoleOpen; return; }
         if (name === "chats")           { window.openHistory(); return; }
@@ -1355,8 +1422,22 @@ Item {
     signal showRequested()
     property bool backgrounded: false
     function summon() {
-        window.showRequested();             // re-create the window if it was closed
-        summonTimer.restart();
+        summonProbe.running = false;
+        summonProbe.running = true;
+    }
+    Process {
+        id: summonProbe
+        command: ["sh", "-c", "hyprctl clients -j | jq -r 'any(.[]; .title==\"T.A.R.\")'"]
+        stdout: StdioCollector {
+            onStreamFinished: {
+                if ((this.text || "").trim() !== "true" || window.backgrounded) {
+                    window.showRequested();     // gone/hidden: map it again
+                    summonTimer.restart();
+                } else {
+                    window.summonNow();         // it exists: move it here + focus
+                }
+            }
+        }
     }
     Timer { id: summonTimer; interval: 350; onTriggered: window.summonNow() }
     function summonNow() {
@@ -1791,7 +1872,7 @@ Item {
                 return;
             }
             if (cmd === "settings" || cmd === "setup") {
-                window.viewMode = "chat";
+                window.leaveOrbFor();
                 window.historyOpen = false;
                 window.choiceOpen = false;
                 window.settingsOpen = !window.settingsOpen;
@@ -2403,6 +2484,10 @@ Item {
                     } else if (key === "mic") {
                         now = on ? "the mic will start listening when T.A.R. opens"
                                  : "the mic stays off when T.A.R. opens";
+                    } else if (key === "wake_listen") {
+                        var a2 = window.autostart || {}; a2.wake_listen = on; window.autostart = a2;
+                        now = on ? "after \"hey tar\" T.A.R. listens to what you say next"
+                                 : "\"hey tar\" only brings T.A.R. up";
                     } else if (key === "greet") {
                         now = on ? "T.A.R. will greet you when it opens" : "no greeting";
                     } else if (key === "warm") {
@@ -3078,7 +3163,7 @@ Item {
             onTasksRequested: window.tasksOpen = !window.tasksOpen
             // Setup and past chats are now reachable without leaving orb mode.
             onSetupRequested: {
-                window.viewMode = "chat";
+                window.leaveOrbFor();
                 window.settingsOpen = true;
                 window.historyOpen = false;
                 window.capsRefresh();
@@ -3086,7 +3171,7 @@ Item {
                          + "locked card and pick one.");
             }
             onSettingsRequested: {
-                window.viewMode = "chat";
+                window.leaveOrbFor();
                 window.settingsOpen = true;
                 window.historyOpen = false;
                 window.capsRefresh();

@@ -149,15 +149,18 @@ Item {
                                 { k: "speak", t: "speak replies" },
                                 { k: "mic",   t: "mic on" },
                                 { k: "wake",  t: "wake word" },
+                                { k: "wake_listen", t: "listen after \"hey tar\"" },
                                 { k: "warm",  t: "preload model" },
                                 { k: "sfx",   t: "ui sounds" },
                                 { k: "greet", t: "greet me" }
                             ]
                             delegate: Rectangle {
                                 required property var modelData
+                                // wake_listen defaults ON (missing = on)
                                 readonly property bool on:
-                                    root.autostart
-                                    && root.autostart[modelData.k] === true
+                                    root.autostart && (modelData.k === "wake_listen"
+                                        ? root.autostart[modelData.k] !== false
+                                        : root.autostart[modelData.k] === true)
                                 implicitWidth: asT.implicitWidth + root.s(20)
                                 implicitHeight: root.s(24)
                                 color: on ? Qt.rgba(root.accent.r, root.accent.g,

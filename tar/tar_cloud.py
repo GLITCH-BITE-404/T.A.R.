@@ -402,6 +402,17 @@ def live_status():
             for p in profs) + ". 'Rephael'/'my normal account'/'main' -> profile='main'. "
             "If the user NAMES the account, the name decides; 'my other account' only means "
             "'not the one I'm looking at', never 'not main'.")
+    try:
+        with open(os.path.join(T.DATA, "ui-state.json"), encoding="utf-8") as f:
+            ui = json.load(f)
+        opened = [k + ("" if v is True else " (%s)" % v) for k, v in ui.items()
+                  if k != "view" and v]
+        lines.append("YOUR OWN UI (T.A.R.'s window) right now: %s mode; open panels: %s. "
+                     "When the user says 'the preview/tab/panel/that/them' and one of THESE is "
+                     "open, they mean your panel -> use the panel action, never close windows "
+                     "or browser tabs." % (ui.get("view", "?"), ", ".join(opened) or "none"))
+    except (OSError, ValueError):
+        pass
     out = "\n\nLIVE STATUS (checked just now -- this is the truth; ignore any "
     out += "older message or action result in this chat that says otherwise):\n- "
     return out + "\n- ".join(lines)
