@@ -550,23 +550,31 @@ def wlog(**kw):
 
 _OTHER_WAKE = ("jarvis", "alexa", "siri", "google", "mycroft", "rhasspy", "cortana",
                "ג'ארוויס", "ג׳רוויס", "אלקסה", "סירי")
-_TAR_LIKE = ("tar", "tarr", "tahr", "tao", "tara", "t.a.r", "t.a.r.", "טאר", "טר", "תאר", "תר", "היטר")
+_GREET = ("hey", "hay", "hi", "hei", "heya", "היי", "הי", "הייי", "hej")
+_TAR_EXACT = ("tar", "tarr", "tahr", "טאר", "תאר", "טר")
+_SPELLED = __import__("re").compile(r"(?<![\w])t[\s.]+a[\s.]+r(?![\w])|(?<![\w])טי[\s.]+(?:איי[\s.]+)?אר(?![\w])", __import__("re").I)
 
 
 def phrase_heard(text, phrase):
-    """Does a transcript contain the wake phrase's key word (not another
-    assistant's name)? Fuzzy, since 'tar' gets written many ways."""
-    import difflib
+    """Did they say the wake phrase? Strict on purpose (false wakes came from
+    'טור', 'טיארא', 'T.A.ਰ'): a greeting word followed by tar, or the name
+    spelled out (T.A.R. / טי אר). Another assistant's name never counts."""
     import re as _re
-    t = (text or "").lower()
+    t = (text or "").lower().strip()
     if not t or any(w in t for w in _OTHER_WAKE):
         return False
     key = (phrase or "hey tar").lower().split()[-1]
-    toks = _re.findall(r"[\w.']+", t)
-    cands = set(_TAR_LIKE) if key in ("tar", "t.a.r.", "t.a.r") else {key}
-    for tok in toks:
-        tok = tok.strip(".'")
-        if tok in cands or any(difflib.SequenceMatcher(None, tok, c).ratio() >= 0.75 for c in cands):
+    if key not in ("tar", "t.a.r.", "t.a.r"):
+        toks = _re.findall(r"[\w']+", t)
+        return key in toks
+    if _SPELLED.search(t):
+        return True
+    toks = [x.strip(".'") for x in _re.findall(r"[\w.']+", t)]
+    toks = [x for x in toks if x]
+    for i, tok in enumerate(toks):
+        if tok in _TAR_EXACT and i > 0 and toks[i - 1] in _GREET:
+            return True
+        if tok == "היטר" or tok == "הייטר":        # "hey tar" run together
             return True
     return False
 

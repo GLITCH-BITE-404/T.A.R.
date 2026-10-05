@@ -270,6 +270,7 @@ Item {
             width: rig.width * 0.54
             height: width
             coreSize: rig.width * 0.46
+            evil: view.evil
             mode: view.mode
             level: view.level
         }

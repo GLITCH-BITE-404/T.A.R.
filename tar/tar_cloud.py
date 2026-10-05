@@ -227,7 +227,8 @@ _GROUNDED = {"open": ("what", "app", "q"), "web": ("q", "what"), "open_url": ("u
              "click_on": ("target", "what"), "run": ("cmd", "what"), "shell": ("cmd",),
              "email": ("to", "subject"), "whatsapp": ("to", "text"), "browser": ("q", "url"),
              "write_file": ("path",), "files": ("q", "path"), "kill": ("what",),
-             "closewin": ("what",), "close_tab": ("q", "what"), "play": ("q", "what")}
+             "closewin": ("what",), "close_tab": ("q", "what"), "play": ("q", "what"),
+             "missiles": ("target", "city", "what"), "evil": ("state",)}
 _FILLER = {"the", "a", "an", "my", "your", "it", "this", "that", "and", "for", "with", "to",
            "of", "on", "in", "up", "please", "can", "you", "open", "go", "new", "tab"}
 

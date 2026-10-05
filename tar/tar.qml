@@ -772,7 +772,8 @@ Item {
         }
         if (name === "missiles") {
             missiles.open = true;
-            if (d.target) missiles.strike(d.target, Number(d.lat), Number(d.lon));
+            if (d.target) missiles.strike(d.target, d.city || d.target, d.country || "", Number(d.lat),
+                                          Number(d.lon), d.route || "[]", Number(d.olat), Number(d.olon));
             else if (missiles.phase === "idle" || missiles.phase === "impact") missiles.standby();
             return;
         }
@@ -2168,6 +2169,7 @@ Item {
                         id: orb
                         anchors.fill: parent
                         coreSize: window.s(50)
+                        evil: window.evilMode
                         mode: window.mode
                         level: window.listening
                    ? Math.max(window.orbLevel, window.micLevel)
@@ -3363,6 +3365,12 @@ Item {
         theme: theme
         scaleFn: window.s
         onClosed: missiles.open = false
+        // the strike is narrated out loud (even with "speak replies" off)
+        onNarrate: text => {
+            var tts = window.capsData ? window.capsData.tts : undefined;
+            if (tts && tts.ready) window.speak(text);
+        }
+        onShake: { fx.play("shake"); fx.play("flash"); }
     }
     TarEvilBoot {
         id: evilBoot

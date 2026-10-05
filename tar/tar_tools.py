@@ -973,41 +973,69 @@ def a_evil(args):
             "evil mode off -- back to normal T.A.R. -- VERIFIED")
 
 
-def _geocode(place):
-    """City -> (lat, lon, name) via OpenStreetMap Nominatim, cached."""
+def _nominatim(params):
     import urllib.parse
     import urllib.request
+    q = dict(params, format="json", **{"accept-language": "en"})
+    url = "https://nominatim.openstreetmap.org/search?" + urllib.parse.urlencode(q)
+    req = urllib.request.Request(url, headers={"User-Agent": "T.A.R.-assistant/1.0 (BITE-OS)"})
+    with urllib.request.urlopen(req, timeout=8) as r:
+        return json.loads(r.read().decode())
+
+
+def _geocode(place):
+    """Place -> {lat, lon, name, country, kind} via OpenStreetMap, cached.
+    A COUNTRY (or region) is resolved to one of its real cities."""
     cache_p = os.path.join(DATA, "geo-cache.json")
     try:
         cache = json.load(open(cache_p))
     except (OSError, ValueError):
         cache = {}
-    key = place.strip().lower()
-    if key in cache:
-        return cache[key]
-    url = ("https://nominatim.openstreetmap.org/search?format=json&limit=1&accept-language=en&q="
-           + urllib.parse.quote(place))
-    req = urllib.request.Request(url, headers={"User-Agent": "T.A.R.-assistant/1.0 (BITE-OS)"})
-    with urllib.request.urlopen(req, timeout=8) as r:
-        res = json.loads(r.read().decode())
-    if not res:
-        return None
-    hit = [float(res[0]["lat"]), float(res[0]["lon"]),
-           res[0].get("display_name", place).split(",")[0]]
-    cache[key] = hit
-    try:
-        json.dump(cache, open(cache_p, "w"))
-    except OSError:
-        pass
+    key = "v2:" + place.strip().lower()
+    hit = cache.get(key)
+    if hit is None:
+        res = _nominatim({"q": place, "limit": 1, "addressdetails": 1})
+        if not res:
+            return None
+        r0 = res[0]
+        addr = r0.get("address") or {}
+        hit = {"lat": float(r0["lat"]), "lon": float(r0["lon"]),
+               "name": r0.get("display_name", place).split(",")[0],
+               "country": addr.get("country", ""), "code": addr.get("country_code", ""),
+               "kind": r0.get("addresstype") or r0.get("type") or "", "cities": []}
+        if hit["kind"] in ("country", "state", "region", "province") and hit["code"]:
+            # a country/region: its biggest real cities (bundled Natural Earth data)
+            try:
+                with open(os.path.join(HERE, "assets", "cities.json"), encoding="utf-8") as f:
+                    cs = json.load(f).get(hit["code"].lower(), {}).get("cities", [])
+                hit["cities"] = [[c[0], c[1], c[2], c[4]] for c in cs]
+            except (OSError, ValueError):
+                pass
+        cache[key] = hit
+        try:
+            json.dump(cache, open(cache_p, "w"))
+        except OSError:
+            pass
     return hit
+
+
+# proxy hops for the fake trace route (public city coordinates; IPs are made up)
+_PROXIES = [("Reykjavik", 64.15, -21.94), ("Sao Paulo", -23.55, -46.63), ("Lagos", 6.52, 3.38),
+            ("Singapore", 1.35, 103.82), ("Moscow", 55.76, 37.62), ("Tallinn", 59.44, 24.75),
+            ("Panama City", 8.98, -79.52), ("Cape Town", -33.92, 18.42), ("Seoul", 37.57, 126.98),
+            ("Bucharest", 44.43, 26.10), ("Anchorage", 61.22, -149.90), ("Perth", -31.95, 115.86),
+            ("Nairobi", -1.29, 36.82), ("Mumbai", 19.08, 72.88), ("Vancouver", 49.28, -123.12),
+            ("Ulaanbaatar", 47.89, 106.91)]
 
 
 def a_missiles(args):
     """Evil-mode easter egg: a SIMULATED sci-fi missile strike on a map."""
+    import random
     if not cfg().get("evil"):
         return ("the missile system only exists in EVIL MODE -- say 'turn on evil mode' first. "
                 "(nothing happened)")
     target = (args.get("target") or args.get("city") or args.get("what") or "").strip()
+    target = re.sub(r"^(?:the )", "", target, flags=re.I).strip(" .!?")
     if not target:
         emit("ui", action="missiles")
         return "missile command tab open -- awaiting a target -- VERIFIED"
@@ -1017,10 +1045,33 @@ def a_missiles(args):
         return "targeting failed: couldn't look up %r (%s)" % (target, str(e)[:80])
     if not hit:
         return "no such place as %r on the map" % target
-    lat, lon, name = hit
-    emit("ui", action="missiles", target=name, lat=lat, lon=lon)
-    return ("SIMULATED strike on %s (%.2f, %.2f) is playing on screen: hack sequence, launch, "
-            "impact in 20 s. It's an animation -- nothing real happens -- VERIFIED" % (name, lat, lon))
+    name, lat, lon = hit["name"], hit["lat"], hit["lon"]
+    country = hit.get("country") or ""
+    if hit.get("cities"):
+        # a country was named: T.A.R. picks a real city inside it -- the
+        # capital and the biggest cities most often
+        cs = hit["cities"][:6]
+        weights = [(4 if c[3] else 1) * (6 - i) for i, c in enumerate(cs)]
+        name, lat, lon = random.choices(cs, weights=weights)[0][:3]
+    label = name if not country or country.lower() == name.lower() else "%s, %s" % (name, country)
+    hops = random.sample(_PROXIES, 4)
+    route = [[h[0], h[1], h[2], "%d.%d.%d.%d" % (random.randint(23, 223), random.randint(0, 255),
+                                                  random.randint(0, 255), random.randint(1, 254))]
+             for h in hops]
+    origin = {}
+    try:                            # trace starts at the user's own location, if known
+        lc = json.load(open(os.path.join(DATA, "loc-cache.json")))
+        if "lat" in lc and "lon" in lc:
+            origin = {"olat": float(lc["lat"]), "olon": float(lc["lon"])}
+    except (OSError, ValueError, TypeError):
+        pass
+    emit("ui", action="missiles", target=label, city=name, country=country, lat=lat, lon=lon,
+         route=json.dumps(route), **origin)
+    return ("SIMULATED strike on %s (%.2f, %.2f) playing on screen with narration: trace route "
+            "through %s, breach, launch, impact in 20 s, narrated out loud by the UI. Animation only "
+            "-- VERIFIED. Reply with ONE word or two in villain voice (e.g. 'Excellent.') -- the "
+            "UI does the talking." % (label, lat, lon,
+                                                                  ", ".join(h[0] for h in hops)))
 
 
 def a_camera_live(args):

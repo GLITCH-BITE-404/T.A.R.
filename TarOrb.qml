@@ -26,11 +26,14 @@ Item {
     readonly property color cSurface2: theme.surface2
 
     // Mode drives hue: mauve/pink idle, blue/sapphire thinking, teal listening, red error.
-    readonly property color hotA: mode === "error" ? theme.red
+    property bool evil: false               // EVIL MODE: the core burns red
+    readonly property color hotA: evil ? (mode === "thinking" ? "#ff7a3d" : "#ff2a3d")
+                               : mode === "error" ? theme.red
                                : mode === "listening" ? theme.teal
                                : mode === "thinking" ? theme.blue
                                : theme.mauve
-    readonly property color hotB: mode === "error" ? theme.maroon
+    readonly property color hotB: evil ? "#8b0a1a"
+                               : mode === "error" ? theme.maroon
                                : mode === "listening" ? theme.green
                                : mode === "thinking" ? theme.sapphire
                                : theme.pink
@@ -81,8 +84,9 @@ Item {
         NumberAnimation { to: 1.0; duration: 15000; easing.type: Easing.InOutSine }
         NumberAnimation { to: 0.0; duration: 15000; easing.type: Easing.InOutSine }
     }
-    readonly property color accentLavender: Qt.tint(
-        theme.blue, Qt.rgba(theme.sapphire.r, theme.sapphire.g, theme.sapphire.b, accentBlend))
+    readonly property color accentLavender: evil
+        ? Qt.tint("#c4102a", Qt.rgba(1, 0.48, 0.24, accentBlend))
+        : Qt.tint(theme.blue, Qt.rgba(theme.sapphire.r, theme.sapphire.g, theme.sapphire.b, accentBlend))
 
     // Fire the transformation pop once the backend is actually alive.
     function boot() {
