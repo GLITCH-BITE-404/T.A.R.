@@ -848,12 +848,43 @@ def a_cam_snap(_):
         return "ffmpeg isn't installed"
     os.makedirs(SHOTS, exist_ok=True)
     p = os.path.join(SHOTS, time.strftime("cam-%Y%m%d-%H%M%S.jpg"))
-    rc, out = sh(["ffmpeg", "-y", "-f", "v4l2", "-i", dev,
-                  "-frames:v", "1", p], timeout=25)
+    for attempt in range(2):            # a live camera view can hold the device a moment
+        rc, out = sh(["ffmpeg", "-y", "-f", "v4l2", "-i", dev,
+                      "-frames:v", "1", p], timeout=25)
+        if not rc and os.path.exists(p):
+            break
+        time.sleep(1.0)
     if rc or not os.path.exists(p):
-        return "camera grab failed"
-    emit("image", path=p, source="camera")
-    return "grabbed a frame"
+        return "camera grab failed (is another app using the camera?)"
+    emit("image", path=p, source="camera", caption="camera photo")
+    return "captured %s -- to SEE what's in it, call look with path=%s" % (p, p)
+
+
+def a_camera_live(args):
+    """Stream the webcam live inside T.A.R.'s viewer (no app, no photo)."""
+    st = str(args.get("state") or args.get("what") or "on").lower()
+    st = "off" if st in ("off", "stop", "close", "false", "0") else "on"
+    emit("ui", action="camlive", state=st)
+    return ("live camera %s in T.A.R.'s viewer -- VERIFIED" % ("on" if st == "on" else "off"))
+
+
+def a_camera_look(args):
+    """Take a photo with the webcam and answer a question about it."""
+    q = args.get("q") or args.get("question") or "Describe what you see."
+    live = os.path.join(DATA, "live-frame.jpg")
+    if os.path.exists(live) and time.time() - os.path.getmtime(live) < 3:
+        # the live view is running: answer from its current frame
+        txt, err = _gemini_image(live, "This is a frame from the user's webcam (the user "
+                                 "is usually the person in it). " + q + " Answer directly and briefly.")
+        return (err or txt or "couldn't make sense of the frame") + " -- VERIFIED: from the live camera"
+    snap = a_cam_snap({})
+    m = re.search(r"captured (\S+\.jpg)", snap)
+    if not m:
+        return snap
+    txt, err = _gemini_image(m.group(1), "This is a photo from the user's webcam (the "
+                             "user is usually the person in it). " + q +
+                             " Answer directly and briefly.")
+    return (err or txt or "couldn't make sense of the photo") + " -- VERIFIED: from a fresh camera photo"
 
 
 def a_show(args):
@@ -2114,14 +2145,54 @@ def _click(button="left", double=False):
             time.sleep(0.08)
 
 
+def show_seen(src_path, source, caption, mark=None):
+    """Copy what T.A.R. just looked at into shots/ (unique name, so the UI
+    reloads it), optionally draw a crosshair where it clicked, and tell the UI
+    to open the viewer -- you always see what it saw."""
+    try:
+        os.makedirs(SHOTS, exist_ok=True)
+        out = os.path.join(SHOTS, "%s-%s.jpg" % (source, time.strftime("%Y%m%d-%H%M%S")))
+        from PIL import Image, ImageDraw
+        im = Image.open(src_path).convert("RGB")
+        if mark:
+            x, y = mark
+            d = ImageDraw.Draw(im)
+            for r, w in ((26, 5), (26, 2)):
+                d.ellipse([x - r, y - r, x + r, y + r], outline=(0, 0, 0) if w == 5 else (255, 70, 90), width=w)
+            d.line([x - 40, y, x - 10, y], fill=(255, 70, 90), width=3)
+            d.line([x + 10, y, x + 40, y], fill=(255, 70, 90), width=3)
+            d.line([x, y - 40, x, y - 10], fill=(255, 70, 90), width=3)
+            d.line([x, y + 10, x, y + 40], fill=(255, 70, 90), width=3)
+        im.save(out, quality=82)
+        # keep the folder from growing forever: last 40 screen/click shots
+        old = sorted(f for f in os.listdir(SHOTS) if f.startswith(("screen-", "click-")))
+        for f in old[:-40]:
+            try:
+                os.remove(os.path.join(SHOTS, f))
+            except OSError:
+                pass
+        emit("image", path=out, source=source, caption=caption[:120])
+    except Exception:
+        pass
+
+
 def a_look(args):
     """Answer a question about what's on screen (T.A.R. hides itself first)."""
     q = args.get("q") or args.get("question") or "Describe what is on the screen."
+    img = (args.get("path") or args.get("image") or "").strip()
+    if img:                                 # a specific picture (e.g. a camera photo)
+        img = resolve_path(img) if not img.startswith("/") else img
+        if not os.path.isfile(img):
+            return "no such image: " + img
+        txt, err = _gemini_image(img, q + " Answer directly and briefly.")
+        show_seen(img, "image", "looked at " + os.path.basename(img))
+        return err or txt or "couldn't make sense of the image"
     path = os.path.join(DATA, "screen-look.jpg")
     with _TarHidden() as hid:
         if not _shot(path):
             return "couldn't take a screenshot"
         _mask(path, hid.rect, _monitor())
+    show_seen(path, "screen", "what T.A.R. saw on your screen")
     txt, err = _gemini_image(path, "Screenshot of the user's desktop. " + q +
                              " Be specific and brief; mention exact button/label text.")
     if err:
@@ -2286,6 +2357,9 @@ def a_click_on(args):
             return stop
     button = (args.get("button") or "left").lower()
     times = max(1, min(50, _int(args.get("times"), 1)))
+    shot = os.path.join(DATA, "screen-look.jpg")
+    if how != "memory" and os.path.exists(shot):
+        show_seen(shot, "click", "clicking %r" % label[:60], mark=(x, y))
     btn = button if button in ("left", "right", "middle") else "left"
     dbl = str(args.get("double", "")).lower() in ("1", "true", "yes")
     fast = str(args.get("fast", "")).lower() in ("1", "true", "yes")
@@ -3432,7 +3506,8 @@ ACTIONS = {
                    [r"^(?:sys(?:tem)? ?info|status|uptime)$"]),
 
     # camera
-    "cam_view":   (a_cam_view, "open a live camera window",
+    "cam_view":   (a_cam_view, "open a separate live camera WINDOW -- ONLY when the user asks to "
+                               "watch the camera live. For photos / 'am I smiling' use camera_look.",
                    [r"^(?:open |show )?(?:the )?cam(?:era)?$",
                     r"^let me see$", r"^eyes on$"]),
     "cam_snap":   (a_cam_snap, "grab a still from the camera",
@@ -3515,7 +3590,17 @@ ACTIONS = {
                          "go through open/web instead. ALREADY starts the top video -- "
                          "don't click afterwards.",
                    [r"^play (?P<q>.+) on youtube$"]),
-    "look":       (a_look, "LOOK at the screen and answer a question about it (q=). "
+    "camera_live": (a_camera_live, "show the webcam LIVE inside T.A.R. (state=on|off) -- for "
+                                   "'show me the camera', 'watch me', 'can you see me'. No app opens.",
+                    [r"^(?:show (?:me )?(?:the )?(?:camera|webcam)|watch me|camera on|turn on the camera)$",
+                     r"^(?:camera|webcam) (?P<state>off)$",
+                     r"^(?P<state>close|stop|turn off) (?:the )?(?:camera|webcam)$"]),
+    "camera_look": (a_camera_look, "take a WEBCAM photo and answer about it (q=) -- for anything "
+                                   "about the user or the room: 'am I smiling', 'what am I "
+                                   "holding', 'how do I look'. NOT look (that's the screen).",
+                   [r"^(?:what do you see|look at me|how do i look)$"]),
+    "look":       (a_look, "LOOK at the SCREEN (or an image file with path=) and answer a "
+                           "question about it (q=). "
                            "Use before clicking if unsure what's there.", []),
     "click_on":   (a_click_on, "CLICK (single/double/right -- it CANNOT press-and-hold) "
                                "something visible on screen by description: "
@@ -3810,7 +3895,7 @@ def match(text):
     return None, None
 
 
-_PRIORITY = ("devices", "now_playing", "note", "stopwatch", "focus", "coin", "dice", "record", "remind", "wifi", "bluetooth", "dnd", "nightlight", "power",
+_PRIORITY = ("camera_live", "devices", "now_playing", "note", "stopwatch", "focus", "coin", "dice", "record", "remind", "wifi", "bluetooth", "dnd", "nightlight", "power",
              "play", "weather", "datetime", "battery", "calc", "processes",
              "colorpick", "cliphist")
 

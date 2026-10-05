@@ -3,24 +3,16 @@ import Quickshell
 import Quickshell.Io
 import "."
 
-// T.A.R. background-tasks drawer -- works like the CONSOLE: the host docks it
-// to the outside edge of the panel and widens the window, so it never covers
-// the chat. Task, running time, time left (bar), round, live REASONING feed,
-// PAUSE/RESUME + KILL. Reads loop.json once a second, even while folded, so
-// the host knows when a task exists.
-Item {
+// Background tasks. A card for the running task (what, status, progress,
+// PAUSE/KILL) and a readable feed of what it thinks and does, round by round:
+//   ◆ thinking   ▸ doing   ✓ worked   ✗ failed   ── round N ──
+// Reads loop.json once a second (also while folded, so the host knows a task
+// exists and can show the TASKS button).
+TarDeck {
     id: tasks
-    signal closed()
 
-    property var theme
-    property color accent: "#cba6f7"
-    property var scaleFn: null
-    function s(v) { return scaleFn ? scaleFn(v) : v }
-
-    property var task: null             // parsed loop.json, or null
-    property bool open: false           // set by the host
+    property var task: null
     property real now: Date.now() / 1000
-
     readonly property bool active: task !== null
     readonly property string dataDir: Quickshell.env("TAR_DATA")
         || (Quickshell.env("HOME") + "/.local/share/bite-os/tar")
@@ -35,7 +27,7 @@ Item {
             onStreamFinished: {
                 var t = (this.text || "").trim();
                 if (t === "") { tasks.task = null; return; }
-                try { tasks.task = JSON.parse(t); } catch (e) { /* mid-write: keep last */ }
+                try { tasks.task = JSON.parse(t); } catch (e) { /* mid-write */ }
             }
         }
         onExited: (code) => { if (code !== 0) tasks.task = null; }
@@ -50,217 +42,192 @@ Item {
         ctl.running = true;
         reader.running = true;
     }
-
     function fmt(sec) {
         sec = Math.max(0, Math.floor(sec));
         var h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), ss = sec % 60;
         return (h > 0 ? h + "h " : "") + (h > 0 || m > 0 ? m + "m " : "") + ss + "s";
     }
     readonly property bool paused: active && !!task.paused
-    readonly property string taskStatus: !active ? "" :
+    readonly property string taskState: !active ? "" :
         (paused ? "paused"
-         : (now - (task.beat || now) > 120 ? "not responding" : (task.status || "running")))
+         : (now - (task.beat || now) > 120 ? "not responding"
+            : ({"working": "working", "waiting": "waiting for next round",
+                "autoclicking": "autoclicking", "starting": "starting",
+                "failed": "failed"})[task.status] || (task.status || "running")))
     readonly property real elapsed: active
         ? (paused ? (task.paused_at || now) : now) - (task.started || now) : 0
-    readonly property real timeLeft: active && task.until
-        ? (task.until - (paused ? (task.paused_at || now) : now)) : -1
     readonly property real total: active && task.until ? (task.until - task.started) : 0
-    readonly property color dotColor: paused ? theme.yellow
-        : (taskStatus === "not responding" || taskStatus === "failed") ? theme.red : theme.green
+    readonly property color stateColor: paused ? theme.yellow
+        : (taskState === "not responding" || taskState === "failed") ? theme.red : theme.green
 
-    // ---------------------------------------------------------------- drawer
-    Item {
-        id: drawer
-        anchors.fill: parent
-        visible: opacity > 0.01
-        opacity: tasks.open ? 1 : 0
-        transform: Translate {          // tucks in behind the panel, like the console
-            x: tasks.open ? 0 : drawer.width + tasks.s(14)
-            Behavior on x { NumberAnimation { duration: 340; easing.type: Easing.OutExpo } }
-        }
-        Behavior on opacity { NumberAnimation { duration: 200 } }
+    glyph: "\u{f0954}"
+    title: "TASKS"
+    status: active ? taskState + (task.round ? "  ·  round " + task.round : "") : "nothing running"
+    statusColor: active ? stateColor : theme.overlay0
+    statusPulse: active && !paused
 
-        // swallow clicks so they don't fall through to the chat behind
-        MouseArea { anchors.fill: parent; hoverEnabled: true }
+    Column {
+        id: top
+        anchors.top: parent.top
+        anchors.left: parent.left
+        anchors.right: parent.right
+        spacing: tasks.s(10)
 
+        // ---- the task card
         Rectangle {
-            anchors.fill: parent
-            color: Qt.rgba(tasks.theme.crust.r, tasks.theme.crust.g, tasks.theme.crust.b, 0.95)
-        }
-        Rectangle {                     // seam on the inner edge, like the console
-            anchors.left: parent.left
-            width: 1; height: parent.height
-            color: Qt.rgba(tasks.accent.r, tasks.accent.g, tasks.accent.b, 0.45)
-        }
+            width: parent.width
+            height: card.implicitHeight + tasks.s(24)
+            radius: tasks.s(5)
+            color: Qt.rgba(tasks.theme.mantle.r, tasks.theme.mantle.g, tasks.theme.mantle.b, 0.7)
+            border.width: 1
+            border.color: Qt.rgba(tasks.stateColor.r, tasks.stateColor.g, tasks.stateColor.b, 0.45)
 
-        Column {
-            id: head
-            anchors.top: parent.top
-            anchors.left: parent.left
-            anchors.right: parent.right
-            anchors.margins: tasks.s(16)
-            spacing: tasks.s(8)
+            Column {
+                id: card
+                anchors.left: parent.left; anchors.right: parent.right
+                anchors.top: parent.top
+                anchors.margins: tasks.s(12)
+                spacing: tasks.s(10)
 
-            Item {
-                width: head.width
-                height: tasks.s(18)
                 Text {
-                    text: "◢ TAR//TASKS"
-                    color: tasks.accent
+                    width: parent.width
+                    text: tasks.active ? tasks.task.task : ""
+                    color: tasks.theme.text
                     font.family: "JetBrains Mono"
-                    font.pixelSize: tasks.s(13)
-                    font.bold: true
-                    font.letterSpacing: tasks.s(1.5)
-                }
-                Text {                  // close arrow
-                    anchors.right: parent.right
-                    text: "▶"
-                    color: closeHov.hovered ? tasks.theme.text : tasks.theme.overlay1
-                    font.pixelSize: tasks.s(12)
-                    HoverHandler { id: closeHov }
-                    TapHandler { onTapped: tasks.closed() }
-                }
-            }
-
-            Row {
-                spacing: tasks.s(6)
-                Rectangle {
-                    width: tasks.s(7); height: width; radius: width / 2
-                    anchors.verticalCenter: parent.verticalCenter
-                    color: tasks.dotColor
-                }
-                Text {
-                    text: tasks.taskStatus.toUpperCase()
-                          + (tasks.active ? "   ·   ROUND " + (tasks.task.round || 0) : "")
-                    color: tasks.theme.subtext1
-                    font.family: "JetBrains Mono"
-                    font.pixelSize: tasks.s(9)
-                    font.letterSpacing: tasks.s(1)
-                }
-            }
-
-            Text {
-                width: head.width
-                text: tasks.active ? tasks.task.task : ""
-                color: tasks.theme.text
-                font.family: "JetBrains Mono"
-                font.pixelSize: tasks.s(10)
-                wrapMode: Text.Wrap
-                maximumLineCount: 4
-                elide: Text.ElideRight
-            }
-
-            // running / left + progress bar
-            Row {
-                width: head.width
-                Text {
-                    width: head.width / 2
-                    text: "running  " + tasks.fmt(tasks.elapsed)
-                    color: tasks.theme.subtext0
-                    font.family: "JetBrains Mono"; font.pixelSize: tasks.s(9)
-                }
-                Text {
-                    width: head.width / 2
-                    horizontalAlignment: Text.AlignRight
-                    text: tasks.timeLeft >= 0 ? "left  " + tasks.fmt(tasks.timeLeft) : "no time limit"
-                    color: tasks.theme.subtext0
-                    font.family: "JetBrains Mono"; font.pixelSize: tasks.s(9)
-                }
-            }
-            Rectangle {
-                width: head.width; height: tasks.s(3)
-                color: Qt.rgba(tasks.theme.surface1.r, tasks.theme.surface1.g, tasks.theme.surface1.b, 0.6)
-                visible: tasks.total > 0
-                Rectangle {
-                    height: parent.height
-                    width: tasks.total > 0
-                        ? parent.width * Math.min(1, Math.max(0, tasks.elapsed / tasks.total)) : 0
-                    color: tasks.paused ? tasks.theme.yellow : tasks.accent
-                }
-            }
-            Text {
-                visible: tasks.active && tasks.task.status === "waiting" && !tasks.paused
-                text: tasks.active ? "next round in " + tasks.fmt((tasks.task.next_at || tasks.now) - tasks.now) : ""
-                color: tasks.theme.overlay1
-                font.family: "JetBrains Mono"; font.pixelSize: tasks.s(8)
-            }
-
-            Row {
-                spacing: tasks.s(7)
-                TarConsoleChip {
-                    theme: tasks.theme; accent: tasks.accent; scaleFn: tasks.scaleFn
-                    text: tasks.paused ? "▶ RESUME" : "❚❚ PAUSE"
-                    active: tasks.paused
-                    onTapped: tasks.control(tasks.paused ? "resume_task" : "pause_task")
-                }
-                TarConsoleChip {
-                    theme: tasks.theme; accent: tasks.theme.red; scaleFn: tasks.scaleFn
-                    text: "✕ KILL"
-                    onTapped: tasks.control("stop_task")
-                }
-            }
-
-            Rectangle {
-                width: head.width; height: 1
-                color: Qt.rgba(tasks.theme.surface1.r, tasks.theme.surface1.g, tasks.theme.surface1.b, 0.6)
-            }
-            Text {
-                text: "REASONING"
-                color: tasks.theme.text
-                font.family: "JetBrains Mono"
-                font.pixelSize: tasks.s(10)
-                font.bold: true
-                font.letterSpacing: tasks.s(2)
-            }
-        }
-
-        // live reasoning feed: newest at the bottom, auto-scrolled
-        ListView {
-            id: feed
-            anchors.top: head.bottom
-            anchors.topMargin: tasks.s(8)
-            anchors.left: parent.left
-            anchors.right: parent.right
-            anchors.bottom: parent.bottom
-            anchors.leftMargin: tasks.s(16)
-            anchors.rightMargin: tasks.s(16)
-            anchors.bottomMargin: tasks.s(14)
-            clip: true
-            spacing: tasks.s(6)
-            model: tasks.active ? (tasks.task.feed || []) : []
-            onCountChanged: Qt.callLater(feed.positionViewAtEnd)
-            delegate: Row {
-                required property var modelData
-                width: feed.width
-                spacing: tasks.s(7)
-                Rectangle {
-                    width: tasks.s(2)
-                    height: line.implicitHeight
-                    color: modelData.k === "think" ? tasks.accent
-                         : modelData.k === "warn" ? tasks.theme.red
-                         : modelData.k === "round" ? tasks.theme.surface2
-                         : modelData.k === "doing" ? tasks.theme.overlay0
-                         : tasks.theme.green
-                }
-                Text {
-                    id: line
-                    width: feed.width - tasks.s(9)
-                    text: (modelData.k === "think" ? "“" + modelData.t + "”" : modelData.t)
-                    color: modelData.k === "think" ? tasks.theme.text
-                         : modelData.k === "round" || modelData.k === "doing" ? tasks.theme.overlay0
-                         : tasks.theme.subtext0
-                    font.family: "JetBrains Mono"
-                    font.pixelSize: tasks.s(modelData.k === "round" ? 8 : 9)
-                    font.italic: modelData.k === "think"
+                    font.pixelSize: tasks.s(11)
                     wrapMode: Text.Wrap
+                    maximumLineCount: 4
+                    elide: Text.ElideRight
+                }
+                Text {
+                    visible: tasks.active && !!tasks.task.autoclick
+                    text: tasks.active ? "autoclicking \"" + tasks.task.autoclick + "\"  ·  "
+                                         + (tasks.task.clicks || 0) + " clicks" : ""
+                    color: tasks.theme.subtext0
+                    font.family: "JetBrains Mono"; font.pixelSize: tasks.s(9)
+                }
+
+                // progress
+                Column {
+                    width: parent.width
+                    spacing: tasks.s(4)
+                    Rectangle {
+                        width: parent.width; height: tasks.s(6); radius: height / 2
+                        color: Qt.rgba(tasks.theme.surface1.r, tasks.theme.surface1.g, tasks.theme.surface1.b, 0.6)
+                        Rectangle {
+                            height: parent.height; radius: height / 2
+                            width: tasks.total > 0
+                                ? parent.width * Math.min(1, Math.max(0, tasks.elapsed / tasks.total)) : 0
+                            color: tasks.stateColor
+                            Behavior on width { NumberAnimation { duration: 400 } }
+                        }
+                    }
+                    Item {
+                        width: parent.width; height: tasks.s(14)
+                        Text {
+                            text: tasks.fmt(tasks.elapsed) + (tasks.total > 0 ? "  /  " + tasks.fmt(tasks.total) : "")
+                            color: tasks.theme.subtext0
+                            font.family: "JetBrains Mono"; font.pixelSize: tasks.s(9)
+                        }
+                        Text {
+                            anchors.right: parent.right
+                            visible: tasks.active && tasks.task.status === "waiting" && !tasks.paused
+                            text: tasks.active ? "next round in "
+                                  + tasks.fmt((tasks.task.next_at || tasks.now) - tasks.now) : ""
+                            color: tasks.theme.overlay1
+                            font.family: "JetBrains Mono"; font.pixelSize: tasks.s(9)
+                        }
+                    }
+                }
+
+                Row {
+                    spacing: tasks.s(8)
+                    TarHudButton {
+                        theme: tasks.theme; accent: tasks.theme.yellow; scaleFn: tasks.scaleFn
+                        glyph: tasks.paused ? "\u{f040a}" : "\u{f03e4}"
+                        label: tasks.paused ? "RESUME" : "PAUSE"
+                        active: tasks.paused
+                        onClicked: tasks.control(tasks.paused ? "resume_task" : "pause_task")
+                    }
+                    TarHudButton {
+                        theme: tasks.theme; accent: tasks.theme.red; scaleFn: tasks.scaleFn
+                        glyph: "\u{f0156}"; label: "KILL"
+                        onClicked: tasks.control("stop_task")
+                    }
                 }
             }
-            Text {
-                visible: feed.count === 0
-                text: "waiting for the first round…"
-                color: tasks.theme.overlay0
-                font.family: "JetBrains Mono"; font.pixelSize: tasks.s(9)
+        }
+
+        Text {
+            text: "WHAT IT'S THINKING"
+            color: tasks.theme.overlay1
+            font.family: "JetBrains Mono"
+            font.pixelSize: tasks.s(9)
+            font.bold: true
+            font.letterSpacing: tasks.s(1.5)
+        }
+    }
+
+    // ---- reasoning feed (newest at the bottom)
+    ListView {
+        id: feed
+        anchors.top: top.bottom
+        anchors.topMargin: tasks.s(8)
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        clip: true
+        spacing: tasks.s(7)
+        model: tasks.active ? (tasks.task.feed || []) : []
+        onCountChanged: Qt.callLater(feed.positionViewAtEnd)
+        delegate: Item {
+            required property var modelData
+            readonly property string k: modelData.k
+            width: feed.width
+            height: k === "round" ? tasks.s(18) : Math.max(tasks.s(16), msg.implicitHeight)
+
+            // round divider
+            Row {
+                visible: k === "round"
+                anchors.centerIn: parent
+                spacing: tasks.s(6)
+                Rectangle { width: tasks.s(30); height: 1; color: tasks.theme.surface2; anchors.verticalCenter: parent.verticalCenter }
+                Text {
+                    text: modelData.t
+                    color: tasks.theme.overlay0
+                    font.family: "JetBrains Mono"; font.pixelSize: tasks.s(8)
+                }
+                Rectangle { width: tasks.s(30); height: 1; color: tasks.theme.surface2; anchors.verticalCenter: parent.verticalCenter }
             }
+            Text {
+                id: icon
+                visible: k !== "round"
+                width: tasks.s(14)
+                text: k === "think" ? "◆" : k === "doing" ? "▸" : k === "warn" ? "✗" : "✓"
+                color: k === "think" ? tasks.accent : k === "doing" ? tasks.theme.overlay1
+                     : k === "warn" ? tasks.theme.red : tasks.theme.green
+                font.family: "JetBrains Mono"
+                font.pixelSize: tasks.s(10)
+            }
+            Text {
+                id: msg
+                visible: k !== "round"
+                anchors.left: icon.right
+                anchors.right: parent.right
+                text: modelData.t.replace(/ ✓$| ✗$/, "")
+                color: k === "think" ? tasks.theme.text
+                     : k === "doing" ? tasks.theme.overlay1 : tasks.theme.subtext1
+                font.family: "JetBrains Mono"
+                font.pixelSize: tasks.s(10)
+                font.italic: k === "think"
+                wrapMode: Text.Wrap
+            }
+        }
+        Text {
+            visible: feed.count === 0
+            text: "waiting for the first round…"
+            color: tasks.theme.overlay0
+            font.family: "JetBrains Mono"; font.pixelSize: tasks.s(10)
         }
     }
 }

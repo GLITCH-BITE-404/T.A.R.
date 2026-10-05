@@ -58,6 +58,23 @@ Item {
     // the middle of the display.
     property bool windowed: false
     property string startMode: "cinematic"   // window | cinematic | floating
+    property bool startModeKnown: false
+    // Read the start mode straight from config.json at launch. Waiting for the
+    // full capability scan (which got slower as checks were added) meant the
+    // host decided "tiled" before it ever learned the user wanted "floating".
+    Process {
+        id: startModeReader
+        running: true
+        command: ["python3", "-c", "import json,os;print(json.load(open(os.environ.get('TAR_DATA', os.path.expanduser('~/.local/share/bite-os/tar'))+'/config.json')).get('start_mode','cinematic'))"]
+        stdout: StdioCollector {
+            onStreamFinished: {
+                var m = (this.text || "").trim();
+                if (m === "window" || m === "cinematic" || m === "floating") window.startMode = m;
+                window.startModeKnown = true;
+            }
+        }
+        onExited: (code) => window.startModeKnown = true
+    }
 
     // Cloud mode is visually distinct on purpose: it costs money and leaves the
     // machine, so it should never be mistaken for the offline local brain.
@@ -136,12 +153,21 @@ Item {
     readonly property real consoleW: s(330)
     readonly property real consoleGap: s(12)
     // background-tasks drawer docks on the OTHER (left) side, same rules
-    readonly property real tasksW: s(330)
+    readonly property real tasksW: s(360)
     property bool tasksOpen: false
     readonly property bool tasksActive: tasksTab.active
     onTasksActiveChanged: window.tasksOpen = tasksActive   // new task: show it; done: fold
+    // the left slot holds the viewer ("what T.A.R. sees") or the tasks drawer
+    property bool viewerOpen: false
+    property string viewerPath: ""
+    property string viewerSource: ""
+    property string viewerCaption: ""
+    property real viewerAt: 0
+    property bool viewerLive: false
+    readonly property bool leftOpen: viewerOpen || (tasksOpen && tasksActive)
+    onViewerOpenChanged: window.autoSize()
     readonly property real sideW: (consoleOpen ? consoleW + consoleGap : 0)
-                                + (tasksOpen && tasksActive ? tasksW + consoleGap : 0)
+                                + (leftOpen ? tasksW + consoleGap : 0)
     readonly property real panelW: sideW > 0
         ? Math.max(s(360), Math.min(targetW, window.width - sideW - s(56)))
         : targetW
@@ -176,7 +202,7 @@ Item {
         if (!window.windowed) return;
         var wide = window.consoleOpen || window.settingsOpen
                    || window.historyOpen || window.testMode !== ""
-                   || (window.tasksOpen && window.tasksActive);
+                   || window.leftOpen;
         window.requestSize(wide ? 1420 : 1040, wide ? 860 : 760);
     }
     property bool autotier: true
@@ -512,6 +538,12 @@ Item {
     function playUiAction(name, d) {
         if (name === "close")           { window.close(); return; }
         if (name === "newchat")         { window.newSession(); return; }
+        if (name === "camlive") {
+            var on = String(d.state || "on") !== "off";
+            window.viewerLive = on;
+            if (on) window.viewerOpen = true;
+            return;
+        }
         if (name === "setup")           { window.viewMode = "chat"; window.historyOpen = false;
                                           window.settingsOpen = true; window.capsRefresh(); return; }
         if (name === "console")         { window.consoleOpen = !window.consoleOpen; return; }
@@ -700,8 +732,16 @@ Item {
         } else if (d.t === "file") {
             window.say("act", d.body || "");
         } else if (d.t === "image") {
-            window.say("act", "captured " + (d.path || ""));
-            if (d.path) window.showImage(d.path);
+            // show what T.A.R. saw -- camera photo, screen it looked at, or the
+            // spot it clicked -- in the viewer drawer, in orb AND chat mode
+            if (d.path) {
+                if (d.source !== "camera" || !window.viewerLive) window.viewerLive = false;
+                window.viewerPath = d.path;
+                window.viewerSource = d.source || "image";
+                window.viewerCaption = d.caption || "";
+                window.viewerAt = Date.now();
+                window.viewerOpen = true;
+            }
         } else if (d.t === "sysinfo") {
             window.say("act", d.v || "");
         } else if (d.t === "nomatch") {
@@ -1472,8 +1512,7 @@ Item {
         // slide left by half the group's extra width so the pair stays centred
         anchors.horizontalCenterOffset: !window.introDone ? 0
             : ((window.consoleOpen ? -(window.consoleW + window.consoleGap) / 2 : 0)
-               + (window.tasksOpen && window.tasksActive
-                  ? (window.tasksW + window.consoleGap) / 2 : 0))
+               + (window.leftOpen ? (window.tasksW + window.consoleGap) / 2 : 0))
         Behavior on anchors.horizontalCenterOffset {
             NumberAnimation { duration: 360; easing.type: Easing.OutExpo }
         }
@@ -2673,7 +2712,7 @@ Item {
     // ---- background tasks tab: docks to the right edge while a task runs
     TarTasks {
         id: tasksTab
-        open: window.tasksOpen && window.tasksActive && window.introDone
+        open: window.tasksOpen && window.tasksActive && !window.viewerOpen && window.introDone
         // docked to the outside LEFT edge of the panel (the console takes the right)
         anchors.right: frame.left
         anchors.rightMargin: window.s(10)
@@ -2686,6 +2725,33 @@ Item {
         accent: window.accent
         scaleFn: window.s
         onClosed: window.tasksOpen = false
+    }
+
+    // ---- viewer: what T.A.R. just saw (same slot as tasks, left of the panel)
+    TarViewer {
+        id: viewerDrawer
+        open: window.viewerOpen && window.introDone
+        anchors.right: frame.left
+        anchors.rightMargin: window.s(10)
+        anchors.top: frame.top
+        anchors.topMargin: window.s(6)
+        width: window.tasksW
+        height: frame.height - window.s(12)
+        z: -1
+        theme: theme
+        accent: window.accent
+        scaleFn: window.s
+        path: window.viewerPath
+        source: window.viewerSource
+        caption: window.viewerCaption
+        shownAt: window.viewerAt
+        live: window.viewerLive
+        onLiveChanged: window.viewerLive = live
+        cameraId: (window.capsData && window.capsData.devices_chosen
+                   && window.capsData.devices_chosen.video) || "/dev/video0"
+        frameFile: (Quickshell.env("TAR_DATA") || (Quickshell.env("HOME")
+                    + "/.local/share/bite-os/tar")) + "/live-frame.jpg"
+        onClosed: { window.viewerLive = false; window.viewerOpen = false; }
     }
 
     // ---- effects layer: on top of BOTH views, so effects are always visible

@@ -35,6 +35,31 @@ Item {
     property string statusText: ""
     property bool running: false
 
+    // wake word test
+    property real wakeScore: 0.0
+    property int wakeHits: 0
+    property string wakeWord: "hey_jarvis"
+    property string wakeEngine: "builtin"
+    property real wakeSens: 0.5
+    property bool wakeTraining: false
+    property var heardLines: []
+    property var mics: []
+    // generic result (vision / mouse / cloud tests)
+    property string resultText: ""
+    property string resultImage: ""
+    signal wakeStart()
+    signal wakeStop()
+    signal setWakeWord(string w)
+    signal setWakeSens(real v)
+    signal trainVoice()
+    signal setMic(string id)
+    function addHeard(t) {
+        var a = heardLines.slice(); a.push(t);
+        if (a.length > 6) a = a.slice(a.length - 6);
+        heardLines = a;
+    }
+    onWakeHitsChanged: if (wakeHits > 0) hitFlash.restart()
+
     signal closed()
     signal grabFrame()
     signal startMic()
@@ -46,6 +71,8 @@ Item {
       : mode === "mic"    ? "MICROPHONE TEST"
       : mode === "speaker"? "SPEAKER TEST"
       : mode === "image"  ? "IMAGE"
+      : mode === "wake"   ? "WAKE WORD TEST"
+      : mode === "result" ? "TEST"
       : "TEST"
 
     Rectangle {
@@ -231,6 +258,227 @@ Item {
                     onClicked: root.running ? root.stopMic() : root.startMic()
                 }
                 Item { Layout.fillWidth: true }
+            }
+            Item { Layout.fillHeight: true }
+        }
+
+        // ------------------------------------------------------------ wake
+        ColumnLayout {
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            visible: root.mode === "wake"
+            spacing: root.s(8)
+
+            Text {
+                Layout.fillWidth: true
+                text: root.wakeTraining ? root.statusText
+                    : root.wakeHits > 0 ? "\u2713 DETECTED " + root.wakeHits + "\u00D7 -- it hears you"
+                    : (root.wakeEngine === "voice" ? "say your trained phrase" :
+                       "say \"" + root.wakeWord.replace("_", " ") + "\"")
+                color: root.wakeHits > 0 && !root.wakeTraining ? root.theme.green : root.theme.text
+                font.family: "JetBrains Mono"
+                font.pixelSize: root.s(12)
+                wrapMode: Text.Wrap
+            }
+
+            // microphone picker -- saved for every session
+            Text { text: "MICROPHONE"; color: root.theme.overlay1
+                   font.family: "JetBrains Mono"; font.pixelSize: root.s(8); font.letterSpacing: root.s(1.5) }
+            Flow {
+                Layout.fillWidth: true
+                spacing: root.s(5)
+                Repeater {
+                    model: root.mics
+                    TarConsoleChip {
+                        required property var modelData
+                        theme: root.theme; accent: root.accent; scaleFn: root.scaleFn
+                        text: String(modelData.name).replace(/^.*cAVS /, "").replace(/Raptor Lake-P\/U\/H /, "")
+                        active: !!modelData.current
+                        onTapped: root.setMic(modelData.id)
+                    }
+                }
+            }
+
+            // live input: a line in a box, height = volume
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.preferredHeight: root.s(70)
+                color: Qt.rgba(0, 0, 0, 0.4)
+                border.width: 1
+                border.color: root.wakeHits > 0 && hitFlash.running ? root.theme.green
+                    : Qt.rgba(root.theme.surface1.r, root.theme.surface1.g, root.theme.surface1.b, 0.6)
+                Row {
+                    anchors.centerIn: parent
+                    spacing: root.s(3)
+                    Repeater {
+                        model: 28
+                        Rectangle {
+                            width: root.s(6)
+                            height: Math.max(root.s(2), root.s(62) * root.barFor(index))
+                            anchors.verticalCenter: parent.verticalCenter
+                            color: root.accent
+                            opacity: 0.5 + 0.5 * root.barFor(index)
+                            Behavior on height { NumberAnimation { duration: 70 } }
+                        }
+                    }
+                }
+                Rectangle {                 // flash on detection
+                    id: hitGlow
+                    anchors.fill: parent
+                    color: root.theme.green
+                    opacity: 0
+                }
+            }
+            SequentialAnimation {
+                id: hitFlash
+                NumberAnimation { target: hitGlow; property: "opacity"; to: 0.35; duration: 80 }
+                NumberAnimation { target: hitGlow; property: "opacity"; to: 0; duration: 700 }
+            }
+
+            // detection score
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: root.s(8)
+                Text { text: "match"; color: root.theme.overlay1
+                       font.family: "JetBrains Mono"; font.pixelSize: root.s(9) }
+                Rectangle {
+                    Layout.fillWidth: true
+                    height: root.s(6)
+                    color: Qt.rgba(root.theme.surface1.r, root.theme.surface1.g, root.theme.surface1.b, 0.7)
+                    Rectangle {
+                        width: parent.width * Math.min(1, root.wakeScore)
+                        height: parent.height
+                        color: root.wakeScore >= (1 - root.wakeSens) ? root.theme.green : root.accent
+                        Behavior on width { NumberAnimation { duration: 90 } }
+                    }
+                    Rectangle {             // where it triggers
+                        x: parent.width * Math.max(0.15, 1 - root.wakeSens) - 1
+                        width: 2; height: parent.height + root.s(4); y: -root.s(2)
+                        color: root.theme.text; opacity: 0.6
+                    }
+                }
+            }
+
+            // what it heard
+            Text { text: "HEARD"; color: root.theme.overlay1
+                   font.family: "JetBrains Mono"; font.pixelSize: root.s(8); font.letterSpacing: root.s(1.5) }
+            Column {
+                Layout.fillWidth: true
+                spacing: root.s(2)
+                Repeater {
+                    model: root.heardLines
+                    Text {
+                        required property var modelData
+                        width: parent.width
+                        text: "\u203A " + modelData
+                        color: root.theme.subtext0
+                        font.family: "JetBrains Mono"
+                        font.pixelSize: root.s(10)
+                        elide: Text.ElideRight
+                    }
+                }
+                Text {
+                    visible: root.heardLines.length === 0
+                    text: "(talk and it writes down what it hears)"
+                    color: root.theme.overlay0
+                    font.family: "JetBrains Mono"; font.pixelSize: root.s(9)
+                }
+            }
+
+            // word + sensitivity
+            Flow {
+                Layout.fillWidth: true
+                spacing: root.s(5)
+                Repeater {
+                    model: [["hey_jarvis", "HEY JARVIS"], ["alexa", "ALEXA"],
+                            ["hey_mycroft", "HEY MYCROFT"], ["hey_rhasspy", "HEY RHASSPY"]]
+                    TarConsoleChip {
+                        required property var modelData
+                        theme: root.theme; accent: root.accent; scaleFn: root.scaleFn
+                        text: modelData[1]
+                        active: root.wakeEngine === "builtin" && root.wakeWord === modelData[0]
+                        onTapped: root.setWakeWord(modelData[0])
+                    }
+                }
+                TarConsoleChip {
+                    theme: root.theme; accent: root.accent; scaleFn: root.scaleFn
+                    text: "MY VOICE"
+                    active: root.wakeEngine === "voice"
+                    onTapped: root.setWakeWord("__voice__")
+                }
+            }
+            Flow {
+                Layout.fillWidth: true
+                spacing: root.s(5)
+                Repeater {
+                    model: [[0.3, "STRICT"], [0.5, "NORMAL"], [0.75, "EAGER"]]
+                    TarConsoleChip {
+                        required property var modelData
+                        theme: root.theme; accent: root.accent; scaleFn: root.scaleFn
+                        text: modelData[1]
+                        active: Math.abs(root.wakeSens - modelData[0]) < 0.06
+                        onTapped: root.setWakeSens(modelData[0])
+                    }
+                }
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: root.s(8)
+                TarHudButton {
+                    theme: root.theme; accent: root.accent; scaleFn: root.scaleFn
+                    glyph: root.running ? "\u{f04db}" : "\u{f040a}"
+                    label: root.running ? "STOP" : "START"
+                    onClicked: root.running ? root.wakeStop() : root.wakeStart()
+                }
+                TarHudButton {
+                    theme: root.theme; accent: root.accent; scaleFn: root.scaleFn
+                    glyph: "\u{f036c}"
+                    label: root.wakeTraining ? "TRAINING\u2026" : "TRAIN MY VOICE"
+                    onClicked: if (!root.wakeTraining) root.trainVoice()
+                }
+                Item { Layout.fillWidth: true }
+            }
+            Text {
+                Layout.fillWidth: true
+                visible: !root.wakeTraining && root.statusText !== ""
+                text: root.statusText
+                color: root.theme.overlay1
+                font.family: "JetBrains Mono"; font.pixelSize: root.s(9)
+                wrapMode: Text.Wrap
+            }
+            Item { Layout.fillHeight: true }
+        }
+
+        // ---------------------------------------------------------- result
+        ColumnLayout {
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            visible: root.mode === "result"
+            spacing: root.s(8)
+            Text {
+                Layout.fillWidth: true
+                text: root.statusText
+                color: root.theme.text
+                font.family: "JetBrains Mono"; font.pixelSize: root.s(11); font.bold: true
+                wrapMode: Text.Wrap
+            }
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.preferredHeight: root.resultImage !== "" ? root.s(220) : 0
+                visible: root.resultImage !== ""
+                color: Qt.rgba(0, 0, 0, 0.4)
+                Image {
+                    anchors.fill: parent; anchors.margins: root.s(3)
+                    source: root.resultImage ? "file://" + root.resultImage : ""
+                    fillMode: Image.PreserveAspectFit; cache: false; asynchronous: true
+                }
+            }
+            Text {
+                Layout.fillWidth: true
+                text: root.resultText
+                color: root.theme.subtext0
+                font.family: "JetBrains Mono"; font.pixelSize: root.s(10)
+                wrapMode: Text.Wrap
             }
             Item { Layout.fillHeight: true }
         }

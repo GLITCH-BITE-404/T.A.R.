@@ -124,8 +124,13 @@ ShellRoot {
         // a beat before deciding whether to play the intro at all.
         Timer {
             id: modeProbe
-            interval: 1300
+            interval: 150
+            property int waited: 0
             onTriggered: {
+                // wait (up to ~3s) until T.A.R. has actually read start_mode
+                if (loader.item && !loader.item.startModeKnown && waited < 20) {
+                    waited++; restart(); return;
+                }
                 var m = loader.item ? loader.item.startMode : "cinematic";
                 if (m === "window") { win.settle(); return; }
                 win.goBig();
