@@ -183,26 +183,129 @@ def load_voice():
 
 
 class Segmenter:
-    """Energy VAD: yields complete speech segments (int16 arrays)."""
-    def __init__(self, start_rms=500, end_ms=600, max_s=4.0):
-        self.start_rms, self.end_n = start_rms, int(end_ms / 80)
+    """Energy VAD that follows the room's noise floor. A fixed threshold
+    failed with the gain boost on: boosted background noise never counted as
+    silence, so every 'phrase' was 4 s of room noise with the word buried in it."""
+    def __init__(self, end_ms=320, max_s=2.6):
+        self.end_n = int(end_ms / 80)
         self.max_n = int(max_s * 1000 / 80)
         self.buf, self.quiet, self.active, self.pre = [], 0, False, []
+        self.floor = None
 
     def push(self, chunk, boosted_rms):
         import numpy as np
+        r = max(1.0, boosted_rms)
+        if self.floor is None:
+            self.floor = r
         if not self.active:
+            # floor drops fast, rises slowly -> tracks the quiet between words
+            self.floor = min(r, self.floor * 1.01) if r < self.floor * 1.6 else self.floor * 1.002
             self.pre = (self.pre + [chunk])[-3:]        # keep a little lead-in
-            if boosted_rms > self.start_rms:
+            if r > max(400.0, self.floor * 3.0):
                 self.active, self.buf, self.quiet = True, list(self.pre), 0
             return None
         self.buf.append(chunk)
-        self.quiet = self.quiet + 1 if boosted_rms < self.start_rms * 0.6 else 0
+        self.quiet = self.quiet + 1 if r < max(250.0, self.floor * 1.8) else 0
         if self.quiet >= self.end_n or len(self.buf) >= self.max_n:
-            seg = np.concatenate(self.buf[:len(self.buf) - self.quiet + 2])
+            seg = np.concatenate(self.buf)
             self.active, self.buf, self.pre = False, [], []
-            return seg if len(seg) >= RATE * 0.3 else None
+            seg = trim(seg)
+            return seg if len(seg) >= RATE * 0.25 else None
         return None
+
+
+class Utterances:
+    """Rolling 2 s window. Every 160 ms: find the main loud phrase in the
+    window ("hey ... tar" with a short pause stays one phrase); once it has
+    clearly ENDED and it STARTED inside the window, hand exactly that phrase to
+    the matcher. Each phrase is matched once (tracked by absolute position)."""
+    W = RATE // 25                              # 40 ms analysis windows
+
+    def __init__(self, window_s=2.0):
+        import numpy as np
+        self.n = int(window_s * RATE)
+        self.buf = np.zeros(0, np.int16)
+        self.pos = 0                            # samples seen so far
+        self.floor = None
+        self.done_until = -1                    # abs sample: already matched
+        self.tick = 0
+
+    def push(self, chunk, rms):
+        import numpy as np
+        r = max(1.0, rms)
+        self.floor = r if self.floor is None else (
+            min(r, self.floor * 1.01) if r < self.floor * 1.6 else self.floor * 1.002)
+        self.buf = np.concatenate([self.buf, chunk])[-self.n:]
+        self.pos += len(chunk)
+        self.tick += 1
+        if len(self.buf) < RATE // 2 or self.tick % 2:
+            return None
+        w = self.W
+        x = self.buf.astype(np.float32)
+        env = np.array([np.sqrt(np.mean(x[i:i + w] ** 2)) for i in range(0, len(x) - w + 1, w)])
+        grp = _main_group(env, min_level=max(400.0, self.floor * 3.0))
+        if grp is None:
+            return None
+        g0, g1 = grp
+        base = self.pos - len(self.buf)         # abs sample of buf[0]
+        if base + g0 * w <= self.done_until:
+            return None                         # already handled this phrase
+        if g1 > len(env) - 7 or g0 < 2:
+            return None                         # still talking / started before the window
+        self.done_until = base + (g1 + 1) * w
+        a = max(0, (g0 - 3) * w)
+        b = min(len(self.buf), (g1 + 4) * w)
+        seg = self.buf[a:b]
+        return seg if len(seg) >= RATE * 0.25 else None
+
+
+def _main_group(env, min_level=0.0):
+    """(first, last) window index of the most energetic loud stretch, gaps of
+    up to 320 ms bridged. None if nothing is loud."""
+    import numpy as np
+    if not len(env) or env.max() < min_level:
+        return None
+    loud = np.where(env > max(env.max() * 0.25, np.median(env) * 2.5, min_level * 0.6))[0]
+    if not len(loud):
+        return None
+    groups, cur = [], [loud[0]]
+    for k in loud[1:]:
+        if k - cur[-1] <= 8:
+            cur.append(k)
+        else:
+            groups.append(cur); cur = [k]
+    groups.append(cur)
+    g = max(groups, key=lambda g: float(np.sum(env[g[0]:g[-1] + 1] ** 2)))
+    return g[0], g[-1]
+
+
+def trim(seg):
+    """Cut a clip down to the spoken part: from the first to the last 40 ms
+    window louder than 18% of the clip's peak, plus a little padding."""
+    import numpy as np
+    w = RATE // 25
+    x = seg.astype(np.float32)
+    env = np.array([np.sqrt(np.mean(x[i:i + w] ** 2)) for i in range(0, max(1, len(x) - w + 1), w)])
+    if not len(env) or env.max() <= 0:
+        return seg
+    # loud = well above the clip's own background (its median), not just >0
+    loud = np.where(env > max(env.max() * 0.25, np.median(env) * 2.5))[0]
+    if not len(loud):
+        return seg[:0]
+    # group loud windows (gaps up to 320 ms stay one phrase: "hey ... tar"),
+    # keep the group with the most energy -- drops clicks/bumps before/after
+    groups, cur = [], [loud[0]]
+    for k in loud[1:]:
+        if k - cur[-1] <= 8:
+            cur.append(k)
+        else:
+            groups.append(cur); cur = [k]
+    groups.append(cur)
+    loud = max(groups, key=lambda g: float(np.sum(env[g[0]:g[-1] + 1] ** 2)))
+    loud = np.array(loud)
+    a = max(0, (loud[0] - 3) * w)
+    b = min(len(seg), (loud[-1] + 4) * w)
+    return seg[a:b]
 
 
 def embed_segment(af, seg):
@@ -211,6 +314,38 @@ def embed_segment(af, seg):
     pad = np.concatenate([np.zeros(RATE // 2, np.int16), seg, np.zeros(RATE // 4, np.int16)])
     emb = af._get_embeddings(pad)
     return np.asarray(emb, dtype=np.float32)
+
+
+def _threshold(d):
+    """From how alike your samples are. Clamped: measured on real samples,
+    'hey tar' matched at 0.02-0.07 and noise/other phrases at 0.12+."""
+    import numpy as np
+    return float(min(0.10, max(0.06, np.mean(d) + 1.5 * np.std(d) + 0.02)))
+
+
+def rebuild():
+    """Re-learn from the saved my-voice-N.wav samples (no re-recording)."""
+    import numpy as np
+    af = features()
+    temps = []
+    for i in range(1, 9):
+        p = _path("my-voice-%d.wav" % i)
+        if not os.path.exists(p):
+            break
+        with wave.open(p) as w:
+            seg = trim(np.frombuffer(w.readframes(w.getnframes()), np.int16))
+        if len(seg) >= RATE * 0.25:
+            temps.append(embed_segment(af, seg))
+    if len(temps) < 2:
+        emit("error", v="not enough saved samples -- use TRAIN MY VOICE")
+        return 1
+    d = [_dtw(temps[a], temps[b]) for a in range(len(temps)) for b in range(len(temps)) if a < b]
+    thr = _threshold(d)
+    with open(VOICE_FILE, "w", encoding="utf-8") as f:
+        json.dump({"templates": [t.tolist() for t in temps], "threshold": thr,
+                   "made": time.time()}, f)
+    emit("ok", v="rebuilt your wake phrase from %d samples" % len(temps), threshold=round(thr, 3))
+    return 0
 
 
 def enroll(n=4):
@@ -223,7 +358,7 @@ def enroll(n=4):
     af = features()
     agc = AGC()
     rec, dev = recorder()
-    seg = Segmenter()
+    seg = Utterances()
     templates, i = [], 0
     emit("enroll_prompt", n=1, of=n, v="say your wake phrase now (1/%d)" % n)
     t_end = time.time() + 25 * n
@@ -256,7 +391,7 @@ def enroll(n=4):
     # threshold from how alike your own samples are to each other
     d = [_dtw(templates[a], templates[b]) for a in range(len(templates))
          for b in range(len(templates)) if a < b]
-    thr = float(np.mean(d) + 1.5 * np.std(d) + 0.02)
+    thr = _threshold(d)
     os.makedirs(WAKE_DIR, exist_ok=True)
     with open(VOICE_FILE, "w", encoding="utf-8") as f:
         json.dump({"templates": [t.tolist() for t in templates], "threshold": thr,
@@ -299,7 +434,7 @@ def listen(test=False):
         af = features()
         threshold = voice["threshold"] * (0.7 + 0.6 * sens)   # eager -> looser match
     agc = AGC()
-    seg = Segmenter()
+    seg = Utterances()
     rec, dev = recorder()
     parent = os.getppid()
     try:
@@ -425,6 +560,8 @@ def main():
             setup(w.get("word"))
         emit("ok", v=", ".join(msgs) or "saved", wake=w)
         return 0
+    if "--rebuild" in a:
+        return rebuild()
     if "--devices" in a:
         devices()
         return 0
