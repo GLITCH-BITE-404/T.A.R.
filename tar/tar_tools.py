@@ -829,7 +829,11 @@ def a_sysinfo(_):
 
 # ----------------------------------------------------------------- camera
 
-def a_cam_view(_):
+def a_cam_view(args):
+    # "live view" means inside T.A.R.'s viewer -- never a separate app window.
+    # mpv is only used when explicitly asked for a window (window=1).
+    if str(args.get("window", "")).lower() not in ("1", "true", "yes"):
+        return a_camera_live({"state": "on"})
     dev = effective_device("video")
     if not dev:
         return "no camera found"
@@ -858,6 +862,24 @@ def a_cam_snap(_):
         return "camera grab failed (is another app using the camera?)"
     emit("image", path=p, source="camera", caption="camera photo")
     return "captured %s -- to SEE what's in it, call look with path=%s" % (p, p)
+
+
+def a_mouse_test(_):
+    """Setup TEST: move the pointer in a small square and back -- no clicks."""
+    if not _pointer_ok():
+        return _NO_POINTER
+    try:
+        x, y = (int(v) for v in sh(["hyprctl", "cursorpos"])[1].replace(",", " ").split()[:2])
+    except ValueError:
+        return "couldn't read the cursor position"
+    seen = []
+    for dx, dy in ((40, 0), (40, 40), (0, 40), (0, 0)):
+        sh(["hyprctl", "dispatch", "movecursor", str(x + dx), str(y + dy)])
+        time.sleep(0.15)
+        seen.append(sh(["hyprctl", "cursorpos"])[1])
+    moved = len(set(seen)) > 1
+    return ("VERIFIED: the pointer moved and came back -- clicking works (wlrctl at %s)" % _wlrctl()
+            if moved else "NOT VERIFIED: the pointer didn't move")
 
 
 def a_camera_live(args):
@@ -3506,8 +3528,8 @@ ACTIONS = {
                    [r"^(?:sys(?:tem)? ?info|status|uptime)$"]),
 
     # camera
-    "cam_view":   (a_cam_view, "open a separate live camera WINDOW -- ONLY when the user asks to "
-                               "watch the camera live. For photos / 'am I smiling' use camera_look.",
+    "cam_view":   (a_cam_view, "live camera inside T.A.R.'s viewer (same as camera_live; window=1 "
+                               "only if the user asks for a separate app window)",
                    [r"^(?:open |show )?(?:the )?cam(?:era)?$",
                     r"^let me see$", r"^eyes on$"]),
     "cam_snap":   (a_cam_snap, "grab a still from the camera",
@@ -3590,6 +3612,7 @@ ACTIONS = {
                          "go through open/web instead. ALREADY starts the top video -- "
                          "don't click afterwards.",
                    [r"^play (?P<q>.+) on youtube$"]),
+    "mouse_test": (a_mouse_test, "(setup test) wiggle the pointer to prove mouse control works", []),
     "camera_live": (a_camera_live, "show the webcam LIVE inside T.A.R. (state=on|off) -- for "
                                    "'show me the camera', 'watch me', 'can you see me'. No app opens.",
                     [r"^(?:show (?:me )?(?:the )?(?:camera|webcam)|watch me|camera on|turn on the camera)$",

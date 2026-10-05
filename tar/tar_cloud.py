@@ -1058,6 +1058,23 @@ def main():
         emit("cloud_status", key=bool(api_key()), sdk=have_sdk(),
              ready=ready, model=active_model(), v=("ready" if ready else why))
 
+    elif cmd == "ping":
+        # setup TEST for the cloud brain: one tiny real request, timed
+        import time
+        key = api_key()
+        if not key:
+            emit("acted", v="NOT VERIFIED: no API key -- paste one in the console's CLOUD tab")
+            return 1
+        t0 = time.time()
+        try:
+            r = gemini_call(key, active_model(), {"contents": [{"parts": [{"text": "Reply with exactly: online"}]}]})
+            txt = "".join(p.get("text", "") for p in r["candidates"][0]["content"]["parts"]).strip()
+            emit("acted", v="VERIFIED: %s answered %r in %.1fs" % (active_model(), txt[:30], time.time() - t0))
+        except Exception as e:
+            emit("acted", v="NOT VERIFIED: %s" % str(e)[:200])
+            return 1
+        return 0
+
     elif cmd == "tts":
         # tar_say.sh: text on stdin -> raw 24k PCM on stdout
         try:

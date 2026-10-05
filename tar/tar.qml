@@ -108,9 +108,143 @@ Item {
 
     // ---- wake word: "hey jarvis" -> come to the front and start listening
     property bool wakeOn: false
+    property bool wakePaused: false
+    readonly property string wakePath: Quickshell.env("HOME")
+        + "/.config/hypr/scripts/quickshell/tar/tar_wake.py"
+
+    // ---- wake word TEST (live level, match score, detections, what it heard)
+    Process {
+        id: wakeTestProc
+        command: ["python3", window.wakePath, "--test"]
+        stdout: SplitParser {
+            splitMarker: "\n"
+            onRead: data => {
+                var d; try { d = JSON.parse(data); } catch (e) { return; }
+                if (d.t === "level") {
+                    testPanel.pushLevel(d.v);
+                    if (d.score !== null && d.score !== undefined) testPanel.wakeScore = d.score;
+                } else if (d.t === "wake_score") {
+                    testPanel.wakeScore = d.v;
+                } else if (d.t === "wake") {
+                    testPanel.wakeHits = testPanel.wakeHits + 1;
+                    testPanel.wakeScore = Math.max(testPanel.wakeScore, d.score || 1);
+                    window.sfx("boot");
+                } else if (d.t === "heard") {
+                    testPanel.addHeard(d.v);
+                } else if (d.t === "wake_ready") {
+                    window.testStatus = d.v + "  \u00B7  mic: "
+                        + String(d.device || "default").replace(/^.*HiFi__/, "").replace(/__source$/, "");
+                } else if (d.t === "error") {
+                    window.testStatus = "\u2717 " + d.v;
+                    window.testRunning = false;
+                }
+            }
+        }
+        onExited: window.testRunning = false
+    }
+    // ---- TRAIN MY VOICE: record the phrase 4 times
+    Process {
+        id: wakeEnrollProc
+        command: ["python3", window.wakePath, "--enroll", "4"]
+        stdout: SplitParser {
+            splitMarker: "\n"
+            onRead: data => {
+                var d; try { d = JSON.parse(data); } catch (e) { return; }
+                if (d.t === "level") testPanel.pushLevel(d.v);
+                else if (d.t === "enroll_prompt") window.testStatus = "\u25CF " + d.v;
+                else if (d.t === "enroll_got") { window.testStatus = "\u2713 got sample " + d.n + "/" + d.of;
+                                                 window.sfx("act"); }
+                else if (d.t === "ok") { window.testStatus = "\u2713 " + d.v;
+                                         testPanel.wakeTraining = false; window.wakeCtl(["--check"]);
+                                         window.startWakeTest(); }
+                else if (d.t === "error") { window.testStatus = "\u2717 " + d.v; testPanel.wakeTraining = false; }
+                else if (d.t === "install_log") window.testStatus = d.v;
+            }
+        }
+        onExited: testPanel.wakeTraining = false
+    }
+    // ---- one-shot wake settings commands, queued (Process.running isn't sync)
+    property var wakeCtlQueue: []
+    Process {
+        id: wakeCtlProc
+        property var argv: []
+        command: ["python3", window.wakePath].concat(argv)
+        stdout: SplitParser {
+            splitMarker: "\n"
+            onRead: data => {
+                var d; try { d = JSON.parse(data); } catch (e) { return; }
+                if (d.t === "wake_devices") testPanel.mics = d.rows || [];
+                else if (d.t === "wake_status" || (d.t === "ok" && d.wake)) {
+                    var w = d.wake || d;
+                    if (w.word) testPanel.wakeWord = w.word;
+                    if (w.engine) testPanel.wakeEngine = w.engine;
+                    if (w.sensitivity) testPanel.wakeSens = w.sensitivity;
+                    if (d.t === "ok") window.testStatus = "\u2713 " + d.v;
+                } else if (d.t === "error") window.testStatus = "\u2717 " + d.v;
+                else if (d.t === "install_log") window.testStatus = d.v;
+            }
+        }
+        onExited: {
+            if (window.wakeCtlQueue.length) {
+                var next = window.wakeCtlQueue.shift();
+                wakeCtlProc.argv = next; wakeCtlProc.running = true;
+            } else if (window.wakeRestartAfterCtl) {
+                window.wakeRestartAfterCtl = false; window.startWakeTest();
+            }
+        }
+    }
+    property bool wakeRestartAfterCtl: false
+    function wakeCtl(args) {
+        if (wakeCtlProc.running) { window.wakeCtlQueue.push(args); return; }
+        wakeCtlProc.argv = args; wakeCtlProc.running = true;
+    }
+    function startWakeTest() {
+        wakeTestProc.running = false;
+        testPanel.wakeHits = 0; testPanel.wakeScore = 0;
+        window.testRunning = true;
+        wakeTestProc.running = true;
+    }
+    function stopWakeTest() {
+        wakeTestProc.running = false;
+        window.testRunning = false;
+    }
+    function applyWake(args) {              // change a setting, then re-listen
+        var wasRunning = wakeTestProc.running;
+        wakeTestProc.running = false;
+        window.wakeRestartAfterCtl = wasRunning;
+        window.wakeCtl(["--set"].concat(args));
+    }
+
+    // ---- generic RESULT tests (vision / mouse / cloud): run it, show what happened
+    Process {
+        id: resultProc
+        property var argv: []
+        command: argv
+        stdout: SplitParser {
+            splitMarker: "\n"
+            onRead: data => {
+                var d; try { d = JSON.parse(data); } catch (e) { return; }
+                if (d.t === "image" && d.path) testPanel.resultImage = d.path;
+                else if (d.t === "acted" || d.t === "error") {
+                    var v = String(d.v || "");
+                    testPanel.resultText = v;
+                    var bad = /NOT VERIFIED|failed|couldn'?t|can'?t|no such|error|isn'?t installed/i.test(v);
+                    window.testStatus = bad ? "\u2717 didn't work -- see below" : "\u2713 works";
+                }
+            }
+        }
+        onExited: window.testRunning = false
+    }
+    function runResultTest(label, argv) {
+        window.testMode = "result";
+        window.testStatus = "testing " + label + "\u2026";
+        testPanel.resultText = ""; testPanel.resultImage = "";
+        window.testRunning = true;
+        resultProc.argv = argv; resultProc.running = true;
+    }
     Process {
         id: wakeProc
-        running: window.wakeOn
+        running: window.wakeOn && !window.wakePaused
         command: ["python3", Quickshell.env("HOME")
                   + "/.config/hypr/scripts/quickshell/tar/tar_wake.py"]
         stdout: SplitParser {
@@ -1189,10 +1323,21 @@ Item {
         else if (mode === "mic")     { window.startMicTest(); }
         else if (mode === "speaker") { window.testStatus =
                                        "press a sound below"; }
+        else if (mode === "wake") {
+            window.wakePaused = true;           // the test owns the mic now
+            testPanel.heardLines = [];
+            window.wakeCtl(["--check"]);
+            window.wakeCtl(["--devices"]);
+            window.startWakeTest();
+        }
     }
     function closeTest() {
         camTick.stop();
         if (meterProc.running) meterProc.running = false;
+        wakeTestProc.running = false;
+        wakeEnrollProc.running = false;
+        resultProc.running = false;
+        window.wakePaused = false;
         window.testRunning = false;
         window.testMode = "";
         window.sfx("close");
@@ -1629,6 +1774,25 @@ Item {
                 statusText: window.testStatus
 
                 onClosed: window.closeTest()
+                onWakeStart: window.startWakeTest()
+                onWakeStop: window.stopWakeTest()
+                onSetWakeWord: w => w === "__voice__" ? window.applyWake(["engine=voice"])
+                                                      : window.applyWake(["word=" + w])
+                onSetWakeSens: v => window.applyWake(["sensitivity=" + v])
+                onTrainVoice: {
+                    window.stopWakeTest();
+                    testPanel.wakeTraining = true;
+                    window.testStatus = "get ready -- say your phrase when prompted";
+                    wakeEnrollProc.running = true;
+                }
+                onSetMic: id => {
+                    window.capsRun(["set-device", "source", id]);
+                    window.testStatus = "\u2713 microphone saved -- used from now on";
+                    var wasRunning = wakeTestProc.running;
+                    wakeTestProc.running = false;
+                    window.wakeRestartAfterCtl = wasRunning;
+                    window.wakeCtl(["--devices"]);
+                }
                 onGrabFrame: window.grabFrame()
                 onStartMic: window.startMicTest()
                 onStopMic: {
@@ -1998,9 +2162,18 @@ Item {
                 onTestCap: cap => {
                     // A one-line "ok" in the chat is indistinguishable from
                     // nothing happening. Open the real thing instead.
-                    if (cap === "camera")      window.openTest("camera");
-                    else if (cap === "stt")    window.openTest("mic");
-                    else if (cap === "tts")    window.openTest("speaker");
+                    var tools = Quickshell.env("HOME") + "/.config/hypr/scripts/quickshell/tar/";
+                    if (cap === "camera")        window.openTest("camera");
+                    else if (cap === "stt")      window.openTest("mic");
+                    else if (cap === "tts")      window.openTest("speaker");
+                    else if (cap === "wakeword") window.openTest("wake");
+                    else if (cap === "vision")   window.runResultTest("vision",
+                        ["python3", tools + "tar_tools.py", "run", "camera_look",
+                         "q=Describe what you see in one sentence."]);
+                    else if (cap === "mouse")    window.runResultTest("mouse",
+                        ["python3", tools + "tar_tools.py", "run", "mouse_test"]);
+                    else if (cap === "cloud")    window.runResultTest("cloud brain",
+                        ["python3", tools + "tar_cloud.py", "ping"]);
                     else window.capsRun(["test", cap]);
                 }
                 onToggleSpeak: window.capsRun(["speak", window.capsSpeak ? "off" : "on"])

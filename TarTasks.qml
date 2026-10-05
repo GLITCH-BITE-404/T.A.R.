@@ -214,7 +214,7 @@ TarDeck {
                 visible: k !== "round"
                 anchors.left: icon.right
                 anchors.right: parent.right
-                text: modelData.t.replace(/ ✓$| ✗$/, "")
+                text: modelData.t.replace(/ ✓$| ✗$/, "").replace(/^→ /, "")
                 color: k === "think" ? tasks.theme.text
                      : k === "doing" ? tasks.theme.overlay1 : tasks.theme.subtext1
                 font.family: "JetBrains Mono"
