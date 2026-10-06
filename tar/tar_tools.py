@@ -2716,6 +2716,55 @@ _SHEET_PROMPT = (
     "\"page_text\": \"...\"}}")
 
 
+def _ocr_lines(img_path, sx, sy):
+    """OCR the screenshot into text lines: [(text_lower, center_y, right_x)]."""
+    if not shutil.which("tesseract"):
+        return []
+    rc, out = sh(["tesseract", img_path, "-", "-l", "eng+heb", "--psm", "4", "tsv"], timeout=40)
+    if rc != 0:
+        rc, out = sh(["tesseract", img_path, "-", "--psm", "4", "tsv"], timeout=40)
+    lines = {}
+    for ln in (out or "").splitlines()[1:]:
+        f = ln.split("\t")
+        if len(f) < 12 or not f[11].strip():
+            continue
+        try:
+            key = (int(f[2]), int(f[3]), int(f[4]))
+            left, top, w, h = int(f[6]), int(f[7]), int(f[8]), int(f[9])
+        except ValueError:
+            continue
+        L = lines.setdefault(key, {"words": [], "ys": [], "right": 0})
+        L["words"].append(f[11].strip().lower())
+        L["ys"].append(top + h / 2)
+        L["right"] = max(L["right"], left + w)
+    out_l = [(" ".join(L["words"]), sum(L["ys"]) / len(L["ys"]) * sy, L["right"] * sx) for L in lines.values()]
+    return sorted(out_l, key=lambda r: r[1])
+
+
+_ANSWER_LINE = re.compile(r"^(?:answer|answers|ans|a|תשובה|תשובות)\s*[:.]")
+
+
+def _answer_spot_below(question, lines):
+    """The 'answer:' line directly BELOW the question's own line (matched by its
+    words). Picking the label NEAREST the vision model's guess put every answer
+    one line too low on a tight sheet."""
+    qw = set(re.findall(r"\w+", str(question).lower())) - {"the", "a", "an", "of", "is", "in"}
+    if not qw:
+        return None
+    best, best_score = None, 0.0
+    for i, (text, y, _r) in enumerate(lines):
+        tw = set(re.findall(r"\w+", text))
+        score = len(qw & tw) / len(qw)
+        if score > best_score:
+            best, best_score = i, score
+    if best is None or best_score < 0.5:
+        return None
+    for text, y, right in lines[best + 1:best + 4]:
+        if _ANSWER_LINE.match(text):
+            return (int(right) + 12, int(y))
+    return None
+
+
 def _answer_labels(img_path, sx, sy):
     """Exact screen positions of 'answer:' / 'תשובה:' labels via tesseract --
     the vision model's boxes can be a line off (it typed '600' after the
@@ -2774,10 +2823,16 @@ def _sheet_page(extra, mon, done, context=""):
         iw, ih = Image.open(shot).size
     except Exception:
         iw, ih = mon["width"], mon["height"]
+    olines = _ocr_lines(shot, mon["width"] / iw, mon["height"] / ih)
+    for x in slots:
+        if x.get("kind") == "line":
+            spot = _answer_spot_below(x.get("question", ""), olines)
+            if spot:
+                x["_at"] = spot
     labels = _answer_labels(shot, mon["width"] / iw, mon["height"] / ih)
     used = set()
     for x in sorted(slots, key=lambda x: x["box"][0]):
-        if x.get("kind") != "line" or not labels:
+        if x.get("kind") != "line" or not labels or x.get("_at"):
             continue
         y = (x["box"][0] + x["box"][2]) / 2 / 1000 * mon["height"]
         best = min((i for i in range(len(labels)) if i not in used),
@@ -2787,6 +2842,15 @@ def _sheet_page(extra, mon, done, context=""):
             x["_at"] = (labels[best][0] + 12, labels[best][1])
     _sheet_page.page_text = str(d.get("page_text") or "")
     return slots, d.get("why") or "", shot
+
+
+def _sheet_log(**kw):
+    try:
+        kw["at"] = time.strftime("%H:%M:%S")
+        with open(os.path.join(DATA, "sheet.log"), "a", encoding="utf-8") as f:
+            f.write(json.dumps(kw, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
 
 
 def _type_slots(slots, mon):
@@ -2864,6 +2928,8 @@ def a_fill_table(args):
             stop = _personal_guard(str(x["answer"]), "answer")
             if stop:
                 return stop
+        _sheet_log(page=page + 1, found=[str(x.get("question", ""))[:50] for x in (slots or [])],
+                   spots=[x.get("_at") or "vision" for x in (slots or [])], why=why)
         if slots:
             pages += 1
             show_seen(shot, "screen", "page %d: %d question%s" % (page + 1, len(slots), "" if len(slots) == 1 else "s"))
@@ -2885,6 +2951,7 @@ def a_fill_table(args):
         _mask(before, rect, mon)
         _mask(after, rect, mon)
         ch = _screen_change(before, after, 0, 0)
+        _sheet_log(page=page + 1, scrolled=round(ch[1], 3) if ch else None)
         if not ch or ch[1] < 0.01:
             break                                   # bottom of the document
     if not answered:
