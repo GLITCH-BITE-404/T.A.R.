@@ -108,12 +108,7 @@ ShellRoot {
             win.sizeTo(sc ? sc.width * 0.96 : 1600,
                        sc ? sc.height * 0.94 : 900);
         }
-        // the rice dims unfocused windows -- T.A.R. loses focus every time it
-        // clicks into another app, so it looked greyed-out and dead
-        function noDim() { win.hypr(["setprop", win.sel, "no_dim", "1"]); }
-        Timer { id: noDimLater; interval: 400; onTriggered: win.noDim() }
         function settle() {
-            win.noDim();
             if (win.settled) return;
             win.settled = true;
             win.sizeTo(win.workW, win.workH);
@@ -151,14 +146,12 @@ ShellRoot {
                     // the start mode (it came back squished as a tile before)
                     win.floated = false;
                     if (item.startMode !== "window") reapply.restart();
-                    noDimLater.restart();
                 });
                 item.sizeRequested.connect(function (w, h) {
                     if (!win.settled) return;   // don't fight the intro
                     win.sizeTo(w, h);
                 });
                 modeProbe.start();
-                noDimLater.start();
             }
         }
 

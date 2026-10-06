@@ -1972,8 +1972,11 @@ Item {
 
     // Dim backdrop: the window is screen-sized, so without this the area
     // around the panel reads as a transparent hole punched in the desktop.
+    // (only for the old full-screen overlay: in a normal window the spare space
+    // around the panel turned into a grey box that looked dimmed/dead)
     Rectangle {
         anchors.fill: parent
+        visible: !window.windowed
         color: Qt.rgba(0, 0, 0, 0.55 * window.frameAlpha)
     }
 

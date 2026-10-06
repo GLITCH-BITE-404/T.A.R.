@@ -420,13 +420,12 @@ def live_status():
 
 
 FORMS_RULE = (
-    "\n\nFILLING TABLES / FORMS / HOMEWORK DOCS: 1) look first and read the questions. "
-    "2) Work out ALL the answers yourself, in the document's language (Hebrew doc -> Hebrew "
-    "answers), short like the cells around them. 3) Call fill_cells ONCE: start=<the first empty "
-    "cell, described by its row and column headers>, texts=<answers in Tab order: left to right, "
-    "then the next row; '' for a cell that already has text>. Never click cells one by one. "
-    "4) look again to check. If it fails twice, give the user the answers as a short list to paste "
-    "-- no coordinates, no long explanations.")
+    "\n\nHOMEWORK / TABLES / WORKSHEETS ('answer the questions in my doc', 'fill the table'): "
+    "call fill_table (q=<language or extra instructions>) -- it reads the table itself, answers, "
+    "and fills every cell in one go. Don't click cells yourself and don't use click_on/type for "
+    "tables. Afterwards tell the user in ONE line how many cells were filled; if it says NOT "
+    "VERIFIED, give the answers it returned as a short plain list to paste. For other forms "
+    "(not tables), fill_cells start=<first field> texts=<v1 || v2>.")
 
 
 def chat(message, model=None, max_turns=6):
