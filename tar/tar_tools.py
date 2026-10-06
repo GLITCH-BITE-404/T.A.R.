@@ -2844,6 +2844,23 @@ def _sheet_page(extra, mon, done, context=""):
     return slots, d.get("why") or "", shot
 
 
+def _page_moved(before, after):
+    """Did the document scroll? Full resolution, small threshold: a dark editor
+    with thin text changes well under 1% of the screen when it scrolls -- the
+    click check (quarter size, >1%) said "nothing moved" and T.A.R. stopped."""
+    try:
+        from PIL import Image, ImageChops
+        a = Image.open(before).convert("L")
+        b = Image.open(after).convert("L")
+        if a.size != b.size:
+            return True, 1.0
+        diff = ImageChops.difference(a, b).point(lambda v: 255 if v > 40 else 0)
+        frac = diff.histogram()[255] / float(a.width * a.height)
+        return frac > 0.0004, frac
+    except Exception:
+        return False, 0.0
+
+
 def _sheet_log(**kw):
     try:
         kw["at"] = time.strftime("%H:%M:%S")
@@ -2926,8 +2943,7 @@ def a_fill_table(args):
             rect = hid.rect
         _mask(b0, rect, mon)
         _mask(a0, rect, mon)
-        ch0 = _screen_change(b0, a0, 0, 0)
-        if not ch0 or ch0[1] < 0.01:
+        if not _page_moved(b0, a0)[0]:
             with _TarHidden():
                 sh(["wtype", "-M", "ctrl", "-k", "Home", "-m", "ctrl"])   # top of the document
                 time.sleep(0.4)
@@ -2967,9 +2983,9 @@ def a_fill_table(args):
             rect = hid.rect
         _mask(before, rect, mon)
         _mask(after, rect, mon)
-        ch = _screen_change(before, after, 0, 0)
+        moved, frac = _page_moved(before, after)
         how = "wheel"
-        if not ch or ch[1] < 0.01:
+        if not moved:
             # some editors ignore the mouse wheel (it read "scrolled 0.0" and
             # stopped after 8 of 11 questions): Page Down in the document
             with _TarHidden() as hid:
@@ -2980,10 +2996,10 @@ def a_fill_table(args):
                 _shot(after)
                 rect = hid.rect
             _mask(after, rect, mon)
-            ch = _screen_change(before, after, 0, 0)
+            moved, frac = _page_moved(before, after)
             how = "pagedown"
-        _sheet_log(page=page + 1, scrolled=round(ch[1], 3) if ch else None, how=how)
-        if not ch or ch[1] < 0.01:
+        _sheet_log(page=page + 1, scrolled=round(frac, 4), moved=moved, how=how)
+        if not moved:
             break                                   # really the bottom of the document
     if not answered:
         return "NOT DONE: nothing to answer on screen -- %s" % (why or "no questions found")
