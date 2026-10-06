@@ -389,7 +389,7 @@ Item {
     // tiled into a narrow slot: there's no room beside the panel, so the side
     // drawers slide OVER it instead of being cut off at the window edge
     readonly property bool cramped: windowed && rawSideW > 0
-                                    && (window.width - s(16)) < s(440) + rawSideW
+                                    && (window.width - rawSideW - s(56)) < s(600)
     readonly property real sideW: cramped ? 0 : rawSideW
     readonly property real panelW: sideW > 0
         ? Math.max(s(360), Math.min(targetW, window.width - sideW - s(56)))
