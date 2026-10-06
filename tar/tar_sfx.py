@@ -47,7 +47,22 @@ SFX = {
     "click":   [(1800, 18, "sine")],
     "warn":    [(400, 70, "tri"), (400, 70, "tri")],
     "sweep":   [(300, 220, "sweep")],
+    # evil mode: a low rumble that rises into a growl (used when evil turns on)
+    "rumble":  [(55, 380, "growl"), (82, 260, "growl"), (41, 520, "growl")],
 }
+
+
+def evil():
+    try:
+        with open(os.path.join(DATA, "config.json"), encoding="utf-8") as f:
+            return bool(json.load(f).get("evil"))
+    except (OSError, ValueError):
+        return False
+
+
+def evilize(spec):
+    """EVIL MODE: every chime an octave down, harsher (triangle), a bit longer."""
+    return [(f * 0.5, int(ms * 1.25), "tri" if shape == "sine" else shape) for f, ms, shape in spec]
 
 
 def sink():
@@ -73,6 +88,13 @@ def render(spec, vol):
             ph = 2 * math.pi * f * t
             if shape == "tri":
                 s = 2 / math.pi * math.asin(math.sin(ph))
+            elif shape == "growl":
+                # detuned saws + a wobble: a low menacing rumble
+                saw = ((f * t) % 1.0) * 2 - 1
+                saw2 = ((f * 1.012 * t) % 1.0) * 2 - 1
+                s = 0.55 * saw + 0.45 * saw2
+                s *= 0.75 + 0.25 * math.sin(2 * math.pi * 7 * t)
+                s = math.tanh(s * 2.2)
             else:
                 s = math.sin(ph)
             env = (i / atk) if i < atk else math.exp(-4.0 * (i - atk) / n)
@@ -120,6 +142,8 @@ def main():
     if not spec:
         print(json.dumps({"t": "error", "v": "unknown sfx: " + name}))
         return 2
+    if evil() and name != "rumble":
+        spec = evilize(spec)
     rc = play(render(spec, max(0.0, min(1.0, vol))))
     print(json.dumps({"t": "sfx", "name": name, "ok": rc == 0}))
     return 0 if rc == 0 else 1

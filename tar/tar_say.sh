@@ -57,6 +57,19 @@ SINK="$(jqget '.devices.sink')"
 
 VOL_PCT=$(awk -v v="$VOL" 'BEGIN{ v=(v<0?0:(v>1?1:v)); printf "%d", v*200 }')
 
+# EVIL MODE voice: pitched ~20% down at the same speed, a short metallic echo
+# and more low end. Raw PCM in -> raw PCM out, so it streams like before.
+EVIL="$(jqget '.evil')"
+evil_fx() {   # $1 = sample rate
+    if [[ "$EVIL" == "true" ]] && command -v ffmpeg >/dev/null 2>&1; then
+        ffmpeg -hide_banner -loglevel error -f s16le -ar "$1" -ac 1 -i - \
+            -af "asetrate=$1*0.8,aresample=$1,atempo=1.25,aecho=0.8:0.55:28:0.32,bass=g=7,volume=1.3" \
+            -f s16le -ar "$1" -ac 1 - 2>/dev/null
+    else
+        cat
+    fi
+}
+
 play_raw() {   # stdin: s16 mono 22050
     # pw-play is the libsndfile frontend and REJECTS raw PCM on stdin
     # ("Format not recognised"), exiting non-zero after the pipeline has
@@ -82,10 +95,10 @@ if printf '%s' "$TEXT" | grep -qP '[\x{0590}-\x{05FF}]' \
     if printf '%s' "$TEXT" | python3 "$HERE/tar_cloud.py" tts "$(jqget '.tts_voice' || true)" \
             > "$TMPPCM" 2>/dev/null && [[ -s "$TMPPCM" ]]; then
         if command -v pw-cat >/dev/null 2>&1; then
-            pw-cat --playback --raw --rate 24000 --format s16 --channels 1 \
-                   ${SINK:+--target "$SINK"} --volume "$VOL" "$TMPPCM" 2>/dev/null
+            evil_fx 24000 < "$TMPPCM" | pw-cat --playback --raw --rate 24000 --format s16 --channels 1 \
+                   ${SINK:+--target "$SINK"} --volume "$VOL" - 2>/dev/null
         else
-            paplay --raw --rate=24000 --format=s16le --channels=1 ${SINK:+--device="$SINK"} "$TMPPCM" 2>/dev/null
+            evil_fx 24000 < "$TMPPCM" | paplay --raw --rate=24000 --format=s16le --channels=1 ${SINK:+--device="$SINK"} 2>/dev/null
         fi
         rm -f "$TMPPCM"
         exit 0
@@ -112,6 +125,7 @@ if [[ -n "$PIPER" ]]; then
     if [[ -n "$MODEL" && -f "$MODEL" ]]; then
         printf '%s' "$TEXT" \
             | "$PIPER" --model "$MODEL" --output_raw 2>/dev/null \
+            | evil_fx 22050 \
             | play_raw
         exit 0
     fi
