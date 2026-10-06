@@ -4354,9 +4354,10 @@ def match_all(text):
     return out
 
 
-_SELF_CLOSE = re.compile(r"^(?:(?:close|quit|exit|kill|shut ?down|turn off|stop) "
-                         r"(?:yourself|tar|t\.?\s?a\.?\s?r\.?|the panel)|quit|exit|go away|"
-                         r"(?:bye|goodbye) tar)[.!]?$")
+_SELF_CLOSE = re.compile(r"^(?:quit|exit|go away|(?:bye|goodbye) tar)[.!]?$")
+# anywhere in a SHORT message: "great now kill yourself", "pkill tar", "run pkill -9 tar"
+_SELF_CLOSE_ANY = re.compile(r"\b(?:close|quit|exit|kill|pkill|killall|shut ?down|turn off)"
+                             r"(?: -9| -15)? (?:yourself|tar|t\.?\s?a\.?\s?r\.?)(?:[.!?]|$|\s)")
 
 
 def match(text):
@@ -4364,7 +4365,7 @@ def match(text):
     strict = _normalize(text)
     # "kill tar" used to mean the `tar` archiver process, "kill t.a.r" a window
     # called t.a.r -- closing T.A.R. itself wins over both
-    if _SELF_CLOSE.match(strict):
+    if _SELF_CLOSE.match(strict) or (len(strict.split()) <= 7 and _SELF_CLOSE_ANY.search(strict)):
         return "close", {}
     lucky = _lucky(strict)
     if lucky:
@@ -4567,7 +4568,7 @@ def run(name, args):
             emit("ui", action="banner", text=line if len(line) < 28 else line.split(".")[0] + ".")
             return line
         if name == "close" and not DIRECT and not re.search(
-                r"\b(close|quit|exit|kill|shut ?down|turn off|stop)\b.{0,20}\b(yourself|tar|t\.?\s?a\.?\s?r\.?|you)\b"
+                r"\b(close|quit|exit|kill|pkill|killall|shut ?down|turn off|stop)\b.{0,20}\b(yourself|tar|t\.?\s?a\.?\s?r\.?|you)\b"
                 r"|\b(go away|bye tar|goodbye)\b", (USER_SAID or "").split(" \n ")[-1].lower()):
             # it once closed ITSELF when asked to "close the camera feed"
             return ("NOT DONE: 'close' shuts T.A.R. itself down -- the user didn't ask for that. "
