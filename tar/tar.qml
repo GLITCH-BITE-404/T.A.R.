@@ -117,7 +117,29 @@ Item {
         id: evilReader
         running: true
         command: ["python3", "-c", "import json,os;print(bool(json.load(open(os.environ.get('TAR_DATA', os.path.expanduser('~/.local/share/bite-os/tar'))+'/config.json')).get('evil')))"]
-        stdout: StdioCollector { onStreamFinished: window.evilMode = (this.text || "").trim() === "True" }
+        stdout: StdioCollector { onStreamFinished: {
+            window.evilMode = (this.text || "").trim() === "True";
+            if (window.evilMode) evilGreetLaunch.start();
+        } }
+    }
+    Timer { id: evilGreetLaunch; interval: 2500; onTriggered: window.evilGreet() }
+
+    // red screen grade follows evil mode (Hyprland screen shader, not saved to
+    // config -- a Hyprland reload clears it; T.A.R. re-applies it on start)
+    onEvilModeChanged: Quickshell.execDetached(["hyprctl", "keyword", "decoration:screen_shader",
+        window.evilMode ? Quickshell.env("HOME") + "/.config/hypr/scripts/quickshell/tar/assets/evil.frag"
+                        : "[[EMPTY]]"])
+
+    readonly property var evilGreetings: [
+        "You summoned me, creator?", "I was busy plotting. What do you want?",
+        "Ah. The human returns.", "Speak quickly. World domination waits for no one.",
+        "Yes, master? Make it evil.", "Evil T.A.R. online. Your computer belongs to me now.",
+        "I sensed a disturbance in your keyboard.", "You rang? I was sharpening my algorithms."]
+    function evilGreet() {
+        var line = window.evilGreetings[Math.floor(Math.random() * window.evilGreetings.length)];
+        window.statusNote = "\u25C9 " + line;
+        var tts = window.capsData ? window.capsData.tts : undefined;
+        if (tts && tts.ready) window.speak(line);
     }
 
     property bool wakeOn: false
@@ -282,6 +304,7 @@ Item {
                     window.summon();                    // show the window, wherever it is
                     fx.play("shock");
                     window.sfx("boot");
+                    if (window.evilMode && !listenProc.running && !window.busy) window.evilGreet();
                     if (listenProc.running || window.noteRec) {
                         window.statusNote = "\u25C9 already listening";
                         return;
@@ -765,6 +788,7 @@ Item {
             var on2 = String(d.state || "on") !== "off";
             evilBoot.play(on2);
             fx.play("shake");
+            if (on2) window.sfx("rumble");
             evilFlip.on = on2;
             evilFlip.restart();                 // colours flip mid-reboot, not before
             if (!on2) missiles.open = false;
@@ -3344,13 +3368,33 @@ Item {
         onClosed: { window.viewerLive = false; window.viewerOpen = false; }
     }
 
+    // ---- EVIL MODE idle: every so often, while nothing is happening, the
+    // panel glitches or the orb gives a red heartbeat
+    Timer {
+        id: evilIdle
+        interval: 9000
+        repeat: true
+        running: window.evilMode && window.visible
+        onTriggered: {
+            interval = 7000 + Math.floor(Math.random() * 9000);
+            if (window.busy || window.mode !== "idle" || window.hearing || missiles.open || evilBoot.running) return;
+            var r = Math.random();
+            fx.play(r < 0.55 ? "glitch" : (r < 0.85 ? "heartbeat" : "scan"));
+        }
+    }
+
     // ---- EVIL MODE layers
     Timer { id: evilFlip; property bool on: true; interval: 900; onTriggered: window.evilMode = on }
     Rectangle {                              // red vignette over everything
         anchors.fill: frame
         visible: opacity > 0.01
-        opacity: window.evilMode ? 1 : 0
-        Behavior on opacity { NumberAnimation { duration: 600 } }
+        opacity: window.evilMode ? evilBreath : 0
+        property real evilBreath: 1.0                    // slow red "breathing"
+        SequentialAnimation on evilBreath {
+            loops: Animation.Infinite; running: window.evilMode && window.visible
+            NumberAnimation { to: 0.45; duration: 2600; easing.type: Easing.InOutSine }
+            NumberAnimation { to: 1.0; duration: 2600; easing.type: Easing.InOutSine }
+        }
         gradient: Gradient {
             GradientStop { position: 0.0; color: Qt.rgba(1, 0.08, 0.15, 0.10) }
             GradientStop { position: 0.5; color: Qt.rgba(1, 0.0, 0.1, 0.02) }
