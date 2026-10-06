@@ -14,6 +14,7 @@
 // dispatcher acts on whatever window is ACTIVE, which during startup is the
 // terminal you launched from -- it will happily fullscreen the wrong window.
 import Quickshell
+import Quickshell.Io
 import QtQuick
 
 ShellRoot {
@@ -110,7 +111,42 @@ ShellRoot {
             win.sizeTo(sc ? sc.width * 0.96 : 1600,
                        sc ? sc.height * 0.94 : 900);
         }
+        // ---- watch our own window in Hyprland (found by process id, so a
+        // second T.A.R. can't confuse it):
+        //  * start mode floating but it came up tiled -> float it back
+        //    (only in the first seconds after it appears, so a manual tile sticks)
+        //  * tiled and squeezed by other windows (a terminal etc.) -> widen
+        //    our tile instead of cramming the UI into a sliver
+        readonly property int comfyW: 560
+        property real enforceUntil: 0
+        Process {
+            id: geomProbe
+            command: ["sh", "-c", "hyprctl clients -j | jq -c --argjson p " + Quickshell.processId
+                      + " '[.[] | select(.pid == $p)][0] // {}'"]
+            stdout: StdioCollector { onStreamFinished: win.checkGeom(this.text) }
+        }
+        Timer {
+            interval: 2000; repeat: true
+            running: win.settled && win.visible
+            onTriggered: if (!geomProbe.running) geomProbe.running = true
+        }
+        function checkGeom(t) {
+            var d;
+            try { d = JSON.parse(t); } catch (e) { return; }
+            if (!d || !d.address || !d.size) return;
+            var mode = loader.item ? loader.item.startMode : "floating";
+            if (mode === "floating" && !d.floating && Date.now() < win.enforceUntil) {
+                win.floated = false;
+                win.sizeTo(win.pendW > 0 ? win.pendW : win.workW, win.pendH > 0 ? win.pendH : win.workH);
+                return;
+            }
+            if (!d.floating && d.size[0] < win.comfyW) {
+                win.hypr(["resizewindowpixel", (win.comfyW - d.size[0]) + " 0,address:" + d.address]);
+            }
+        }
+
         function settle() {
+            win.enforceUntil = Date.now() + 15000;
             if (win.settled) return;
             win.settled = true;
             win.sizeTo(win.workW, win.workH);
@@ -147,6 +183,7 @@ ShellRoot {
                     // a freshly mapped window is TILED by Hyprland -- re-apply
                     // the start mode (it came back squished as a tile before)
                     win.floated = false;
+                    win.enforceUntil = Date.now() + 15000;
                     if (item.startMode !== "window") reapply.restart();
                 });
                 item.sizeRequested.connect(function (w, h) {

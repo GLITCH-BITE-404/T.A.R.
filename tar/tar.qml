@@ -388,9 +388,8 @@ Item {
                                 + (leftOpen ? tasksW + consoleGap : 0)
     // tiled into a narrow slot: there's no room beside the panel, so the side
     // drawers slide OVER it instead of being cut off at the window edge
-    readonly property bool cramped: windowed && rawSideW > 0
-                                    && (window.width - rawSideW - s(56)) < s(600)
-    readonly property real sideW: cramped ? 0 : rawSideW
+    readonly property bool cramped: false
+    readonly property real sideW: 0          // side tabs are popups now (outside the window)
     readonly property real panelW: sideW > 0
         ? Math.max(s(360), Math.min(targetW, window.width - sideW - s(56)))
         : targetW
@@ -426,8 +425,9 @@ Item {
         // grow with what's open instead of squeezing it in: each side panel
         // (console, viewer/tasks, test bay) adds its width; the harness caps
         // it to the screen
-        var sides = (window.consoleOpen ? 1 : 0) + (window.leftOpen ? 1 : 0)
-                  + (window.testMode !== "" ? 1 : 0);
+        // console / viewer / tasks are popups OUTSIDE the window now -- only
+        // the setup test bay (inside the panel) needs extra width
+        var sides = (window.testMode !== "" ? 1 : 0);
         var wide = sides > 0 || window.settingsOpen || window.historyOpen;
         window.requestSize(1040 + sides * 400 + (window.settingsOpen && sides === 0 ? 380 : 0),
                            wide ? 860 : 760);
@@ -2014,9 +2014,7 @@ Item {
         anchors.centerIn: parent
         // slide left by half the group's extra width so the pair stays centred
         anchors.horizontalCenterOffset: !window.introDone ? 0
-            : window.cramped ? 0
-            : ((window.consoleOpen ? -(window.consoleW + window.consoleGap) / 2 : 0)
-               + (window.leftOpen ? (window.tasksW + window.consoleGap) / 2 : 0))
+            : 0
         Behavior on anchors.horizontalCenterOffset {
             NumberAnimation { duration: 360; easing.type: Easing.OutExpo }
         }
@@ -3291,17 +3289,20 @@ Item {
     }
 
         // ---- CONSOLE ---------------------------------------------------------
+    // side tabs come OUT of T.A.R.'s window (popups beside the panel) instead
+    // of squeezing the chat -- they flip to the other side when there's no room
+    TarSidePop {
+        anchorItem: frame
+        leftSide: false
+        gap: window.s(10)
+        topInset: window.s(6)
+        shown: consolePanel.open
+        implicitWidth: window.consoleW
+        implicitHeight: frame.height - window.s(12)
     TarConsole {
         id: consolePanel
         open: window.consoleOpen && window.introDone
-
-        // docked to the outside edge of the panel -- or over its right side
-        // when the window is too narrow (tiled)
-        x: window.cramped ? frame.x + frame.width - width - window.s(8) : frame.x + frame.width + window.s(10)
-        z: window.cramped ? 845 : 0
-        anchors.top: frame.top
-        anchors.topMargin: window.s(6)
-        height: frame.height - window.s(12)
+        anchors.fill: parent
         theme: theme
         scaleFn: window.s
         accent: window.accent
@@ -3332,37 +3333,41 @@ Item {
         onSetBackend: (which) => window.capsRun(["backend", which])
         onSetKey: (k) => window.setApiKey(k)
     }
+    }
 
     // ---- background tasks tab: docks to the right edge while a task runs
+    TarSidePop {
+        anchorItem: frame
+        leftSide: true
+        gap: window.s(10)
+        topInset: window.s(6)
+        shown: tasksTab.open
+        implicitWidth: window.tasksW
+        implicitHeight: frame.height - window.s(12)
     TarTasks {
         id: tasksTab
-        solid: window.cramped
         open: window.tasksOpen && window.tasksActive && !window.viewerOpen && window.introDone
-        // docked to the outside LEFT edge of the panel (the console takes the right),
-        // or over the panel's left side when the window is too narrow
-        x: window.cramped ? frame.x + window.s(8) : frame.x - width - window.s(10)
-        anchors.top: frame.top
-        anchors.topMargin: window.s(6)
-        width: window.cramped ? Math.min(window.tasksW, frame.width - window.s(16)) : window.tasksW
-        height: frame.height - window.s(12)
-        z: window.cramped ? 845 : -1
+        anchors.fill: parent
         theme: theme
         accent: window.accent
         scaleFn: window.s
         onClosed: window.tasksOpen = false
     }
+    }
 
     // ---- viewer: what T.A.R. just saw (same slot as tasks, left of the panel)
+    TarSidePop {
+        anchorItem: frame
+        leftSide: true
+        gap: window.s(10)
+        topInset: window.s(6)
+        shown: viewerDrawer.open
+        implicitWidth: window.tasksW
+        implicitHeight: frame.height - window.s(12)
     TarViewer {
         id: viewerDrawer
-        solid: window.cramped
         open: window.viewerOpen && window.introDone
-        x: window.cramped ? frame.x + window.s(8) : frame.x - width - window.s(10)
-        anchors.top: frame.top
-        anchors.topMargin: window.s(6)
-        width: window.cramped ? Math.min(window.tasksW, frame.width - window.s(16)) : window.tasksW
-        height: frame.height - window.s(12)
-        z: window.cramped ? 845 : -1
+        anchors.fill: parent
         theme: theme
         accent: window.accent
         scaleFn: window.s
@@ -3377,6 +3382,7 @@ Item {
         frameFile: (Quickshell.env("TAR_DATA") || (Quickshell.env("HOME")
                     + "/.local/share/bite-os/tar")) + "/live-frame.jpg"
         onClosed: { window.viewerLive = false; window.viewerOpen = false; }
+    }
     }
 
     // ---- EVIL MODE idle: every so often, while nothing is happening, the
