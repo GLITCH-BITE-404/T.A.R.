@@ -2688,6 +2688,30 @@ _SHEET_PROMPT = (
     "If nothing on screen needs answering: {{\"found\": false, \"why\": \"<what you see instead>\"}}")
 
 
+def _answer_labels(img_path, sx, sy):
+    """Exact screen positions of 'answer:' / 'תשובה:' labels via tesseract --
+    the vision model's boxes can be a line off (it typed '600' after the
+    question instead of on the answer line). Returns [(right_x, center_y)]."""
+    if not shutil.which("tesseract"):
+        return []
+    rc, out = sh(["tesseract", img_path, "-", "-l", "eng+heb", "--psm", "11", "tsv"], timeout=40)
+    if rc != 0:
+        rc, out = sh(["tesseract", img_path, "-", "--psm", "11", "tsv"], timeout=40)
+    found = []
+    for ln in (out or "").splitlines()[1:]:
+        f = ln.split("\t")
+        if len(f) < 12:
+            continue
+        word = f[11].strip().lower()
+        if re.match(r"^(answer|answers|ans|a|תשובה|תשובות)[:.]$", word) or word in ("answer", "תשובה"):
+            try:
+                left, top, w, h = (int(f[6]), int(f[7]), int(f[8]), int(f[9]))
+            except ValueError:
+                continue
+            found.append((int((left + w) * sx), int((top + h / 2) * sy)))
+    return found
+
+
 def a_fill_table(args):
     """Homework / question sheets / tables: one screenshot -> a stronger vision
     model returns every place that needs an answer (exact boxes) + the answers
@@ -2726,6 +2750,23 @@ def a_fill_table(args):
         if stop:
             return stop
     show_seen(shot, "screen", "%d question%s found" % (len(slots), "" if len(slots) == 1 else "s"))
+    # snap 'answer:' lines to the real labels on screen
+    try:
+        from PIL import Image
+        iw, ih = Image.open(shot).size
+    except Exception:
+        iw, ih = mon["width"], mon["height"]
+    labels = _answer_labels(shot, mon["width"] / iw, mon["height"] / ih)
+    used = set()
+    for x in sorted(slots, key=lambda x: x["box"][0]):
+        if x.get("kind") != "line" or not labels:
+            continue
+        y = (x["box"][0] + x["box"][2]) / 2 / 1000 * mon["height"]
+        best = min((i for i in range(len(labels)) if i not in used),
+                   key=lambda i: abs(labels[i][1] - y), default=None)
+        if best is not None and abs(labels[best][1] - y) < mon["height"] * 0.08:
+            used.add(best)
+            x["_at"] = (labels[best][0] + 12, labels[best][1])
     b_path = os.path.join(DATA, "fill-before.jpg")
     a_path = os.path.join(DATA, "fill-after.jpg")
     with _TarHidden() as hid:
@@ -2733,7 +2774,9 @@ def a_fill_table(args):
         for x in sorted(slots, key=lambda x: -x["box"][0]):          # bottom-up
             y0, x0, y1, x1 = x["box"]
             cy = int((y0 + y1) / 2 / 1000 * mon["height"])
-            if x.get("kind") == "line":
+            if x.get("_at"):
+                cx, cy = x["_at"]                                   # exact, from OCR
+            elif x.get("kind") == "line":
                 cx = int((x0 + (x1 - x0) * 0.15) / 1000 * mon["width"])   # inside the line, near its start
             else:
                 cx = int((x0 + x1) / 2 / 1000 * mon["width"])
