@@ -2671,39 +2671,44 @@ def a_scroll(args):
     return "scrolled %s %d in %s" % (d, n, _label(w))
 
 
-_TABLE_PROMPT = (
-    "This is a screenshot of the user's screen with a document containing a TABLE (homework, "
-    "a form, a worksheet). {extra}\n"
-    "1. Read the table: its column headers, row headers, and which cells are EMPTY and need an "
-    "answer (ignore the header row and the row-label column).\n"
-    "2. Answer every empty cell correctly, like a strong student: short, factual, in the SAME "
-    "language as the table (Hebrew table -> Hebrew answers), same style as any filled cells.\n"
-    "3. Reply with ONLY JSON:\n"
-    "{{\"rtl\": true|false, \"cells\": [{{\"row\": \"<row header>\", \"col\": \"<column header>\", "
-    "\"filled\": true|false, \"answer\": \"<text, empty if filled>\", \"box\": [ymin, xmin, ymax, xmax]}}]}}\n"
-    "- box = the cell's rectangle, coordinates normalized 0-1000 on the whole screenshot.\n"
-    "- List the cells in KEYBOARD TAB ORDER, starting at the FIRST cell that needs an answer and "
-    "ending at the last one: row by row; within a row in reading order (right-to-left for a "
-    "Hebrew/RTL table, left-to-right otherwise). Include already-filled cells that sit between "
-    "them (filled: true) so Tab can skip them. Skip header cells and row-label cells entirely.")
+_SHEET_PROMPT = (
+    "This is a screenshot of the user's screen. Find what the user must ANSWER on it: questions in "
+    "a document, worksheet or text editor -- empty table cells, 'answer:' lines, blanks after a "
+    "question.{extra}\n"
+    "Use ONLY what is visible in this screenshot. Never invent questions or tables that aren't there.\n"
+    "Answer each one correctly and concisely, like a strong student, in the language the question "
+    "is written in. Reply with ONLY JSON:\n"
+    "{{\"found\": true, \"slots\": [{{\"question\": \"<the question as written>\", "
+    "\"answer\": \"<your answer>\", \"box\": [ymin, xmin, ymax, xmax], "
+    "\"kind\": \"cell|line|blank\"}}]}}\n"
+    "- box = WHERE THE ANSWER GOES, normalized 0-1000 on the whole screenshot: the empty table "
+    "cell, or the rest of the 'answer:' line (the box should start right after 'answer:'), or the "
+    "empty line under the question.\n"
+    "- Skip anything already answered.\n"
+    "If nothing on screen needs answering: {{\"found\": false, \"why\": \"<what you see instead>\"}}")
 
 
 def a_fill_table(args):
-    """Homework/forms: read the table on screen with a STRONGER vision model,
-    get exact cell boxes + answers as JSON, click the first empty cell from its
-    real box (no guessing), type the answers with Tab between cells."""
+    """Homework / question sheets / tables: one screenshot -> a stronger vision
+    model returns every place that needs an answer (exact boxes) + the answers
+    -> click each spot, End, type. Bottom-up, so typing can't shift spots
+    that are still to come."""
     if not shutil.which("wtype"):
         return "wtype isn't installed"
-    extra = (args.get("q") or args.get("instructions") or args.get("what") or "").strip()
+    extra = (args.get("q") or args.get("instructions") or "").strip()
+    # only pass instructions that came from the user, never the brain's own
+    # summary of an older task (it once fed in a previous doc's topic)
+    if extra and extra.lower() not in (USER_SAID or "").lower() and not DIRECT:
+        extra = ""
     mon = _monitor()
-    shot = os.path.join(DATA, "table-look.jpg")
+    shot = os.path.join(DATA, "sheet-look.jpg")
     with _TarHidden() as hid:
         ok = _shot(shot)
         rect = hid.rect
     if not ok:
         return "couldn't take a screenshot"
     _mask(shot, rect, mon)
-    txt, err = _gemini_image(shot, _TABLE_PROMPT.format(extra=("User's note: " + extra) if extra else ""),
+    txt, err = _gemini_image(shot, _SHEET_PROMPT.format(extra=(" The user says: " + extra) if extra else ""),
                              model=cfg().get("homework_model") or "gemini-3.5-flash", max_tokens=4000)
     if err:
         return err
@@ -2712,50 +2717,45 @@ def a_fill_table(args):
         d = json.loads(m.group(0)) if m else {}
     except ValueError:
         d = {}
-    cells = [c for c in (d.get("cells") or []) if isinstance(c, dict) and isinstance(c.get("box"), list)
-             and len(c["box"]) == 4]
-    todo = [c for c in cells if not c.get("filled") and str(c.get("answer") or "").strip()]
-    if not todo:
-        return "NOT DONE: couldn't find empty table cells on screen (is the table visible?)"
-    first = cells.index(todo[0])
-    cells = cells[first:]
-    y0, x0, y1, x1 = cells[0]["box"]
-    cx = int((x0 + x1) / 2 / 1000 * mon["width"])
-    cy = int((y0 + y1) / 2 / 1000 * mon["height"])
-    texts = ["" if c.get("filled") else str(c.get("answer") or "") for c in cells]
-    for t in texts:
-        stop = _personal_guard(t, "table cell")
+    slots = [x for x in (d.get("slots") or []) if isinstance(x, dict) and isinstance(x.get("box"), list)
+             and len(x["box"]) == 4 and str(x.get("answer") or "").strip()]
+    if not d.get("found") or not slots:
+        return "NOT DONE: nothing to answer on screen -- %s" % (d.get("why") or "no questions found")
+    for x in slots:
+        stop = _personal_guard(str(x["answer"]), "answer")
         if stop:
             return stop
-    show_seen(shot, "click", "first cell to fill: %s / %s" % (cells[0].get("row", "")[:30],
-                                                               cells[0].get("col", "")[:30]), mark=(cx, cy))
+    show_seen(shot, "screen", "%d question%s found" % (len(slots), "" if len(slots) == 1 else "s"))
     b_path = os.path.join(DATA, "fill-before.jpg")
     a_path = os.path.join(DATA, "fill-after.jpg")
     with _TarHidden() as hid:
-        _move(cx, cy, mon)
-        time.sleep(0.15)
-        _click("left", False)
-        time.sleep(0.35)
         _shot(b_path)
-        for i, t in enumerate(texts):
-            if t.strip():
-                sh(["wtype", t], timeout=30)
-            if i < len(texts) - 1:
-                sh(["wtype", "-k", "Tab"])
-                time.sleep(0.15)
-        time.sleep(0.6)
+        for x in sorted(slots, key=lambda x: -x["box"][0]):          # bottom-up
+            y0, x0, y1, x1 = x["box"]
+            cy = int((y0 + y1) / 2 / 1000 * mon["height"])
+            if x.get("kind") == "line":
+                cx = int((x0 + (x1 - x0) * 0.15) / 1000 * mon["width"])   # inside the line, near its start
+            else:
+                cx = int((x0 + x1) / 2 / 1000 * mon["width"])
+            _move(cx, cy, mon)
+            time.sleep(0.1)
+            _click("left", False)
+            time.sleep(0.2)
+            sh(["wtype", "-k", "End"])
+            ans = str(x["answer"])
+            sh(["wtype", (" " + ans) if x.get("kind") == "line" else ans], timeout=30)
+            time.sleep(0.15)
+        time.sleep(0.5)
         _shot(a_path)
         rect = hid.rect
     _mask(b_path, rect, mon)
     _mask(a_path, rect, mon)
-    ch = _screen_change(b_path, a_path, cx, cy)
-    verdict = ("VERIFIED: the answers appeared in the table" if ch and ch[1] > 0.002 else
-               "NOT VERIFIED: the table didn't change -- look to see what happened")
-    show_seen(a_path, "screen", "table after filling")
-    lines = "\n".join("- %s / %s: %s" % (c.get("row", "")[:40], c.get("col", "")[:30], c.get("answer"))
-                      for c in cells if not c.get("filled"))
-    return ("filled %d cells (%s table) -- %s. The answers it typed:\n%s"
-            % (len(todo), "RTL" if d.get("rtl") else "LTR", verdict, lines))
+    ch = _screen_change(b_path, a_path, 0, 0)
+    verdict = ("VERIFIED: the answers appeared" if ch and ch[1] > 0.002 else
+               "NOT VERIFIED: the screen didn't change -- look to see what happened")
+    show_seen(a_path, "screen", "after answering")
+    lines = "\n".join("- %s -> %s" % (str(x.get("question", ""))[:60], x["answer"]) for x in slots)
+    return "answered %d question(s) -- %s:\n%s" % (len(slots), verdict, lines)
 
 
 def a_fill_cells(args):
@@ -4009,10 +4009,11 @@ ACTIONS = {
                     r"(?:to|at|on) (?P<target>.+)$",
                     r"^nuke (?P<target>.+)$",
                     r"^(?:open |show )?(?:the )?(?:missiles?|missels?|nukes?|launch) (?:tab|panel|control|command)$"]),
-    "fill_table": (a_fill_table, "HOMEWORK / TABLES: reads the table on screen, answers every empty "
-                                 "cell (in the table's language), clicks the right cell and fills them all. "
-                                 "q=<extra instructions>. USE THIS for 'answer the questions in my doc'.",
-                   [r"^(?:fill in|fill out|fill|answer|complete|do|solve) (?:the |my )?(?:table|questions|homework|worksheet)(?: in (?:the |my )?(?:doc|docs|document))?(?P<q> in \w+)?$"]),
+    "fill_table": (a_fill_table, "HOMEWORK / QUESTION SHEETS / TABLES: reads the questions on screen "
+                                 "(table cells, 'answer:' lines, blanks), answers them in their language "
+                                 "and types each answer in the right spot. q= ONLY the user's own extra "
+                                 "instructions (or nothing). USE THIS for 'answer the questions'.",
+                   [r"^(?:fill in|fill out|fill|answer|complete|do|solve) (?:the |my )?(?:table|questions|question sheet|questions sheet|homework|worksheet|sheet)(?: (?:in|on) (?:the |my )?(?:doc|docs|document|screen|page))?(?P<q> in \w+)?$"]),
     "fill_cells": (a_fill_cells, "fill a TABLE or FORM: start=<first cell to fill> texts=<v1 || v2 || ...> "
                                  "(nav=tab default; Tab goes left->right then next row; '' skips a cell "
                                  "that already has text). Use this instead of clicking each cell.", []),

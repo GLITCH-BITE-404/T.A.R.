@@ -384,8 +384,13 @@ Item {
                   (Quickshell.env("TAR_DATA") || (Quickshell.env("HOME") + "/.local/share/bite-os/tar")) + "/ui-state.json", body]
     }
     onViewerOpenChanged: window.autoSize()
-    readonly property real sideW: (consoleOpen ? consoleW + consoleGap : 0)
+    readonly property real rawSideW: (consoleOpen ? consoleW + consoleGap : 0)
                                 + (leftOpen ? tasksW + consoleGap : 0)
+    // tiled into a narrow slot: there's no room beside the panel, so the side
+    // drawers slide OVER it instead of being cut off at the window edge
+    readonly property bool cramped: windowed && rawSideW > 0
+                                    && (window.width - s(16)) < s(440) + rawSideW
+    readonly property real sideW: cramped ? 0 : rawSideW
     readonly property real panelW: sideW > 0
         ? Math.max(s(360), Math.min(targetW, window.width - sideW - s(56)))
         : targetW
@@ -2009,6 +2014,7 @@ Item {
         anchors.centerIn: parent
         // slide left by half the group's extra width so the pair stays centred
         anchors.horizontalCenterOffset: !window.introDone ? 0
+            : window.cramped ? 0
             : ((window.consoleOpen ? -(window.consoleW + window.consoleGap) / 2 : 0)
                + (window.leftOpen ? (window.tasksW + window.consoleGap) / 2 : 0))
         Behavior on anchors.horizontalCenterOffset {
@@ -2106,7 +2112,7 @@ Item {
             // losing half its space.
             TarTestPanel {
                 id: testPanel
-                Layout.preferredWidth: window.testMode !== "" ? window.s(380) : 0
+                Layout.preferredWidth: window.testMode !== "" ? Math.min(window.s(380), parent.width * 0.5) : 0
                 Layout.fillHeight: true
                 visible: Layout.preferredWidth > 1
                 clip: true
@@ -3289,9 +3295,10 @@ Item {
         id: consolePanel
         open: window.consoleOpen && window.introDone
 
-        // docked to the outside edge of the panel, not over it
-        anchors.left: frame.right
-        anchors.leftMargin: window.s(10)
+        // docked to the outside edge of the panel -- or over its right side
+        // when the window is too narrow (tiled)
+        x: window.cramped ? frame.x + frame.width - width - window.s(8) : frame.x + frame.width + window.s(10)
+        z: window.cramped ? 845 : 0
         anchors.top: frame.top
         anchors.topMargin: window.s(6)
         height: frame.height - window.s(12)
@@ -3330,14 +3337,14 @@ Item {
     TarTasks {
         id: tasksTab
         open: window.tasksOpen && window.tasksActive && !window.viewerOpen && window.introDone
-        // docked to the outside LEFT edge of the panel (the console takes the right)
-        anchors.right: frame.left
-        anchors.rightMargin: window.s(10)
+        // docked to the outside LEFT edge of the panel (the console takes the right),
+        // or over the panel's left side when the window is too narrow
+        x: window.cramped ? frame.x + window.s(8) : frame.x - width - window.s(10)
         anchors.top: frame.top
         anchors.topMargin: window.s(6)
-        width: window.tasksW
+        width: window.cramped ? Math.min(window.tasksW, frame.width - window.s(16)) : window.tasksW
         height: frame.height - window.s(12)
-        z: -1
+        z: window.cramped ? 845 : -1
         theme: theme
         accent: window.accent
         scaleFn: window.s
@@ -3348,13 +3355,12 @@ Item {
     TarViewer {
         id: viewerDrawer
         open: window.viewerOpen && window.introDone
-        anchors.right: frame.left
-        anchors.rightMargin: window.s(10)
+        x: window.cramped ? frame.x + window.s(8) : frame.x - width - window.s(10)
         anchors.top: frame.top
         anchors.topMargin: window.s(6)
-        width: window.tasksW
+        width: window.cramped ? Math.min(window.tasksW, frame.width - window.s(16)) : window.tasksW
         height: frame.height - window.s(12)
-        z: -1
+        z: window.cramped ? 845 : -1
         theme: theme
         accent: window.accent
         scaleFn: window.s

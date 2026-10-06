@@ -421,8 +421,9 @@ def live_status():
 
 FORMS_RULE = (
     "\n\nHOMEWORK / TABLES / WORKSHEETS ('answer the questions in my doc', 'fill the table'): "
-    "call fill_table (q=<language or extra instructions>) -- it reads the table itself, answers, "
-    "and fills every cell in one go. Don't click cells yourself and don't use click_on/type for "
+    "call fill_table -- it reads the questions on screen itself (tables, 'answer:' lines, "
+    "blanks), answers them and types every answer in one go. Pass q ONLY if the user gave extra "
+    "instructions in THIS message; never pass older context. Don't click cells yourself and don't use click_on/type for "
     "tables. Afterwards tell the user in ONE line how many cells were filled; if it says NOT "
     "VERIFIED, give the answers it returned as a short plain list to paste. For other forms "
     "(not tables), fill_cells start=<first field> texts=<v1 || v2>.")
