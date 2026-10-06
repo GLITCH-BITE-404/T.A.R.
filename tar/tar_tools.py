@@ -2728,45 +2728,32 @@ def _answer_labels(img_path, sx, sy):
     return found
 
 
-def a_fill_table(args):
-    """Homework / question sheets / tables: one screenshot -> a stronger vision
-    model returns every place that needs an answer (exact boxes) + the answers
-    -> click each spot, End, type. Bottom-up, so typing can't shift spots
-    that are still to come."""
-    if not shutil.which("wtype"):
-        return "wtype isn't installed"
-    extra = (args.get("q") or args.get("instructions") or "").strip()
-    # only pass instructions that came from the user, never the brain's own
-    # summary of an older task (it once fed in a previous doc's topic)
-    if extra and extra.lower() not in (USER_SAID or "").lower() and not DIRECT:
-        extra = ""
-    mon = _monitor()
+def _qkey(q):
+    return " ".join(re.findall(r"\w+", str(q).lower()))[:80]
+
+
+def _sheet_page(extra, mon, done):
+    """One screen: find the questions still to answer (not in `done`), with
+    exact spots (OCR-snapped 'answer:' lines). Returns (slots, why, shot)."""
     shot = os.path.join(DATA, "sheet-look.jpg")
     with _TarHidden() as hid:
         ok = _shot(shot)
         rect = hid.rect
     if not ok:
-        return "couldn't take a screenshot"
+        return None, "couldn't take a screenshot", None
     _mask(shot, rect, mon)
     txt, err = _gemini_image(shot, _SHEET_PROMPT.format(extra=(" The user says: " + extra) if extra else ""),
                              model=cfg().get("homework_model") or "gemini-3.5-flash", max_tokens=4000)
     if err:
-        return err
+        return None, err, shot
     m = re.search(r"\{.*\}", txt or "", re.S)
     try:
         d = json.loads(m.group(0)) if m else {}
     except ValueError:
         d = {}
     slots = [x for x in (d.get("slots") or []) if isinstance(x, dict) and isinstance(x.get("box"), list)
-             and len(x["box"]) == 4 and str(x.get("answer") or "").strip()]
-    if not d.get("found") or not slots:
-        return "NOT DONE: nothing to answer on screen -- %s" % (d.get("why") or "no questions found")
-    for x in slots:
-        stop = _personal_guard(str(x["answer"]), "answer")
-        if stop:
-            return stop
-    show_seen(shot, "screen", "%d question%s found" % (len(slots), "" if len(slots) == 1 else "s"))
-    # snap 'answer:' lines to the real labels on screen
+             and len(x["box"]) == 4 and str(x.get("answer") or "").strip()
+             and _qkey(x.get("question", "")) not in done]
     try:
         from PIL import Image
         iw, ih = Image.open(shot).size
@@ -2783,38 +2770,92 @@ def a_fill_table(args):
         if best is not None and abs(labels[best][1] - y) < mon["height"] * 0.08:
             used.add(best)
             x["_at"] = (labels[best][0] + 12, labels[best][1])
-    b_path = os.path.join(DATA, "fill-before.jpg")
-    a_path = os.path.join(DATA, "fill-after.jpg")
+    return slots, d.get("why") or "", shot
+
+
+def _type_slots(slots, mon):
+    """Click each answer spot (bottom-up), End, type. Returns the x where the
+    document is (for scrolling)."""
+    doc_x = mon["width"] // 2
+    for x in sorted(slots, key=lambda x: -x["box"][0]):
+        y0, x0, y1, x1 = x["box"]
+        cy = int((y0 + y1) / 2 / 1000 * mon["height"])
+        if x.get("_at"):
+            cx, cy = x["_at"]                                   # exact, from OCR
+        elif x.get("kind") == "line":
+            cx = int((x0 + (x1 - x0) * 0.15) / 1000 * mon["width"])
+        else:
+            cx = int((x0 + x1) / 2 / 1000 * mon["width"])
+        doc_x = cx
+        _move(cx, cy, mon)
+        time.sleep(0.1)
+        _click("left", False)
+        time.sleep(0.2)
+        sh(["wtype", "-k", "End"])
+        ans = str(x["answer"])
+        sh(["wtype", (" " + ans) if x.get("kind") == "line" else ans], timeout=30)
+        time.sleep(0.15)
+    return doc_x
+
+
+def a_fill_table(args):
+    """Homework / question sheets / tables, even LONGER than the screen:
+    answer what's visible, scroll down, repeat (skipping questions already
+    answered) until the page stops moving -- at most 8 screens."""
+    if not shutil.which("wtype"):
+        return "wtype isn't installed"
+    extra = (args.get("q") or args.get("instructions") or "").strip()
+    # only pass instructions that came from the user, never the brain's own
+    # summary of an older task (it once fed in a previous doc's topic)
+    if extra and extra.lower() not in (USER_SAID or "").lower() and not DIRECT:
+        extra = ""
+    mon = _monitor()
+    done, answered, pages, why = set(), [], 0, ""
+    doc_x = mon["width"] // 2
+    for page in range(8):
+        slots, why, shot = _sheet_page(extra, mon, done)
+        if slots is None:
+            if answered:
+                break
+            return "NOT DONE: " + why
+        for x in slots:
+            stop = _personal_guard(str(x["answer"]), "answer")
+            if stop:
+                return stop
+        if slots:
+            pages += 1
+            show_seen(shot, "screen", "page %d: %d question%s" % (page + 1, len(slots), "" if len(slots) == 1 else "s"))
+            with _TarHidden():
+                doc_x = _type_slots(slots, mon)
+            for x in slots:
+                done.add(_qkey(x.get("question", "")))
+                answered.append(x)
+        # scroll on: if the page doesn't move, we've reached the end
+        before = os.path.join(DATA, "scroll-before.jpg")
+        after = os.path.join(DATA, "scroll-after.jpg")
+        with _TarHidden() as hid:
+            _shot(before)
+            _move(doc_x, int(mon["height"] * 0.55), mon)
+            sh([_wlrctl(), "pointer", "scroll", str(int(mon["height"] * 0.55)), "0"])
+            time.sleep(0.6)
+            _shot(after)
+            rect = hid.rect
+        _mask(before, rect, mon)
+        _mask(after, rect, mon)
+        ch = _screen_change(before, after, 0, 0)
+        if not ch or ch[1] < 0.01:
+            break                                   # bottom of the document
+    if not answered:
+        return "NOT DONE: nothing to answer on screen -- %s" % (why or "no questions found")
+    final = os.path.join(DATA, "fill-after.jpg")
     with _TarHidden() as hid:
-        _shot(b_path)
-        for x in sorted(slots, key=lambda x: -x["box"][0]):          # bottom-up
-            y0, x0, y1, x1 = x["box"]
-            cy = int((y0 + y1) / 2 / 1000 * mon["height"])
-            if x.get("_at"):
-                cx, cy = x["_at"]                                   # exact, from OCR
-            elif x.get("kind") == "line":
-                cx = int((x0 + (x1 - x0) * 0.15) / 1000 * mon["width"])   # inside the line, near its start
-            else:
-                cx = int((x0 + x1) / 2 / 1000 * mon["width"])
-            _move(cx, cy, mon)
-            time.sleep(0.1)
-            _click("left", False)
-            time.sleep(0.2)
-            sh(["wtype", "-k", "End"])
-            ans = str(x["answer"])
-            sh(["wtype", (" " + ans) if x.get("kind") == "line" else ans], timeout=30)
-            time.sleep(0.15)
-        time.sleep(0.5)
-        _shot(a_path)
+        _shot(final)
         rect = hid.rect
-    _mask(b_path, rect, mon)
-    _mask(a_path, rect, mon)
-    ch = _screen_change(b_path, a_path, 0, 0)
-    verdict = ("VERIFIED: the answers appeared" if ch and ch[1] > 0.002 else
-               "NOT VERIFIED: the screen didn't change -- look to see what happened")
-    show_seen(a_path, "screen", "after answering")
-    lines = "\n".join("- %s -> %s" % (str(x.get("question", ""))[:60], x["answer"]) for x in slots)
-    return "answered %d question(s) -- %s:\n%s" % (len(slots), verdict, lines)
+    _mask(final, rect, mon)
+    show_seen(final, "screen", "after answering %d" % len(answered))
+    lines = "\n".join("- %s -> %s" % (str(x.get("question", ""))[:60], x["answer"]) for x in answered)
+    return ("answered %d question(s) over %d screen(s), scrolled to the end -- VERIFIED by "
+            "screenshots:\n%s" % (len(answered), max(1, pages), lines))
 
 
 def a_fill_cells(args):
