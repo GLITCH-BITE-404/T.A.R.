@@ -4189,7 +4189,8 @@ UI_PATTERNS = {
     "scan":      [r"^scan$"],
     "alert":     [r"^alert$"],
     "calm":      [r"^calm(?: down)?$", r"^settle$"],
-    "close":     [r"^(?:close|quit|exit) (?:yourself|tar|the panel)$"],
+    "close":     [r"^(?:close|quit|exit|kill|shut ?down|turn off|stop) (?:yourself|tar|t\.?a\.?r\.?|the panel)$",
+                  r"^(?:quit|exit|go away|bye tar|goodbye tar)$"],
     # ---- easter eggs (no model needed) ----
     "barrelroll": [r"^do a barrel roll$", r"^barrel roll$", r"^spin$"],
     "selfdestruct": [r"^(?:initiate |activate |start )?self[ -]?destruct(?: sequence)?$"],
@@ -4348,9 +4349,18 @@ def match_all(text):
     return out
 
 
+_SELF_CLOSE = re.compile(r"^(?:(?:close|quit|exit|kill|shut ?down|turn off|stop) "
+                         r"(?:yourself|tar|t\.?\s?a\.?\s?r\.?|the panel)|quit|exit|go away|"
+                         r"(?:bye|goodbye) tar)[.!]?$")
+
+
 def match(text):
     """Deterministic intent match. Returns (name, args) or (None, None)."""
     strict = _normalize(text)
+    # "kill tar" used to mean the `tar` archiver process, "kill t.a.r" a window
+    # called t.a.r -- closing T.A.R. itself wins over both
+    if _SELF_CLOSE.match(strict):
+        return "close", {}
     lucky = _lucky(strict)
     if lucky:
         return lucky
@@ -4552,7 +4562,7 @@ def run(name, args):
             emit("ui", action="banner", text=line if len(line) < 28 else line.split(".")[0] + ".")
             return line
         if name == "close" and not DIRECT and not re.search(
-                r"\b(close|quit|exit|shut down|turn off)\b.{0,20}\b(yourself|tar|t\.a\.r\.?|you)\b"
+                r"\b(close|quit|exit|kill|shut ?down|turn off|stop)\b.{0,20}\b(yourself|tar|t\.?\s?a\.?\s?r\.?|you)\b"
                 r"|\b(go away|bye tar|goodbye)\b", (USER_SAID or "").split(" \n ")[-1].lower()):
             # it once closed ITSELF when asked to "close the camera feed"
             return ("NOT DONE: 'close' shuts T.A.R. itself down -- the user didn't ask for that. "

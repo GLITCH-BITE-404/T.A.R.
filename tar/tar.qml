@@ -3336,6 +3336,7 @@ Item {
     // ---- background tasks tab: docks to the right edge while a task runs
     TarTasks {
         id: tasksTab
+        solid: window.cramped
         open: window.tasksOpen && window.tasksActive && !window.viewerOpen && window.introDone
         // docked to the outside LEFT edge of the panel (the console takes the right),
         // or over the panel's left side when the window is too narrow
@@ -3354,6 +3355,7 @@ Item {
     // ---- viewer: what T.A.R. just saw (same slot as tasks, left of the panel)
     TarViewer {
         id: viewerDrawer
+        solid: window.cramped
         open: window.viewerOpen && window.introDone
         x: window.cramped ? frame.x + window.s(8) : frame.x - width - window.s(10)
         anchors.top: frame.top

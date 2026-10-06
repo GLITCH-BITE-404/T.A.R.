@@ -19,6 +19,7 @@ Item {
     property string status: ""
     property color statusColor: theme ? theme.subtext0 : "white"
     property bool statusPulse: false
+    property bool solid: false          // covering the chat (narrow window): no see-through
     default property alias content: body.data
 
     visible: opacity > 0.01
@@ -35,7 +36,7 @@ Item {
     Rectangle {
         anchors.fill: parent
         radius: deck.s(6)
-        color: Qt.rgba(deck.theme.crust.r, deck.theme.crust.g, deck.theme.crust.b, 0.96)
+        color: Qt.rgba(deck.theme.crust.r, deck.theme.crust.g, deck.theme.crust.b, deck.solid ? 1 : 0.96)
         border.width: 1
         border.color: Qt.rgba(deck.accent.r, deck.accent.g, deck.accent.b, 0.35)
     }

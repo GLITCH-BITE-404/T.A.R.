@@ -21,8 +21,10 @@ ShellRoot {
         id: win
 
         title: "T.A.R."
-        minimumSize.width: 620
-        minimumSize.height: 520
+        // small minimum: when Hyprland tiles T.A.R. narrower than this, it kept
+        // drawing at 620 px and the right side was cropped off
+        minimumSize.width: 340
+        minimumSize.height: 420
         color: "transparent"
 
         readonly property int workW: 1040
