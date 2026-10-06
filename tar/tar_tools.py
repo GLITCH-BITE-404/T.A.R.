@@ -2854,16 +2854,29 @@ def _sheet_log(**kw):
 
 
 def _type_slots(slots, mon):
-    """Click each answer spot (bottom-up), End, type. Returns the x where the
-    document is (for scrolling)."""
+    """Type each answer, TOP-DOWN, re-finding its spot on a fresh screenshot
+    right before typing: typing near the bottom made the editor scroll a line,
+    and every later click (from the old screenshot) landed one line too low.
+    Returns the x where the document is (for scrolling)."""
     doc_x = mon["width"] // 2
-    for x in sorted(slots, key=lambda x: -x["box"][0]):
+    live = os.path.join(DATA, "sheet-live.jpg")
+    for x in sorted(slots, key=lambda x: x["box"][0]):
         y0, x0, y1, x1 = x["box"]
         cy = int((y0 + y1) / 2 / 1000 * mon["height"])
-        if x.get("_at"):
-            cx, cy = x["_at"]                                   # exact, from OCR
-        elif x.get("kind") == "line":
+        if x.get("kind") == "line":
             cx = int((x0 + (x1 - x0) * 0.15) / 1000 * mon["width"])
+            spot = None
+            if _shot(live):
+                try:
+                    from PIL import Image
+                    iw, ih = Image.open(live).size
+                except Exception:
+                    iw, ih = mon["width"], mon["height"]
+                spot = _answer_spot_below(x.get("question", ""),
+                                          _ocr_lines(live, mon["width"] / iw, mon["height"] / ih))
+            if spot or x.get("_at"):
+                cx, cy = spot or x["_at"]                      # where it is RIGHT NOW
+            x["_typed_at"] = [cx, cy]
         else:
             cx = int((x0 + x1) / 2 / 1000 * mon["width"])
         doc_x = cx
@@ -2881,7 +2894,8 @@ def _type_slots(slots, mon):
             time.sleep(0.2)
             sh(["wtype", "-k", "End"])
             sh(["wtype", (" " + ans) if x.get("kind") == "line" else ans], timeout=30)
-        time.sleep(0.15)
+        time.sleep(0.25)
+    _sheet_log(typed=[[str(x.get("question", ""))[:30], x.get("_typed_at")] for x in slots])
     return doc_x
 
 
@@ -2914,6 +2928,9 @@ def a_fill_table(args):
         _mask(a0, rect, mon)
         ch0 = _screen_change(b0, a0, 0, 0)
         if not ch0 or ch0[1] < 0.01:
+            with _TarHidden():
+                sh(["wtype", "-M", "ctrl", "-k", "Home", "-m", "ctrl"])   # top of the document
+                time.sleep(0.4)
             break
     for page in range(8):
         _sheet_page.page_text = ""
@@ -2951,9 +2968,23 @@ def a_fill_table(args):
         _mask(before, rect, mon)
         _mask(after, rect, mon)
         ch = _screen_change(before, after, 0, 0)
-        _sheet_log(page=page + 1, scrolled=round(ch[1], 3) if ch else None)
+        how = "wheel"
         if not ch or ch[1] < 0.01:
-            break                                   # bottom of the document
+            # some editors ignore the mouse wheel (it read "scrolled 0.0" and
+            # stopped after 8 of 11 questions): Page Down in the document
+            with _TarHidden() as hid:
+                sh(["wtype", "-k", "Next"])
+                time.sleep(0.15)
+                sh(["wtype", "-k", "Next"])
+                time.sleep(0.6)
+                _shot(after)
+                rect = hid.rect
+            _mask(after, rect, mon)
+            ch = _screen_change(before, after, 0, 0)
+            how = "pagedown"
+        _sheet_log(page=page + 1, scrolled=round(ch[1], 3) if ch else None, how=how)
+        if not ch or ch[1] < 0.01:
+            break                                   # really the bottom of the document
     if not answered:
         return "NOT DONE: nothing to answer on screen -- %s" % (why or "no questions found")
     final = os.path.join(DATA, "fill-after.jpg")
