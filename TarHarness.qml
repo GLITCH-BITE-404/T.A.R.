@@ -118,6 +118,7 @@ ShellRoot {
         //  * tiled and squeezed by other windows (a terminal etc.) -> widen
         //    our tile instead of cramming the UI into a sliver
         readonly property int comfyW: 560
+        property bool tiled: false              // from the watcher
         property real enforceUntil: 0
         Process {
             id: geomProbe
@@ -134,6 +135,7 @@ ShellRoot {
             var d;
             try { d = JSON.parse(t); } catch (e) { return; }
             if (!d || !d.address || !d.size) return;
+            win.tiled = !d.floating;
             var mode = loader.item ? loader.item.startMode : "floating";
             if (mode === "floating" && !d.floating && Date.now() < win.enforceUntil) {
                 win.floated = false;
@@ -186,8 +188,25 @@ ShellRoot {
                     win.enforceUntil = Date.now() + 15000;
                     if (item.startMode !== "window") reapply.restart();
                 });
+                // you choose floating vs tiled; T.A.R. never flips it on its own
+                // after startup (resizing used to float a tiled window)
+                item.floatRequested.connect(function (fl) {
+                    if (fl) {
+                        win.tiled = false;
+                        win.floated = false;            // let sizeTo float + size + centre it
+                        win.sizeTo(win.workW, win.workH);
+                    } else {
+                        win.tiled = true;
+                        win.floated = false;
+                        win.hypr(["settiled", win.sel]);
+                    }
+                });
                 item.sizeRequested.connect(function (w, h) {
                     if (!win.settled) return;   // don't fight the intro
+                    // tiled: the layout owns the size -- resizing here is what made
+                    // T.A.R. go thinner when a tab closed. The watcher only ever
+                    // WIDENS a squeezed tile.
+                    if (win.tiled) return;
                     win.sizeTo(w, h);
                 });
                 modeProbe.start();

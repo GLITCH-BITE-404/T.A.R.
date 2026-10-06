@@ -806,6 +806,13 @@ Item {
             else if (missiles.phase === "idle" || missiles.phase === "impact") missiles.standby();
             return;
         }
+        if (name === "selffloat") {
+            var st = String(d.state || "float");
+            var fl = st === "float" || st === "floating" || st === "on";
+            window.floatRequested(fl);
+            window.statusNote = fl ? "\u25C9 floating" : "\u25C9 tiled window";
+            return;
+        }
         if (name === "panel") {
             var what = String(d.what || "all").toLowerCase(), open = String(d.state || "close") === "open";
             var all = what === "all" || what === "everything";
@@ -1476,6 +1483,7 @@ Item {
     // bring T.A.R. to YOU: onto the workspace you're looking at (also out of
     // a special/hidden workspace), then focus it
     signal showRequested()
+    signal floatRequested(bool floating)     // "float yourself" / "window mode"
     property bool backgrounded: false
     function summon() {
         summonProbe.running = false;
@@ -3292,10 +3300,10 @@ Item {
     // side tabs come OUT of T.A.R.'s window (popups beside the panel) instead
     // of squeezing the chat -- they flip to the other side when there's no room
     TarSidePop {
-        anchorItem: frame
+        anchorItem: window
         leftSide: false
-        gap: window.s(10)
-        topInset: window.s(6)
+        gap: window.s(6)
+        topInset: frame.y + window.s(6)
         shown: consolePanel.open
         implicitWidth: window.consoleW
         implicitHeight: frame.height - window.s(12)
@@ -3337,10 +3345,10 @@ Item {
 
     // ---- background tasks tab: docks to the right edge while a task runs
     TarSidePop {
-        anchorItem: frame
+        anchorItem: window
         leftSide: true
-        gap: window.s(10)
-        topInset: window.s(6)
+        gap: window.s(6)
+        topInset: frame.y + window.s(6)
         shown: tasksTab.open
         implicitWidth: window.tasksW
         implicitHeight: frame.height - window.s(12)
@@ -3357,10 +3365,10 @@ Item {
 
     // ---- viewer: what T.A.R. just saw (same slot as tasks, left of the panel)
     TarSidePop {
-        anchorItem: frame
+        anchorItem: window
         leftSide: true
-        gap: window.s(10)
-        topInset: window.s(6)
+        gap: window.s(6)
+        topInset: frame.y + window.s(6)
         shown: viewerDrawer.open
         implicitWidth: window.tasksW
         implicitHeight: frame.height - window.s(12)

@@ -3799,6 +3799,7 @@ UI_ACTIONS = {
     "setup":     "open T.A.R.'s own SETUP pane",
     "console":   "toggle T.A.R.'s console (models, voice, memory)",
     "chats":     "open T.A.R.'s past chats",
+    "selffloat": "make T.A.R.'s OWN window floating (state=on) or a tiled window (state=off)",
     "panel":     "open/close one of T.A.R.'s OWN panels: what=viewer (the preview/'sees' tab "
                  "with photos/camera) | test (setup test bay) | console | tasks | setup | chats "
                  "| all, state=open|close. 'close the preview tab / that panel / em' = THIS.",
@@ -4189,6 +4190,10 @@ UI_PATTERNS = {
     "scan":      [r"^scan$"],
     "alert":     [r"^alert$"],
     "calm":      [r"^calm(?: down)?$", r"^settle$"],
+    "selffloat": [r"^(?P<state>float) yourself$", r"^go (?P<state>floating)$",
+                  r"^(?:switch to )?(?P<state>floating) mode$", r"^(?:make yourself|be) (?P<state>floating)$",
+                  r"^(?P<state>tile) yourself$", r"^go (?P<state>tiled)$",
+                  r"^(?:go |switch to )?(?P<state>window) mode$", r"^(?:make yourself|be) (?:a )?(?P<state>window|tiled)$"],
     "close":     [r"^(?:close|quit|exit|kill|shut ?down|turn off|stop) (?:yourself|tar|t\.?a\.?r\.?|the panel)$",
                   r"^(?:quit|exit|go away|bye tar|goodbye tar)$"],
     # ---- easter eggs (no model needed) ----

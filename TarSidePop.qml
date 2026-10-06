@@ -24,10 +24,15 @@ PopupWindow {
     anchor.adjustment: PopupAdjustment.FlipX | PopupAdjustment.SlideY | PopupAdjustment.ResizeY
 
     color: "transparent"
+    grabFocus: false
     // stay mapped until the drawer's close animation has finished
     visible: shown || closing.running
     onShownChanged: if (!shown) closing.restart()
     Timer { id: closing; interval: 360 }
+    // the compositor dismisses popups when you click into another window --
+    // if the tab is still meant to be open, put it straight back
+    onVisibleChanged: if (!visible && shown) reshow.restart()
+    Timer { id: reshow; interval: 120; onTriggered: if (pop.shown && !pop.visible) pop.visible = true }
 
     Item { id: holder; anchors.fill: parent }
 }
