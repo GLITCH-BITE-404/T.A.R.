@@ -614,6 +614,12 @@ SITES = {
 }
 
 
+def low_name_ok(prog):
+    """Programs that ARE browsers/launchers shouldn't hijack a real URL."""
+    return prog.lower() not in _BROWSER_WORDS and prog.lower() not in (
+        "chrome", "google-chrome", "firefox", "chromium", "xdg-open", "open")
+
+
 def a_open(args):
     what = (args.get("what") or "").strip()
     if not what:
@@ -676,6 +682,16 @@ def a_open(args):
         return "%s isn't installed" % argv[0]
 
     if re.match(r"^(https?://|www\.)", low):
+        # the model sometimes turns a program into a website ("do something
+        # cool" -> https://cmatrix.org). If that name is a program installed
+        # here and the user didn't ask for a site, run the program.
+        host = re.sub(r"^(https?://)?(www\.)?", "", low).split("/")[0]
+        prog = host.split(".")[0]
+        said = (USER_SAID or "").lower()
+        if prog and len(prog) > 2 and shutil.which(prog) and prog not in ("google", "www") \
+                and low_name_ok(prog) and host not in said \
+                and not re.search(r"\b(site|website|web ?page|url|link|online|\.com|\.org)\b", said):
+            return a_open({"what": prog}) + " (the installed program, not its website)"
         url = what if low.startswith("http") else "https://" + what
         return open_url(url, prof, want_browser)
 
