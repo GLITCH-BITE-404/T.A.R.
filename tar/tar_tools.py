@@ -2716,13 +2716,47 @@ _SHEET_PROMPT = (
     "\"page_text\": \"...\"}}")
 
 
+def _ocr_langs():
+    """eng+heb only if Hebrew data is installed -- asking for a missing
+    language made every OCR run fail once and run again (2x slower)."""
+    if not hasattr(_ocr_langs, "v"):
+        rc, out = sh(["tesseract", "--list-langs"], timeout=10)
+        _ocr_langs.v = "eng+heb" if "heb" in (out or "") else "eng"
+    return _ocr_langs.v
+
+
+def _vshift(prev_path, cur_path, max_shift=400):
+    """How far the page moved vertically between two screenshots (pixels,
+    + = content moved UP). Row-brightness cross-correlation: milliseconds,
+    instead of a full OCR before every answer."""
+    try:
+        import numpy as np
+        from PIL import Image
+        a = np.asarray(Image.open(prev_path).convert("L"), dtype=np.float32).mean(axis=1)
+        b = np.asarray(Image.open(cur_path).convert("L"), dtype=np.float32).mean(axis=1)
+        if a.shape != b.shape:
+            return None
+        a -= a.mean(); b -= b.mean()
+        n = len(a)
+        best, best_err = 0, None
+        for d in range(-max_shift, max_shift + 1, 2):
+            if d >= 0:
+                x, y = a[d:], b[:n - d]
+            else:
+                x, y = a[:n + d], b[-d:]
+            err = float(np.mean(np.abs(x - y)))
+            if best_err is None or err < best_err:
+                best, best_err = d, err
+        return best
+    except Exception:
+        return None
+
+
 def _ocr_lines(img_path, sx, sy):
     """OCR the screenshot into text lines: [(text_lower, center_y, right_x)]."""
     if not shutil.which("tesseract"):
         return []
-    rc, out = sh(["tesseract", img_path, "-", "-l", "eng+heb", "--psm", "4", "tsv"], timeout=40)
-    if rc != 0:
-        rc, out = sh(["tesseract", img_path, "-", "--psm", "4", "tsv"], timeout=40)
+    rc, out = sh(["tesseract", img_path, "-", "-l", _ocr_langs(), "--psm", "4", "tsv"], timeout=40)
     lines = {}
     for ln in (out or "").splitlines()[1:]:
         f = ln.split("\t")
@@ -2871,49 +2905,68 @@ def _sheet_log(**kw):
 
 
 def _type_slots(slots, mon):
-    """Type each answer, TOP-DOWN, re-finding its spot on a fresh screenshot
-    right before typing: typing near the bottom made the editor scroll a line,
-    and every later click (from the old screenshot) landed one line too low.
-    Returns the x where the document is (for scrolling)."""
+    """Type each answer TOP-DOWN. The answer lines are found by OCR ONCE; before
+    each answer a quick screenshot measures whether the page shifted (typing
+    near the bottom scrolls the editor) and the saved spots move with it."""
     doc_x = mon["width"] // 2
+    base = os.path.join(DATA, "sheet-base.jpg")
     live = os.path.join(DATA, "sheet-live.jpg")
+    olines = None
+    if _shot(base):
+        try:
+            from PIL import Image
+            iw, ih = Image.open(base).size
+        except Exception:
+            iw, ih = mon["width"], mon["height"]
+        olines = _ocr_lines(base, mon["width"] / iw, mon["height"] / ih)
     for x in sorted(slots, key=lambda x: x["box"][0]):
         y0, x0, y1, x1 = x["box"]
         cy = int((y0 + y1) / 2 / 1000 * mon["height"])
         if x.get("kind") == "line":
             cx = int((x0 + (x1 - x0) * 0.15) / 1000 * mon["width"])
-            spot = None
-            if _shot(live):
-                try:
-                    from PIL import Image
-                    iw, ih = Image.open(live).size
-                except Exception:
-                    iw, ih = mon["width"], mon["height"]
-                spot = _answer_spot_below(x.get("question", ""),
-                                          _ocr_lines(live, mon["width"] / iw, mon["height"] / ih))
-            if spot or x.get("_at"):
-                cx, cy = spot or x["_at"]                      # where it is RIGHT NOW
+            spot = _answer_spot_below(x.get("question", ""), olines) if olines else None
+            spot = spot or x.get("_at")
+            if spot:
+                cx, cy = spot
+                if _shot(live):
+                    dy = _vshift(base, live)
+                    if dy:
+                        cy -= dy                      # the page moved up by dy
             x["_typed_at"] = [cx, cy]
         else:
             cx = int((x0 + x1) / 2 / 1000 * mon["width"])
         doc_x = cx
         _move(cx, cy, mon)
-        time.sleep(0.1)
+        time.sleep(0.08)
         ans = str(x["answer"])
         if x.get("kind") == "inline":
             # a ___ blank inside a sentence: double-click selects the blank,
             # typing replaces it (End would put the answer after the full stop)
             _click("left", True)
-            time.sleep(0.2)
+            time.sleep(0.15)
             sh(["wtype", ans], timeout=30)
         else:
             _click("left", False)
-            time.sleep(0.2)
+            time.sleep(0.15)
             sh(["wtype", "-k", "End"])
             sh(["wtype", (" " + ans) if x.get("kind") == "line" else ans], timeout=30)
-        time.sleep(0.25)
+        time.sleep(0.2)
     _sheet_log(typed=[[str(x.get("question", ""))[:30], x.get("_typed_at")] for x in slots])
     return doc_x
+
+
+def _empty_answer_lines(mon):
+    """OCR the screen: are there 'answer:' lines with nothing after them?"""
+    p = os.path.join(DATA, "sheet-sweep.jpg")
+    if not _shot(p):
+        return 0
+    try:
+        from PIL import Image
+        iw, ih = Image.open(p).size
+    except Exception:
+        iw, ih = mon["width"], mon["height"]
+    return sum(1 for t, _y, _r in _ocr_lines(p, mon["width"] / iw, mon["height"] / ih)
+               if re.match(r"^(?:answer|answers|ans|תשובה)\s*[:.]?\s*$", t))
 
 
 def a_fill_table(args):
@@ -3001,6 +3054,47 @@ def a_fill_table(args):
         _sheet_log(page=page + 1, scrolled=round(frac, 4), moved=moved, how=how)
         if not moved:
             break                                   # really the bottom of the document
+    # reached the end: sweep back UP to make sure nothing was missed. OCR finds
+    # 'answer:' lines still empty; only those screens go back to the AI.
+    for sweep in range(8):
+        with _TarHidden() as hid:
+            empty = _empty_answer_lines(mon)
+            rect = hid.rect
+        _sheet_log(sweep=sweep + 1, empty_answer_lines=empty)
+        if empty:
+            slots, why2, shot = _sheet_page(extra, mon, done, context)
+            slots = [x for x in (slots or []) if _personal_guard(str(x["answer"]), "answer") is None]
+            if slots:
+                show_seen(shot, "screen", "missed on the way down: %d" % len(slots))
+                with _TarHidden():
+                    doc_x = _type_slots(slots, mon)
+                for x in slots:
+                    done.add(_qkey(x.get("question", "")))
+                    answered.append(x)
+        before = os.path.join(DATA, "scroll-before.jpg")
+        after = os.path.join(DATA, "scroll-after.jpg")
+        with _TarHidden() as hid:
+            _shot(before)
+            _move(doc_x, int(mon["height"] * 0.55), mon)
+            sh([_wlrctl(), "pointer", "scroll", str(-int(mon["height"] * 0.55)), "0"])
+            time.sleep(0.5)
+            _shot(after)
+            rect = hid.rect
+        _mask(before, rect, mon)
+        _mask(after, rect, mon)
+        moved, _f = _page_moved(before, after)
+        if not moved:
+            with _TarHidden() as hid:
+                sh(["wtype", "-k", "Prior"])
+                time.sleep(0.15)
+                sh(["wtype", "-k", "Prior"])
+                time.sleep(0.5)
+                _shot(after)
+                rect = hid.rect
+            _mask(after, rect, mon)
+            moved, _f = _page_moved(before, after)
+        if not moved:
+            break                                   # back at the top
     if not answered:
         return "NOT DONE: nothing to answer on screen -- %s" % (why or "no questions found")
     final = os.path.join(DATA, "fill-after.jpg")
