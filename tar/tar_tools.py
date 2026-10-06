@@ -2551,7 +2551,25 @@ def _loc_set(target, x, y, label, drop=False):
         pass
 
 
+_FIELD_WORDS = re.compile(r"\b(cell|field|box|input|text ?area|search ?bar|address bar|"
+                          r"textbox|empty|blank|column|row|form|line)\b", re.I)
+
+
 def a_click_on(args):
+    """click_on + an honest verdict for text fields: clicking into a field or
+    table cell only moves the caret, which barely changes the screen -- that
+    used to read as NOT VERIFIED and made T.A.R. give up on working clicks."""
+    out = _click_on_raw(args)
+    target = str(args.get("target") or args.get("what") or "")
+    if isinstance(out, str) and "NOT VERIFIED: nothing on screen changed" in out \
+            and _FIELD_WORDS.search(target):
+        out = out.split(" -- NOT VERIFIED")[0] + (
+            " -- PROBABLY OK: clicking into a text field/cell only moves the cursor, which "
+            "can't be seen. Type next, then check that the text appeared.")
+    return out
+
+
+def _click_on_raw(args):
     """Click something on screen by description: 'the subscribe button'."""
     target = (args.get("target") or args.get("what") or "").strip()
     if not target:
@@ -2651,6 +2669,64 @@ def a_scroll(args):
         dx = {"right": 1, "left": -1}.get(d, 0) * 15 * n
         sh([_wlrctl(), "pointer", "scroll", str(dy), str(dx)])
     return "scrolled %s %d in %s" % (d, n, _label(w))
+
+
+def a_fill_cells(args):
+    """Fill a table / form the reliable way: click the FIRST cell once, then
+    type each value and press Tab to move to the next cell (Google Docs and
+    Sheets tables, web forms). An empty value skips a cell. Verifies by
+    comparing the screen before and after."""
+    start = (args.get("start") or args.get("target") or args.get("first") or "").strip()
+    raw = args.get("texts") or args.get("values") or args.get("text") or ""
+    if isinstance(raw, list):
+        texts = [str(t) for t in raw]
+    else:
+        raw = str(raw)
+        try:
+            v = json.loads(raw)
+            texts = [str(t) for t in v] if isinstance(v, list) else [raw]
+        except ValueError:
+            texts = [t.strip() for t in raw.split("||")]
+    if not start or not any(t.strip() for t in texts):
+        return "need start=<the first cell to fill> and texts=<value1 || value2 || ...>"
+    if not shutil.which("wtype"):
+        return "wtype isn't installed"
+    for t in texts:
+        stop = _personal_guard(t, start)
+        if stop:
+            return stop
+    nav = {"tab": "Tab", "down": "Down", "enter": "Return"}.get(str(args.get("nav") or "tab").lower(), "Tab")
+    clicked = _click_on_raw({"target": start, "_confirmed": args.get("_confirmed")})
+    if not str(clicked).startswith("clicked"):
+        return clicked
+    time.sleep(0.25)
+    mon = _monitor()
+    b_path = os.path.join(DATA, "fill-before.jpg")
+    a_path = os.path.join(DATA, "fill-after.jpg")
+    with _TarHidden() as hid:
+        have_b = _shot(b_path)
+        typed = 0
+        for i, t in enumerate(texts):
+            if t.strip():
+                sh(["wtype", t], timeout=30)
+                typed += 1
+            if i < len(texts) - 1:
+                sh(["wtype", "-k", nav])
+                time.sleep(0.12)
+        time.sleep(0.5)
+        have_a = _shot(a_path)
+        rect = hid.rect
+    verdict = "(couldn't verify)"
+    if have_b and have_a:
+        _mask(b_path, rect, mon)
+        _mask(a_path, rect, mon)
+        ch = _screen_change(b_path, a_path, 0, 0)
+        if ch is not None:
+            verdict = ("VERIFIED: new text appeared on screen" if ch[1] > 0.002 else
+                       "NOT VERIFIED: the screen didn't change -- the first click probably wasn't "
+                       "inside the table. look, then retry with a clearer start=")
+        show_seen(a_path, "screen", "after filling %d cell%s" % (typed, "" if typed == 1 else "s"))
+    return "%s -- filled %d cell(s), moving with %s -- %s" % (clicked.split(" -- ")[0], typed, nav, verdict)
 
 
 def a_type_into(args):
@@ -3846,6 +3922,9 @@ ACTIONS = {
                     r"(?:to|at|on) (?P<target>.+)$",
                     r"^nuke (?P<target>.+)$",
                     r"^(?:open |show )?(?:the )?(?:missiles?|missels?|nukes?|launch) (?:tab|panel|control|command)$"]),
+    "fill_cells": (a_fill_cells, "fill a TABLE or FORM: start=<first cell to fill> texts=<v1 || v2 || ...> "
+                                 "(nav=tab default; Tab goes left->right then next row; '' skips a cell "
+                                 "that already has text). Use this instead of clicking each cell.", []),
     "camera_live": (a_camera_live, "show the webcam LIVE inside T.A.R. (state=on|off) -- for "
                                    "'show me the camera', 'watch me', 'can you see me'. No app opens.",
                     [r"^(?:show (?:me )?(?:the )?(?:camera|webcam)|watch me|camera on|turn on the camera)$",

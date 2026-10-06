@@ -419,6 +419,16 @@ def live_status():
     return out + "\n- ".join(lines)
 
 
+FORMS_RULE = (
+    "\n\nFILLING TABLES / FORMS / HOMEWORK DOCS: 1) look first and read the questions. "
+    "2) Work out ALL the answers yourself, in the document's language (Hebrew doc -> Hebrew "
+    "answers), short like the cells around them. 3) Call fill_cells ONCE: start=<the first empty "
+    "cell, described by its row and column headers>, texts=<answers in Tab order: left to right, "
+    "then the next row; '' for a cell that already has text>. Never click cells one by one. "
+    "4) look again to check. If it fails twice, give the user the answers as a short list to paste "
+    "-- no coordinates, no long explanations.")
+
+
 def chat(message, model=None, max_turns=6):
     import tar_brain as B
     model = model or B.config().get("cloud_model") or default_model()
@@ -445,6 +455,7 @@ def chat(message, model=None, max_turns=6):
     system = SYSTEM.format(user=cfg.get("user", "the user"), voice=B.voice_block(cfg)) + B.mem_block()
     system += B.act_block_context(n=40, within_s=None)
     system += live_status()
+    system += FORMS_RULE
     system += B.persona_tail(cfg)
 
     history = B.history_tail(int(cfg.get("cloud_history_turns", 40)))
