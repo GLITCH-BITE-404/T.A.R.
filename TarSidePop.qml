@@ -10,6 +10,7 @@ PopupWindow {
     property Item anchorItem
     property bool leftSide: true
     property bool shown: false              // drawer open
+    property bool suppressed: false         // T.A.R. is taking a screenshot
     property real gap: 10
     property real topInset: 6
     default property alias content: holder.data
@@ -26,13 +27,14 @@ PopupWindow {
     color: "transparent"
     grabFocus: false
     // stay mapped until the drawer's close animation has finished
-    visible: shown || closing.running
+    visible: (shown || closing.running) && !suppressed
     onShownChanged: if (!shown) closing.restart()
     Timer { id: closing; interval: 360 }
     // the compositor dismisses popups when you click into another window --
     // if the tab is still meant to be open, put it straight back
-    onVisibleChanged: if (!visible && shown) reshow.restart()
-    Timer { id: reshow; interval: 120; onTriggered: if (pop.shown && !pop.visible) pop.visible = true }
+    onVisibleChanged: if (!visible && shown && !suppressed) reshow.restart()
+    onSuppressedChanged: if (!suppressed && shown) reshow.restart()
+    Timer { id: reshow; interval: 120; onTriggered: if (pop.shown && !pop.suppressed && !pop.visible) pop.visible = true }
 
     Item { id: holder; anchors.fill: parent }
 }

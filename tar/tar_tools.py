@@ -2174,6 +2174,10 @@ class _TarHidden:
     the click lands on the wrong spot. So a tiled T.A.R. stays put and its
     rectangle (self.rect) is masked out / refused instead."""
     def __enter__(self):
+        # T.A.R.'s pop-out side tabs (viewer, tasks, console) sit OVER the
+        # neighbouring app -- hide them for the shot or they block the text
+        emit("ui", action="capture", state="on")
+        time.sleep(0.2)
         self.w = _tar_window()
         self.rect = None
         if self.w:
@@ -2200,6 +2204,7 @@ class _TarHidden:
         if self.w:
             sh(["hyprctl", "dispatch", "movetoworkspacesilent",
                 "%s,address:%s" % (self.ws, self.w["address"])])
+        emit("ui", action="capture", state="off")
         return False
 
 
@@ -2691,17 +2696,24 @@ _SHEET_PROMPT = (
     "This is a screenshot of the user's screen. Find what the user must ANSWER on it: questions in "
     "a document, worksheet or text editor -- empty table cells, 'answer:' lines, blanks after a "
     "question.{extra}\n"
-    "Use ONLY what is visible in this screenshot. Never invent questions or tables that aren't there.\n"
+    "{context}"
+    "Use ONLY what is visible in this screenshot (plus the earlier text above, for reading "
+    "comprehension). Never invent questions or tables that aren't there.\n"
     "Answer each one correctly and concisely, like a strong student, in the language the question "
     "is written in. Reply with ONLY JSON:\n"
     "{{\"found\": true, \"slots\": [{{\"question\": \"<the question as written>\", "
     "\"answer\": \"<your answer>\", \"box\": [ymin, xmin, ymax, xmax], "
-    "\"kind\": \"cell|line|blank\"}}]}}\n"
-    "- box = WHERE THE ANSWER GOES, normalized 0-1000 on the whole screenshot: the empty table "
-    "cell, or the rest of the 'answer:' line (the box should start right after 'answer:'), or the "
-    "empty line under the question.\n"
+    "\"kind\": \"cell|line|inline|below\"}}]}}\n"
+    "- box = WHERE THE ANSWER GOES, normalized 0-1000 on the whole screenshot.\n"
+    "- kind: 'cell' = an empty table cell (box = the cell); 'line' = an 'answer:' line (box = the "
+    "rest of that line after 'answer:'); 'inline' = a blank like ___ INSIDE a sentence (box = "
+    "exactly the ___); 'below' = the empty line under the question (box = that line).\n"
     "- Skip anything already answered.\n"
-    "If nothing on screen needs answering: {{\"found\": false, \"why\": \"<what you see instead>\"}}")
+    "ALWAYS also include \"page_text\": a faithful transcription of the readable text on this screen "
+    "(the story / passage / instructions, up to ~2000 characters) -- it is passed on as context "
+    "when the document is scrolled and the questions about it come later.\n"
+    "If nothing on screen needs answering: {{\"found\": false, \"why\": \"<what you see instead>\", "
+    "\"page_text\": \"...\"}}")
 
 
 def _answer_labels(img_path, sx, sy):
@@ -2732,7 +2744,7 @@ def _qkey(q):
     return " ".join(re.findall(r"\w+", str(q).lower()))[:80]
 
 
-def _sheet_page(extra, mon, done):
+def _sheet_page(extra, mon, done, context=""):
     """One screen: find the questions still to answer (not in `done`), with
     exact spots (OCR-snapped 'answer:' lines). Returns (slots, why, shot)."""
     shot = os.path.join(DATA, "sheet-look.jpg")
@@ -2742,8 +2754,11 @@ def _sheet_page(extra, mon, done):
     if not ok:
         return None, "couldn't take a screenshot", None
     _mask(shot, rect, mon)
-    txt, err = _gemini_image(shot, _SHEET_PROMPT.format(extra=(" The user says: " + extra) if extra else ""),
-                             model=cfg().get("homework_model") or "gemini-3.5-flash", max_tokens=4000)
+    ctx = ("Text from EARLIER in this document (scrolled past -- use it to answer questions "
+           "about the passage):\n\"\"\"\n%s\n\"\"\"\n" % context[-6000:]) if context else ""
+    txt, err = _gemini_image(shot, _SHEET_PROMPT.format(extra=(" The user says: " + extra) if extra else "",
+                                                        context=ctx),
+                             model=cfg().get("homework_model") or "gemini-3.5-flash", max_tokens=6000)
     if err:
         return None, err, shot
     m = re.search(r"\{.*\}", txt or "", re.S)
@@ -2770,6 +2785,7 @@ def _sheet_page(extra, mon, done):
         if best is not None and abs(labels[best][1] - y) < mon["height"] * 0.08:
             used.add(best)
             x["_at"] = (labels[best][0] + 12, labels[best][1])
+    _sheet_page.page_text = str(d.get("page_text") or "")
     return slots, d.get("why") or "", shot
 
 
@@ -2789,11 +2805,18 @@ def _type_slots(slots, mon):
         doc_x = cx
         _move(cx, cy, mon)
         time.sleep(0.1)
-        _click("left", False)
-        time.sleep(0.2)
-        sh(["wtype", "-k", "End"])
         ans = str(x["answer"])
-        sh(["wtype", (" " + ans) if x.get("kind") == "line" else ans], timeout=30)
+        if x.get("kind") == "inline":
+            # a ___ blank inside a sentence: double-click selects the blank,
+            # typing replaces it (End would put the answer after the full stop)
+            _click("left", True)
+            time.sleep(0.2)
+            sh(["wtype", ans], timeout=30)
+        else:
+            _click("left", False)
+            time.sleep(0.2)
+            sh(["wtype", "-k", "End"])
+            sh(["wtype", (" " + ans) if x.get("kind") == "line" else ans], timeout=30)
         time.sleep(0.15)
     return doc_x
 
@@ -2810,10 +2833,29 @@ def a_fill_table(args):
     if extra and extra.lower() not in (USER_SAID or "").lower() and not DIRECT:
         extra = ""
     mon = _monitor()
-    done, answered, pages, why = set(), [], 0, ""
+    done, answered, pages, why, context = set(), [], 0, "", ""
     doc_x = mon["width"] // 2
+    # start from the TOP: the passage the questions are about is usually above them
+    for _ in range(6):
+        b0 = os.path.join(DATA, "scroll-before.jpg")
+        a0 = os.path.join(DATA, "scroll-after.jpg")
+        with _TarHidden() as hid:
+            _shot(b0)
+            _move(doc_x, int(mon["height"] * 0.55), mon)
+            sh([_wlrctl(), "pointer", "scroll", str(-int(mon["height"] * 1.5)), "0"])
+            time.sleep(0.5)
+            _shot(a0)
+            rect = hid.rect
+        _mask(b0, rect, mon)
+        _mask(a0, rect, mon)
+        ch0 = _screen_change(b0, a0, 0, 0)
+        if not ch0 or ch0[1] < 0.01:
+            break
     for page in range(8):
-        slots, why, shot = _sheet_page(extra, mon, done)
+        _sheet_page.page_text = ""
+        slots, why, shot = _sheet_page(extra, mon, done, context)
+        if _sheet_page.page_text:
+            context += "\n" + _sheet_page.page_text
         if slots is None:
             if answered:
                 break
@@ -4417,9 +4459,19 @@ _SELF_CLOSE_ANY = re.compile(r"\b(?:close|quit|exit|kill|pkill|killall|shut ?dow
                              r"(?: -9| -15)? (?:yourself|tar|t\.?\s?a\.?\s?r\.?)(?:[.!?]|$|\s)")
 
 
+_SHEET_ASK = re.compile(r"\b(?:answer|do|solve|complete|fill(?: in| out)?)\b.{0,40}\b(?:questions?|exercises?|"
+                        r"homework|worksheet|table)\b")
+_SHEET_WHERE = re.compile(r"\b(?:doc|docs|document|sheet|worksheet|page|screen|homework|table|file|"
+                          r"under it|below|in it|on it|the questions|these questions|those questions)\b")
+
+
 def match(text):
     """Deterministic intent match. Returns (name, args) or (None, None)."""
     strict = _normalize(text)
+    # "read the doc and answer the questions under it" -> the sheet answerer
+    if len(strict.split()) <= 20 and _SHEET_ASK.search(strict) and _SHEET_WHERE.search(strict) \
+            and not strict.startswith(("what ", "how ", "why ", "who ")):
+        return "fill_table", {}
     # "kill tar" used to mean the `tar` archiver process, "kill t.a.r" a window
     # called t.a.r -- closing T.A.R. itself wins over both
     if _SELF_CLOSE.match(strict) or (len(strict.split()) <= 7 and _SELF_CLOSE_ANY.search(strict)):

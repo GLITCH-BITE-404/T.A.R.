@@ -806,6 +806,11 @@ Item {
             else if (missiles.phase === "idle" || missiles.phase === "impact") missiles.standby();
             return;
         }
+        if (name === "capture") {
+            window.capturing = String(d.state || "on") === "on";
+            if (window.capturing) captureSafety.restart();
+            return;
+        }
         if (name === "selffloat") {
             var st = String(d.state || "float");
             var fl = st === "float" || st === "floating" || st === "on";
@@ -1483,7 +1488,9 @@ Item {
     // bring T.A.R. to YOU: onto the workspace you're looking at (also out of
     // a special/hidden workspace), then focus it
     signal showRequested()
-    signal floatRequested(bool floating)     // "float yourself" / "window mode"
+    signal floatRequested(bool floating)
+    property bool capturing: false            // hide pop-out tabs during T.A.R.'s screenshots
+    Timer { id: captureSafety; interval: 30000; onTriggered: window.capturing = false }     // "float yourself" / "window mode"
     property bool backgrounded: false
     function summon() {
         summonProbe.running = false;
@@ -3301,6 +3308,7 @@ Item {
     // of squeezing the chat -- they flip to the other side when there's no room
     TarSidePop {
         anchorItem: window
+        suppressed: window.capturing
         leftSide: false
         gap: window.s(6)
         topInset: frame.y + window.s(6)
@@ -3346,6 +3354,7 @@ Item {
     // ---- background tasks tab: docks to the right edge while a task runs
     TarSidePop {
         anchorItem: window
+        suppressed: window.capturing
         leftSide: true
         gap: window.s(6)
         topInset: frame.y + window.s(6)
@@ -3366,6 +3375,7 @@ Item {
     // ---- viewer: what T.A.R. just saw (same slot as tasks, left of the panel)
     TarSidePop {
         anchorItem: window
+        suppressed: window.capturing
         leftSide: true
         gap: window.s(6)
         topInset: frame.y + window.s(6)
