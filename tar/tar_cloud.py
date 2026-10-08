@@ -75,15 +75,64 @@ def save_key(provider, key):
         pass
 
 
+# ------------------------------------------------------------------ providers
+# Every cloud brain T.A.R. can use. "gemini" speaks Google's API, "openai" the
+# OpenAI chat format (Groq, Mistral and OpenRouter all do), "anthropic" the
+# Claude SDK. Model ids are "<provider>/<model>" except the original gemini-*
+# and claude-* ones. key_url = where to get a key (all free except Anthropic).
+PROVIDERS = {
+    "google": {"name": "Google Gemini", "kind": "gemini", "free": True,
+               "key_url": "https://aistudio.google.com/apikey", "prefix": "AIza",
+               "env": ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+               "blurb": "the only one that can SEE the screen (clicking, games, vision)"},
+    "groq": {"name": "Groq", "kind": "openai", "free": True,
+             "base": "https://api.groq.com/openai/v1",
+             "key_url": "https://console.groq.com/keys", "prefix": "gsk_", "env": ["GROQ_API_KEY"],
+             "blurb": "very fast · 1,000 requests/day on the big models"},
+    "mistral": {"name": "Mistral", "kind": "openai", "free": True,
+                "base": "https://api.mistral.ai/v1",
+                "key_url": "https://console.mistral.ai/api-keys", "prefix": "", "env": ["MISTRAL_API_KEY"],
+                "blurb": "'Experiment' plan · huge monthly quota (they may train on your chats)"},
+    "openrouter": {"name": "OpenRouter", "kind": "openai", "free": True,
+                   "base": "https://openrouter.ai/api/v1",
+                   "key_url": "https://openrouter.ai/keys", "prefix": "sk-or-",
+                   "env": ["OPENROUTER_API_KEY"],
+                   "blurb": "free models · only 50 requests/day unless you add $10 credit"},
+    "anthropic": {"name": "Anthropic Claude", "kind": "anthropic", "free": False,
+                  "key_url": "https://console.anthropic.com/settings/keys", "prefix": "sk-ant",
+                  "env": ["ANTHROPIC_API_KEY"], "blurb": "strongest at long multi-step work"},
+    "virustotal": {"name": "VirusTotal", "kind": "tool", "free": True,
+                   "key_url": "https://www.virustotal.com/gui/my-apikey", "prefix": "",
+                   "env": ["VT_API_KEY"], "blurb": "lets file scans check 70+ antivirus engines"},
+}
+
+
 def provider_of(model):
-    return "google" if str(model or "").startswith("gemini") else "anthropic"
+    m = str(model or "")
+    if m.startswith("gemini"):
+        return "google"
+    if m.startswith("claude"):
+        return "anthropic"
+    head = m.split("/", 1)[0]
+    return head if head in PROVIDERS else "anthropic"
+
+
+def model_name(model):
+    """The id the provider's API wants (without our provider/ prefix)."""
+    m = str(model or "")
+    head, _, rest = m.partition("/")
+    return rest if head in PROVIDERS and rest else m
 
 
 def key_provider(key):
-    """Which provider a pasted key belongs to. Anthropic keys are sk-ant-..."""
+    """Which provider a pasted key belongs to -- None when it can't be told
+    from the key itself (Mistral keys have no prefix), so the user picks."""
     if re.fullmatch(r"[0-9a-f]{64}", key):
         return "virustotal"
-    return "anthropic" if key.startswith("sk-ant") else "google"
+    for pid in ("anthropic", "openrouter", "groq", "google"):
+        if key.startswith(PROVIDERS[pid]["prefix"]):
+            return pid
+    return None
 
 
 def active_model():
@@ -97,19 +146,15 @@ def active_model():
 
 def api_key(provider=None):
     provider = provider or provider_of(active_model())
-    if provider == "virustotal":
-        return os.environ.get("VT_API_KEY") or load_keys().get("virustotal") or ""
-    if provider == "google":
-        return (os.environ.get("GEMINI_API_KEY")
-                or os.environ.get("GOOGLE_API_KEY")
-                or load_keys().get("google") or "")
-    return (os.environ.get("ANTHROPIC_API_KEY")
-            or load_keys().get("anthropic") or "")
+    for env in PROVIDERS.get(provider, {}).get("env", []):
+        if os.environ.get(env):
+            return os.environ[env]
+    return load_keys().get(provider) or ""
 
 
 def have_sdk(provider=None):
-    if (provider or provider_of(active_model())) == "google":
-        return True                     # Gemini goes over plain urllib
+    if PROVIDERS.get(provider or provider_of(active_model()), {}).get("kind") in ("gemini", "openai"):
+        return True                     # plain urllib, no SDK
     try:
         import anthropic                # noqa: F401
         return True
@@ -123,8 +168,7 @@ def status():
     if not have_sdk(prov):
         return False, "the anthropic SDK isn't installed"
     if not api_key(prov):
-        return False, "no %s API key set" % ("Gemini" if prov == "google"
-                                              else "Anthropic")
+        return False, "no %s API key set -- /key" % PROVIDERS.get(prov, {}).get("name", prov)
     return True, None
 
 
@@ -146,6 +190,31 @@ MODELS = [
     {"id": "gemini-flash-latest", "name": "Gemini Flash",
      "blurb": "Google free tier. Smarter, but only ~5 requests a minute free.",
      "in_per_mtok": 0.0, "out_per_mtok": 0.0},
+    {"id": "gemini-3.5-flash", "name": "Gemini 3.5 Flash",
+     "blurb": "Google free tier. Best free Gemini at games and multi-step tasks.",
+     "in_per_mtok": 0.0, "out_per_mtok": 0.0, "backup": 1},
+    # ---- OpenAI-format providers (free tiers)
+    {"id": "groq/llama-3.3-70b-versatile", "name": "Llama 3.3 70B (Groq)",
+     "blurb": "Free, ~300 tokens/s. Strong all-rounder, 1,000 requests/day.",
+     "in_per_mtok": 0.0, "out_per_mtok": 0.0, "backup": 2},
+    {"id": "groq/openai/gpt-oss-120b", "name": "gpt-oss 120B (Groq)",
+     "blurb": "Free. OpenAI's open model, good reasoning + tools, 1,000/day.",
+     "in_per_mtok": 0.0, "out_per_mtok": 0.0, "backup": 3},
+    {"id": "groq/llama-3.1-8b-instant", "name": "Llama 3.1 8B (Groq)",
+     "blurb": "Free, instant, 14,400 requests/day. Fine for simple commands.",
+     "in_per_mtok": 0.0, "out_per_mtok": 0.0, "backup": 9},
+    {"id": "mistral/mistral-large-latest", "name": "Mistral Large",
+     "blurb": "Free on the Experiment plan. Strong, big monthly quota.",
+     "in_per_mtok": 0.0, "out_per_mtok": 0.0, "backup": 4},
+    {"id": "mistral/mistral-small-latest", "name": "Mistral Small",
+     "blurb": "Free on the Experiment plan. Faster, lighter.",
+     "in_per_mtok": 0.0, "out_per_mtok": 0.0},
+    {"id": "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free", "name": "Nemotron 3 Ultra (OpenRouter)",
+     "blurb": "Free, huge model. 50 requests/day without credit.",
+     "in_per_mtok": 0.0, "out_per_mtok": 0.0, "backup": 5},
+    {"id": "openrouter/google/gemma-4-31b-it:free", "name": "Gemma 4 31B (OpenRouter)",
+     "blurb": "Free, can see images. 50 requests/day without credit.",
+     "in_per_mtok": 0.0, "out_per_mtok": 0.0, "vision": True},
 ]
 
 
@@ -462,7 +531,9 @@ FORMS_RULE = (
 def chat(message, model=None, max_turns=6):
     import tar_brain as B
     model = model or B.config().get("cloud_model") or default_model()
-    if provider_of(model) == "google":
+    if PROVIDERS.get(provider_of(model), {}).get("kind") in ("gemini", "openai"):
+        # one chat loop for both: OpenAI-format providers go through llm_call's
+        # translation, so they get every guard the Gemini path has
         return chat_gemini(message, model, max_turns)
     key = api_key("anthropic")
     if not key:
@@ -604,11 +675,12 @@ def _mark_exhausted(model, retry_s):
 LAST_MODEL = None          # the model that REALLY answered (after any quota fallback)
 
 
-def gemini_call(key, model, body):
+def gemini_call(key, model, body, fallback=True):
     """generateContent with automatic fallback when a model's DAILY free quota
     is used up (remembered until it resets). TTS models don't fall back."""
     gone = _exhausted()
-    chain = [model] + ([m for m in FALLBACK_CHAIN if m != model] if "tts" not in model else [])
+    chain = [model] + ([m for m in FALLBACK_CHAIN if m != model]
+                       if "tts" not in model and fallback else [])
     last = None
     for m in chain:
         if m in gone and m != chain[-1]:
@@ -623,6 +695,8 @@ def gemini_call(key, model, body):
             emit("info", v="%s is out of free requests for today -- switching to %s" % (
                 m, next((x for x in chain[chain.index(m) + 1:] if x not in gone), "nothing")))
             last = e
+    if last and not fallback:
+        raise last                      # llm_call moves on to another provider
     raise RuntimeError("every Gemini model is out of free requests for today -- try again "
                        "later (quota resets daily)" if last else "no Gemini model available")
 
@@ -675,6 +749,201 @@ def _gemini_call_one(key, model, body):
             raise RuntimeError("no connection to Google (%s) -- check your internet"
                                % getattr(e, "reason", e))
     raise RuntimeError("rate limited")
+
+
+# ------------------------------------------------------------------ any provider
+# The chat loop speaks Gemini's request/response shape. llm_call() sends it to
+# whichever provider the model belongs to -- OpenAI-format ones (Groq, Mistral,
+# OpenRouter) get it translated both ways -- and when a model's free daily
+# quota is gone it moves to the strongest model of ANOTHER provider you have a
+# key for, before ever dropping to a weak backup.
+
+def _has_images(body):
+    return any("inline_data" in p or "inlineData" in p
+               for c in body.get("contents", []) for p in c.get("parts", []))
+
+
+def backup_models(model, body=None):
+    """Other models to try, strongest first: only providers with a key, and
+    only image-capable ones when the request carries a screenshot."""
+    imgs = _has_images(body or {})
+    out = []
+    for m in sorted((m for m in MODELS if m.get("backup")), key=lambda m: m["backup"]):
+        p = provider_of(m["id"])
+        if m["id"] == model or not api_key(p) or PROVIDERS[p]["kind"] not in ("gemini", "openai"):
+            continue
+        if imgs and not (p == "google" or m.get("vision")):
+            continue
+        out.append(m["id"])
+    if api_key("google") and "gemini-flash-lite-latest" not in out + [model]:
+        out.append("gemini-flash-lite-latest")    # last resort: Google's own chain
+    return out
+
+
+def llm_call(key, model, body, fallback=True):
+    """Gemini-shaped request -> Gemini-shaped response, from any provider."""
+    global LAST_MODEL
+    chain = [model] + (backup_models(model, body) if fallback else [])
+    gone = _exhausted()
+    last = None
+    for i, m in enumerate(chain):
+        if m in gone and i < len(chain) - 1:
+            continue
+        prov = provider_of(m)
+        k = key if (i == 0 and key and prov == provider_of(model)) else api_key(prov)
+        if not k:
+            continue
+        try:
+            if PROVIDERS[prov]["kind"] == "gemini":
+                # the requested Gemini model alone first; Google's own weaker
+                # fallbacks only when nothing better is left
+                r = gemini_call(k, m, body, fallback=(i == len(chain) - 1))
+            elif PROVIDERS[prov]["kind"] == "openai":
+                r = openai_call(k, m, body)
+                LAST_MODEL = m
+            else:
+                continue
+            return r
+        except _DailyQuota as e:
+            _mark_exhausted(m, e.retry_s)
+            last = e
+        except RuntimeError as e:
+            # out of quota / rate limited -> next provider; anything else (bad
+            # key, broken request) is reported, not hidden behind a fallback
+            if not ("out of free requests" in str(e) or "rate limit" in str(e).lower()) \
+                    or i == len(chain) - 1:
+                raise
+            last = e
+        nxt = next((x for x in chain[i + 1:] if x not in gone and api_key(provider_of(x))), None)
+        if nxt:
+            emit("info", v="%s is out of requests -- switching to %s" % (m, nxt))
+    raise RuntimeError("every model you have a key for is out of free requests today -- "
+                       "add another provider with /key, or try later" if last else
+                       "no cloud model available -- add a key with /key")
+
+
+def _oa_id(i, j):
+    return "c%04d%04d" % (i % 10000, j % 10000)     # 9 chars a-z0-9: Mistral's rule
+
+
+def _to_openai(model, body):
+    msgs = []
+    si = body.get("systemInstruction")
+    if si:
+        msgs.append({"role": "system", "content": "".join(p.get("text", "") for p in si.get("parts", []))})
+    pending = []
+    for i, c in enumerate(body.get("contents", [])):
+        texts, imgs, calls, resps = [], [], [], []
+        for p in c.get("parts", []):
+            if p.get("thought"):
+                continue
+            if "functionCall" in p:
+                calls.append(p["functionCall"])
+            elif "functionResponse" in p:
+                resps.append(p["functionResponse"])
+            elif "inline_data" in p or "inlineData" in p:
+                imgs.append(p.get("inline_data") or p.get("inlineData"))
+            elif p.get("text"):
+                texts.append(p["text"])
+        if resps:
+            for j, r in enumerate(resps):
+                msgs.append({"role": "tool",
+                             "tool_call_id": pending[j] if j < len(pending) else _oa_id(i, j),
+                             "content": str((r.get("response") or {}).get("result", r.get("response")))})
+            pending = []
+            if texts:
+                msgs.append({"role": "user", "content": "\n".join(texts)})
+            continue
+        if c.get("role") == "model":
+            m = {"role": "assistant", "content": "\n".join(texts)}
+            if calls:
+                pending = [_oa_id(i, j) for j in range(len(calls))]
+                m["tool_calls"] = [{"id": pending[j], "type": "function",
+                                    "function": {"name": fc.get("name", ""),
+                                                 "arguments": json.dumps(fc.get("args") or {})}}
+                                   for j, fc in enumerate(calls)]
+            msgs.append(m)
+        elif imgs:
+            msgs.append({"role": "user", "content": [{"type": "text", "text": t} for t in texts] + [
+                {"type": "image_url", "image_url": {"url": "data:%s;base64,%s" % (
+                    d.get("mime_type") or d.get("mimeType") or "image/jpeg", d.get("data", ""))}}
+                for d in imgs]})
+        else:
+            msgs.append({"role": "user", "content": "\n".join(texts)})
+    out = {"model": model_name(model), "messages": msgs}
+    tools = [{"type": "function", "function": {
+        "name": fd["name"], "description": fd.get("description", ""),
+        "parameters": fd.get("parametersJsonSchema") or fd.get("parameters")
+        or {"type": "object", "properties": {}}}}
+        for t in body.get("tools") or [] for fd in t.get("functionDeclarations", [])]
+    if tools:
+        out["tools"] = tools
+    gc = body.get("generationConfig") or {}
+    if gc.get("maxOutputTokens"):
+        out["max_tokens"] = int(gc["maxOutputTokens"])
+    if gc.get("temperature") is not None:
+        out["temperature"] = gc["temperature"]
+    return out
+
+
+def _from_openai(r):
+    msg = ((r.get("choices") or [{}])[0].get("message")) or {}
+    parts = []
+    if msg.get("content"):
+        parts.append({"text": msg["content"]})
+    for tc in msg.get("tool_calls") or []:
+        fn = tc.get("function") or {}
+        try:
+            args = json.loads(fn.get("arguments") or "{}")
+        except ValueError:
+            args = {}
+        parts.append({"functionCall": {"name": fn.get("name", ""), "args": args}})
+    return {"candidates": [{"content": {"role": "model", "parts": parts}}]}
+
+
+def openai_call(key, model, body):
+    """One OpenAI-format chat completion (Groq / Mistral / OpenRouter)."""
+    import time
+    import urllib.error
+    import urllib.request
+    prov = PROVIDERS[provider_of(model)]
+    data = json.dumps(_to_openai(model, body)).encode()
+    for attempt in range(2):
+        req = urllib.request.Request(prov["base"] + "/chat/completions", data=data, headers={
+            "Content-Type": "application/json", "Authorization": "Bearer " + key,
+            "HTTP-Referer": "https://github.com/GLITCH-BITE-404/T.A.R.", "X-Title": "T.A.R."})
+        try:
+            with urllib.request.urlopen(req, timeout=90) as r:
+                return _from_openai(json.loads(r.read().decode()))
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode(errors="replace")
+            low = detail.lower()
+            if e.code == 429 and re.search(r"per day|\brpd\b|daily|free-models-per-day|tokens per month", low):
+                raise _DailyQuota(3600)
+            if e.code == 429 and attempt == 0:
+                wait = min(20, int(float(e.headers.get("retry-after") or 8)))
+                emit("info", v="%s rate limit -- waiting %ds" % (prov["name"], wait))
+                time.sleep(wait)
+                continue
+            if e.code in (500, 502, 503, 504) and attempt == 0:
+                time.sleep(3)
+                continue
+            try:
+                detail = json.loads(detail).get("error", {})
+                detail = detail.get("message", detail) if isinstance(detail, dict) else detail
+            except (ValueError, AttributeError):
+                pass
+            if e.code == 401:
+                raise RuntimeError("%s rejected the API key (401) -- check it with /key" % prov["name"])
+            if e.code == 429:
+                raise RuntimeError("%s rate limit: %s" % (prov["name"], str(detail)[:200]))
+            raise RuntimeError("%s HTTP %d: %s" % (prov["name"], e.code, str(detail)[:300]))
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+            if attempt == 0:
+                time.sleep(2)
+                continue
+            raise RuntimeError("no connection to %s (%s)" % (prov["name"], getattr(e, "reason", e)))
+    raise RuntimeError("%s rate limit" % prov["name"])
 
 
 # A reply that says it DID something while no action ran is a bluff.
@@ -745,7 +1014,7 @@ def self_review(key, model, ask, trace, reply):
     lines = "\n".join("- %s %s -> %s" % (a, json.dumps(g, ensure_ascii=False)[:160], str(r)[:260])
                       for a, g, r in trace)
     try:
-        r = gemini_call(key, model, {"contents": [{"role": "user", "parts": [{"text":
+        r = llm_call(key, model, {"contents": [{"role": "user", "parts": [{"text":
             REVIEW_PROMPT.format(facts=live_status().strip()[:1200], ask=ask[:800], trace=lines,
                                  reply=reply[:600] or "(no reply)")}]}],
             "generationConfig": {"temperature": 0, "maxOutputTokens": 400}})
@@ -775,9 +1044,10 @@ def chat_gemini(message, model, max_turns=10):
     except Exception:
         T.USER_PROFILE = None
 
-    key = api_key("google")
+    key = api_key(provider_of(model))
     if not key:
-        emit("error", v="no Gemini API key set — /key <your-key>")
+        emit("error", v="no %s API key set -- type /key to add one"
+             % PROVIDERS.get(provider_of(model), {}).get("name", "API"))
         return 1
 
     cfg = B.config()
@@ -836,7 +1106,7 @@ def chat_gemini(message, model, max_turns=10):
 
     for _turn in range(max_turns):
         try:
-            resp = gemini_call(key, model, {
+            resp = llm_call(key, model, {
                 "systemInstruction": {"parts": [{"text": system}]},
                 "contents": contents,
                 **({"tools": tools} if tools else {}),
@@ -948,7 +1218,7 @@ def chat_gemini(message, model, max_turns=10):
                 "Now tell me the RESULT of what you just did in 1-2 short sentences, from the "
                 "action results above (what you found / what changed / what failed). Don't "
                 "list action names."}]})
-            r2 = gemini_call(key, model, {"systemInstruction": {"parts": [{"text": system}]},
+            r2 = llm_call(key, model, {"systemInstruction": {"parts": [{"text": system}]},
                                           "contents": contents,
                                           "generationConfig": {"maxOutputTokens": 400}})
             p2 = ((r2.get("candidates") or [{}])[0].get("content") or {}).get("parts") or []
@@ -1210,19 +1480,38 @@ def main():
             emit("error", v="usage: set-key <key>")
             return 2
         k = sys.argv[2].strip()
-        prov = key_provider(k)
+        prov = sys.argv[sys.argv.index("--provider") + 1] if "--provider" in sys.argv else key_provider(k)
+        if prov not in PROVIDERS:
+            # can't tell from the key itself: the UI asks which provider it is
+            emit("key_which", v="which provider is this key for?",
+                 rows=[dict(id=pid, **{k2: p[k2] for k2 in ("name", "free", "blurb", "key_url")})
+                       for pid, p in PROVIDERS.items()])
+            return 0
         save_key(prov, k)
-        if prov == "google" and provider_of(active_model()) != "google":
-            import tar_brain as B
-            cfg = B.config()
-            cfg["cloud_model"] = "gemini-flash-lite-latest"
-            B.save_config(cfg)
-        emit("ok", v="%s API key saved (readable only by you)"
-                     % {"google": "Gemini", "virustotal": "VirusTotal"}.get(prov, "Anthropic"))
+        P = PROVIDERS[prov]
+        import tar_brain as B
+        cfg = B.config()
+        if P["kind"] in ("gemini", "openai", "anthropic") and not api_key(provider_of(active_model())):
+            # the current brain has no key -> use the new provider's best model
+            best = next((m["id"] for m in sorted(MODELS, key=lambda m: m.get("backup") or 99)
+                         if provider_of(m["id"]) == prov), None)
+            if best:
+                cfg["cloud_model"] = best
+                B.save_config(cfg)
+        emit("ok", v="%s key saved (only readable by you)%s" % (
+            P["name"], "" if P["kind"] == "tool" else
+            " -- it's now a backup brain when another runs out" if provider_of(active_model()) != prov
+            else " -- answering with " + active_model()), provider=prov)
+
+    elif cmd == "providers":
+        # for /key and the CLOUD tab: every provider + whether its key is set
+        emit("providers", rows=[dict(id=pid, has_key=bool(api_key(pid)),
+                                     **{k2: p[k2] for k2 in ("name", "kind", "free", "blurb", "key_url")})
+                                for pid, p in PROVIDERS.items()])
 
     elif cmd == "clear-key":
         keys = load_keys()
-        keys.pop(provider_of(active_model()), None)
+        keys.pop(sys.argv[2] if len(sys.argv) > 2 else provider_of(active_model()), None)
         os.makedirs(DATA, exist_ok=True)
         with open(KEYS_PATH, "w", encoding="utf-8") as f:
             json.dump(keys, f)
@@ -1243,7 +1532,8 @@ def main():
             return 1
         t0 = time.time()
         try:
-            r = gemini_call(key, active_model(), {"contents": [{"parts": [{"text": "Reply with exactly: online"}]}]})
+            r = llm_call(key, active_model(), {"contents": [{"parts": [{"text": "Reply with exactly: online"}]}]},
+                         fallback=False)
             txt = "".join(p.get("text", "") for p in r["candidates"][0]["content"]["parts"]).strip()
             emit("acted", v="VERIFIED: %s answered %r in %.1fs" % (active_model(), txt[:30], time.time() - t0))
         except Exception as e:

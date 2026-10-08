@@ -687,7 +687,7 @@ Item {
         { cmd: "new",      args: "",            desc: "start a new chat" },
         { cmd: "wake",     args: "[off]",       desc: "\"hey jarvis\" wake word on/off" },
         { cmd: "persona",  args: "<how to talk> | reset", desc: "change how T.A.R. talks" },
-        { cmd: "key",      args: "<api-key>",   desc: "save your Anthropic API key" },
+        { cmd: "key",      args: "",            desc: "add an API key: pick Gemini, Groq, Mistral, OpenRouter…" },
         { cmd: "model",    args: "<name>",      desc: "pin a specific local model" },
         { cmd: "auto",     args: "",            desc: "back to automatic model choice" },
         { cmd: "lane",     args: "safe|open",   desc: "stock or abliterated local models" },
@@ -1368,17 +1368,32 @@ Item {
             window.say("tar", d.label + " has no engine installed. Pick one and "
                      + "I'll install it:");
             window.choiceOpen = true;
+        } else if (d.t === "providers") {
+            window.cloudProviders = d.rows || [];
+            if (window.keyPickerWanted) {
+                window.keyPickerWanted = false;
+                window.say("tar", "Which service is the key for? Pick one -- I'll give you "
+                         + "the link to get a free key.");
+                window.fillKeyChoices(window.cloudProviders, "key");
+            }
+        } else if (d.t === "key_which") {
+            // pasted a key we can't recognise (Mistral has no prefix): ask
+            window.cloudProviders = d.rows || window.cloudProviders;
+            window.say("tar", "I can't tell which service that key is for -- pick one:");
+            window.fillKeyChoices(window.cloudProviders, "key");
         } else if (d.t === "ok") {
             window.say("sys", d.v || "ok");
             window.flashSetup();
             window.capsRefresh();
             window.consoleRefresh();      // a saved key flips cloud rows to ready
+            if (d.provider) window.providersRefresh();
         } else if (d.t === "error") {
             window.say("sys", "caps: " + (d.v || "failed"));
             window.capBusy = ""; window.capPct = -1;
         }
     }
     function consoleRefresh() {
+        window.providersRefresh();
         window.panelRun(["models"]);
         window.panelRun(["mem", "list"]);
     }
@@ -1901,9 +1916,51 @@ Item {
             + "/.config/hypr/scripts/quickshell/tar/tar_cloud.py"].concat(args);
         cloudProc.running = true;
     }
-    function setApiKey(k) {
-        window.cloudRun(["set-key", k]);
-        window.say("sys", "key saved — /cloud to switch the brain over.");
+    // ---- API keys: /key shows the providers, you pick one, then paste the key
+    property var cloudProviders: []         // from `tar_cloud.py providers`
+    property string keyProvider: ""         // set = the next thing you type is a key
+    property string pendingKey: ""          // pasted key whose provider we must ask
+    property bool keyPickerWanted: false
+    function setApiKey(k, prov) {
+        window.cloudRun(prov ? ["set-key", k, "--provider", prov] : ["set-key", k]);
+    }
+    function providersRefresh() { window.cloudRun(["providers"]); }
+    function showKeyPicker() {
+        window.keyPickerWanted = true;
+        window.providersRefresh();
+    }
+    function fillKeyChoices(rows, title) {
+        choiceModel.clear();
+        for (var i = 0; i < rows.length; i++) {
+            var r = rows[i];
+            choiceModel.append({
+                cap: "__key__", engine: r.id, ready: !!r.has_key,
+                title: r.name + (r.has_key ? "   ✓ key set" : ""),
+                sub: r.free ? "free" : "paid",
+                desc: r.blurb || ""
+            });
+        }
+        window.choiceTitle = title;
+        window.choiceOpen = true;
+    }
+    function askKeyFor(id) {
+        var p = null;
+        for (var i = 0; i < window.cloudProviders.length; i++)
+            if (window.cloudProviders[i].id === id) p = window.cloudProviders[i];
+        if (window.pendingKey !== "") {          // key already pasted: just file it
+            window.setApiKey(window.pendingKey, id);
+            window.pendingKey = "";
+            return;
+        }
+        window.keyProvider = id;
+        window.say("tar", "Paste your " + (p ? p.name : id) + " key below and press Enter "
+                 + "(Esc cancels).\nGet one here: " + (p ? p.key_url : ""));
+        input.forceActiveFocus();
+    }
+    function openLinkUrl(url) { window.openLink(url); }
+    function copyText(t) {
+        Quickshell.execDetached(["sh", "-c", "printf %s \"$1\" | wl-copy", "sh", t]);
+        window.say("sys", "copied: " + t);
     }
 
     function stopGeneration() {
@@ -1963,6 +2020,14 @@ Item {
     function submit(raw) {
         var text = (raw || "").trim();
         if (text === "" || window.busy) return;
+        if (window.keyProvider !== "" && text.charAt(0) !== "/") {
+            // waiting for a key: save it, never show or send it as a message
+            input.text = "";
+            window.setApiKey(text, window.keyProvider);
+            window.keyProvider = "";
+            return;
+        }
+        window.keyProvider = "";
         window.shutUp();                // stop talking when you start typing
         input.text = "";
         cmdModel.clear();
@@ -1989,8 +2054,8 @@ Item {
                 return;
             }
             if (cmd === "key") {
-                if (!arg) { window.say("sys", "usage: /key <your-api-key>");
-                            return; }
+                if (!arg) { window.showKeyPicker(); return; }
+                window.pendingKey = arg;          // filed once we know the provider
                 window.setApiKey(arg);
                 return;
             }
@@ -3046,7 +3111,8 @@ Item {
                                 }
                             }
                             Text {
-                                text: model.ready ? "USE" : "INSTALL"
+                                text: model.cap === "__key__" ? (model.ready ? "REPLACE" : "ADD KEY")
+                                    : (model.ready ? "USE" : "INSTALL")
                                 color: model.ready ? theme.green : window.accent
                                 font.family: "JetBrains Mono"
                                 font.pixelSize: window.s(9)
@@ -3060,6 +3126,10 @@ Item {
                             cursorShape: Qt.PointingHandCursor
                             onClicked: {
                                 window.choiceOpen = false;
+                                if (model.cap === "__key__") {
+                                    window.askKeyFor(model.engine);
+                                    return;
+                                }
                                 if (model.cap === "__model__") {
                                     if (model.engine === "__keep__") {
                                         window.say("sys", "staying on the "
@@ -3147,7 +3217,9 @@ Item {
                         color: theme.text
                         font.family: "JetBrains Mono"
                         font.pixelSize: window.s(13)
-                        placeholderText: window.busy ? "" : "ask_"
+                        placeholderText: window.busy ? "" : (window.keyProvider !== ""
+                                         ? "paste your key + enter (hidden)" : "ask_")
+                        echoMode: window.keyProvider !== "" ? TextInput.Password : TextInput.Normal
                         placeholderTextColor: theme.overlay0
                         verticalAlignment: TextInput.AlignVCenter
                         enabled: !window.busy
@@ -3192,7 +3264,11 @@ Item {
                             event.accepted = true;
                         }
                         Keys.onEscapePressed: (event) => {
-                            if (window.cmdOpen) { cmdModel.clear(); }
+                            if (window.keyProvider !== "") {
+                                window.keyProvider = ""; input.text = "";
+                                window.say("sys", "key entry cancelled");
+                            }
+                            else if (window.cmdOpen) { cmdModel.clear(); }
                             else { window.escapeLayer(); }
                             event.accepted = true;
                         }
@@ -3441,7 +3517,12 @@ Item {
         onUndoRequested: window.panelRun(["undo"])
         onClosed: window.consoleOpen = false
         onSetBackend: (which) => window.capsRun(["backend", which])
-        onSetKey: (k) => window.setApiKey(k)
+        onSetKey: (k) => { window.pendingKey = k; window.setApiKey(k); }
+        providers: window.cloudProviders
+        onSetProviderKey: (id, k) => window.setApiKey(k, id)
+        onOpenUrl: (u) => window.openLinkUrl(u)
+        onCopyUrl: (u) => window.copyText(u)
+        onClearProviderKey: (id) => window.cloudRun(["clear-key", id])
     }
     }
 

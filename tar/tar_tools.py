@@ -1926,15 +1926,17 @@ def a_research(args):
         import tar_cloud as C
     except ImportError:
         return "NOT DONE: research needs the cloud backend"
-    key = C.api_key("google")
+    model = cfg().get("cloud_model") or "gemini-flash-lite-latest"
+    key = C.api_key(C.provider_of(model)) or C.api_key("google")
     if not key:
-        return "NOT DONE: research needs a Gemini key (/key <key>)"
+        return "NOT DONE: research needs a cloud key -- type /key"
+    if not C.api_key(C.provider_of(model)):
+        model = "gemini-flash-lite-latest"
     src = "\n\n".join("[%d] %s (%s)\n%s" % (i + 1, t, u, txt or "(page could not be read)")
                       for i, ((t, u), txt) in enumerate(read))
     prompt = _research_prompt(q) + "\n\nSources:\n" + src
-    model = cfg().get("cloud_model") or "gemini-flash-lite-latest"
     try:
-        r = C.gemini_call(key, model, {"contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        r = C.llm_call(key, model, {"contents": [{"role": "user", "parts": [{"text": prompt}]}],
                                        "generationConfig": {"maxOutputTokens": 3000, "temperature": 0.2}})
     except Exception as e:
         return "NOT DONE: couldn't summarise (%s). Top links: %s" % (
@@ -1984,7 +1986,8 @@ def _research_grounded(q, cache, cache_p, key_q):
         return "NOT DONE: web search failed (no internet?) and there's no Gemini key"
     emit("info", v="searching with Google for %s…" % q[:60])
     try:
-        r = C.gemini_call(key, cfg().get("cloud_model") or "gemini-flash-lite-latest", {
+        gm = cfg().get("cloud_model") or ""
+        r = C.gemini_call(key, gm if gm.startswith("gemini") else "gemini-flash-lite-latest", {
             "contents": [{"role": "user", "parts": [{"text": _research_prompt(q).replace(
                 "using ONLY the sources", "searching the web first")}]}],
             "tools": [{"google_search": {}}],

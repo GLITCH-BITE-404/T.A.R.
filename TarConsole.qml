@@ -43,6 +43,12 @@ Item {
     signal closed()
     signal setBackend(string which)       // "claude" (cloud) | "local"
     signal setKey(string key)
+    // per-provider keys (CLOUD tab)
+    property var providers: []            // [{id, name, kind, free, blurb, key_url, has_key}]
+    signal setProviderKey(string id, string key)
+    signal clearProviderKey(string id)
+    signal openUrl(string url)
+    signal copyUrl(string url)
 
     onOpenChanged: if (open) { tab = cloudOn ? "cloud" : "local"; refreshRequested() }
 
@@ -279,7 +285,7 @@ Item {
                             anchors.leftMargin: con.s(8)
                             anchors.verticalCenter: parent.verticalCenter
                             visible: keyIn.text === "" && !keyIn.activeFocus
-                            text: "paste API key + enter (gemini or sk-ant-)"
+                            text: "paste any key + enter (I'll ask which)"
                             color: con.theme.overlay0
                             font.family: "JetBrains Mono"
                             font.pixelSize: con.s(9)
@@ -289,8 +295,155 @@ Item {
             }
 
             // ======================================================== MODEL
+            // ============================================ CLOUD PROVIDERS
+            // one block per service: key status, KEY / GET KEY / COPY LINK,
+            // then that service's models (tap one to make it the brain)
+            Repeater {
+                model: con.tab === "cloud" ? con.providers : []
+                delegate: TarConsoleSection {
+                    id: provSec
+                    required property var modelData
+                    readonly property var p: modelData
+                    property bool keyOpen: false
+                    width: body.width
+                    theme: con.theme; accent: con.accent; scaleFn: con.scaleFn
+                    title: p.name.toUpperCase()
+                    note: (p.free ? "free" : "paid") + "  ·  " + (p.has_key ? "● key set" : "no key yet")
+
+                    Column {
+                        width: parent.width
+                        spacing: con.s(6)
+
+                        Text {
+                            width: parent.width
+                            text: provSec.p.blurb || ""
+                            color: con.theme.overlay0
+                            font.family: "JetBrains Mono"
+                            font.pixelSize: con.s(8)
+                            wrapMode: Text.Wrap
+                        }
+                        Flow {
+                            width: parent.width
+                            spacing: con.s(6)
+                            TarConsoleChip {
+                                theme: con.theme; accent: con.accent; scaleFn: con.scaleFn
+                                text: provSec.p.has_key ? "NEW KEY" : "ADD KEY"
+                                active: provSec.keyOpen
+                                onTapped: { provSec.keyOpen = !provSec.keyOpen;
+                                            if (provSec.keyOpen) provKey.forceActiveFocus(); }
+                            }
+                            TarConsoleChip {
+                                theme: con.theme; accent: con.accent; scaleFn: con.scaleFn
+                                text: "GET KEY ↗"
+                                onTapped: con.openUrl(provSec.p.key_url)
+                            }
+                            TarConsoleChip {
+                                theme: con.theme; accent: con.accent; scaleFn: con.scaleFn
+                                text: "COPY LINK"
+                                onTapped: con.copyUrl(provSec.p.key_url)
+                            }
+                            TarConsoleChip {
+                                visible: provSec.p.has_key
+                                theme: con.theme; accent: con.accent; scaleFn: con.scaleFn
+                                text: "REMOVE"
+                                onTapped: con.clearProviderKey(provSec.p.id)
+                            }
+                        }
+                        Rectangle {
+                            visible: provSec.keyOpen
+                            width: parent.width
+                            height: con.s(26)
+                            color: "transparent"
+                            border.width: 1
+                            border.color: Qt.rgba(con.accent.r, con.accent.g, con.accent.b, 0.7)
+                            TextInput {
+                                id: provKey
+                                anchors.fill: parent
+                                anchors.leftMargin: con.s(8)
+                                anchors.rightMargin: con.s(8)
+                                verticalAlignment: TextInput.AlignVCenter
+                                echoMode: TextInput.Password
+                                color: con.theme.text
+                                font.family: "JetBrains Mono"
+                                font.pixelSize: con.s(10)
+                                clip: true
+                                onAccepted: {
+                                    if (text.trim() !== "") con.setProviderKey(provSec.p.id, text.trim());
+                                    text = "";
+                                    provSec.keyOpen = false;
+                                }
+                                Keys.onEscapePressed: { text = ""; provSec.keyOpen = false; }
+                            }
+                            Text {
+                                anchors.left: parent.left
+                                anchors.leftMargin: con.s(8)
+                                anchors.verticalCenter: parent.verticalCenter
+                                visible: provKey.text === ""
+                                text: "paste " + provSec.p.name + " key + enter"
+                                color: con.theme.overlay0
+                                font.family: "JetBrains Mono"
+                                font.pixelSize: con.s(9)
+                            }
+                        }
+
+                        // this provider's models
+                        Repeater {
+                            model: con.modelsModel
+                            delegate: Rectangle {
+                                id: crow
+                                required property string name
+                                required property string tier
+                                required property string lane
+                                required property bool installed
+                                required property bool active
+                                required property string desc
+                                readonly property string mName: name
+                                readonly property string mDesc: desc
+                                readonly property bool mActive: active
+                                readonly property bool mHave: installed
+                                width: parent ? parent.width : 0
+                                visible: tier === "cloud" && lane === provSec.p.id
+                                height: visible ? con.s(40) : 0
+                                color: crow.mActive
+                                    ? Qt.rgba(con.accent.r, con.accent.g, con.accent.b, 0.16)
+                                    : (chov.hovered ? Qt.rgba(con.theme.surface0.r, con.theme.surface0.g,
+                                                              con.theme.surface0.b, 0.55) : "transparent")
+                                Rectangle { width: con.s(2); height: parent.height; color: con.accent
+                                            visible: crow.mActive }
+                                Column {
+                                    anchors.left: parent.left; anchors.right: parent.right
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    anchors.leftMargin: con.s(10); anchors.rightMargin: con.s(8)
+                                    Text {
+                                        width: parent.width
+                                        text: (crow.mActive ? "> " : "") + crow.mName
+                                        color: crow.mActive ? con.theme.text
+                                             : (crow.mHave ? con.theme.subtext0 : con.theme.overlay0)
+                                        font.family: "JetBrains Mono"; font.pixelSize: con.s(10)
+                                        elide: Text.ElideRight
+                                    }
+                                    Text {
+                                        width: parent.width
+                                        text: crow.mHave ? crow.mDesc : "add a key to use this"
+                                        color: con.theme.overlay0
+                                        font.family: "JetBrains Mono"; font.pixelSize: con.s(8)
+                                        elide: Text.ElideRight
+                                    }
+                                }
+                                HoverHandler { id: chov }
+                                TapHandler {
+                                    onTapped: crow.mHave ? con.pinModel(crow.mName)
+                                                         : (provSec.keyOpen = true)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             TarConsoleSection {
                 width: body.width
+                visible: con.tab === "local"
                 theme: con.theme; accent: con.accent; scaleFn: con.scaleFn
                 title: con.tab === "cloud" ? "CLOUD MODELS" : "MODEL"
                 note: con.tab === "cloud" ? "tap to switch the brain"
