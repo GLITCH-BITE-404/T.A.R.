@@ -170,8 +170,16 @@ Scope {
                 dock.showReply = true;
                 replyTimer.restart();
             }
+            // a new question wipes the old answer -- it must never look like
+            // the reply to what you just asked
             function onLastUserChanged() {
-                if (mini.host.lastUser) dock.asked = mini.host.lastUser;
+                if (!mini.host.lastUser) return;
+                dock.asked = mini.host.lastUser;
+                dock.reply = "";
+                dock.showReply = false;
+            }
+            function onBusyChanged() {
+                if (mini.host.busy) dock.showReply = false;
             }
         }
         Timer { id: replyTimer; interval: 9000; onTriggered: dock.showReply = false }
@@ -180,6 +188,8 @@ Scope {
             var t = input.text.trim();
             if (t === "" || !mini.host) return;
             dock.asked = t;
+            dock.reply = "";
+            dock.showReply = false;
             mini.host.submit(t);
             input.text = "";
         }
@@ -351,6 +361,11 @@ Scope {
                     text: "you: " + dock.asked
                     color: theme.overlay1; font.family: "JetBrains Mono"; font.pixelSize: 10
                     wrapMode: Text.Wrap; maximumLineCount: 3; elide: Text.ElideRight
+                }
+                Text {
+                    visible: dock.reply === "" && dock.busy
+                    text: "thinking…"
+                    color: theme.overlay1; font.family: "JetBrains Mono"; font.pixelSize: 11
                 }
                 Flickable {
                     visible: dock.reply !== ""

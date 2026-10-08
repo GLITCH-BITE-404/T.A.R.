@@ -2437,7 +2437,7 @@ def a_keep_doing(args):
     # check in now and then to make decisions
     every = max(3, min(300, _int(args.get("every"), 15 if autoclick else 3)))
     minutes = max(1, min(120, _int(args.get("minutes"), 20)))
-    win = target_window({"what": args.get("app") or args.get("window")} if (
+    win = args.get("_win") or target_window({"what": args.get("app") or args.get("window")} if (
         args.get("app") or args.get("window")) else {})
     if win and not window_on_screen(win)[0]:
         sh(["hyprctl", "dispatch", "focuswindow", "address:" + win["address"]])
@@ -2499,6 +2499,56 @@ def cursor_pos():
         return int(float(x)), int(float(y))
     except ValueError:
         return None
+
+
+# Web games T.A.R. knows how to play without asking the model what to do first.
+GAMES = {
+    "cookie clicker": {"url": "https://orteil.dashnet.org/cookieclicker/",
+                       "title": "cookie", "autoclick": "the big cookie", "every": 15,
+                       "task": "Play Cookie Clicker: buy the best building or upgrade you can "
+                               "afford right now (the lit-up ones on the right). Close popups."},
+}
+_GAME_ALIASES = {"cookieclicker": "cookie clicker", "cookie clicker game": "cookie clicker",
+                 "cookies": "cookie clicker", "the cookie game": "cookie clicker"}
+
+
+def _game_window(g):
+    for w in _clients():
+        if _is_browser(w) and GAMES[g]["title"] in (w.get("title") or "").lower():
+            return w
+    return None
+
+
+def a_play_game(args):
+    """Open (or find) a known web game and start playing it in the background."""
+    name = (args.get("game") or args.get("what") or "").strip().lower()
+    name = _GAME_ALIASES.get(name, name)
+    if name in ("", "it", "this", "that", "the game"):
+        open_games = [g for g in GAMES if _game_window(g)]
+        if len(open_games) != 1:
+            return "don't know how to play that -- which game?"
+        name = open_games[0]
+    if name not in GAMES:
+        return "don't know how to play %r on my own yet" % name
+    g = GAMES[name]
+    w = _game_window(name)
+    if not w:
+        open_url(g["url"], None)
+        for _ in range(20):             # wait for the page to load
+            time.sleep(0.5)
+            w = _game_window(name)
+            if w:
+                break
+        if not w:
+            return "could not open %s -- the page didn't load" % name
+    sh(["hyprctl", "dispatch", "focuswindow", "address:" + w["address"]])
+    time.sleep(0.4)
+    minutes = _int(args.get("minutes"), 20)
+    out = a_keep_doing({"task": g["task"], "autoclick": g.get("autoclick", ""),
+                        "every": g.get("every", 15), "minutes": minutes, "_win": w})
+    return "playing %s in %r for %d min (autoclicking %s, buying every %ds) -- %s" % (
+        name, (w.get("title") or "")[:40], minutes, g.get("autoclick") or "nothing",
+        g.get("every", 15), "VERIFIED" if "started" in out else out)
 
 
 def a_stop_task(_):
@@ -4950,6 +5000,14 @@ ACTIONS = {
                     r"ransomware|dangerous|infected|malicious)\??$",
                     r"^(?:does|do) (?:the |my |this |that )?(?P<path>.+?) (?:contain|have) (?:any )?"
                     r"(?:viruses|a virus|virus|malware|ransomware)\??$"]),
+    "play_game":  (a_play_game, "play a web game T.A.R. knows (cookie clicker) on its own in the "
+                                "background: opens/finds it, autoclicks and buys upgrades. game=, "
+                                "minutes= (default 20). Use this instead of keep_doing for these.",
+                   [r"^(?:(?:can|could) you |please |go |now )?(?:play|keep playing|start playing|"
+                    r"continue playing|go play) (?:the game |game )?(?P<game>cookie ?clicker(?: game)?|"
+                    r"the cookie game|it|that|the game)(?: for (?P<minutes>\d+) ?min(?:ute)?s?)?"
+                    r"(?: for me)?(?: please)?$",
+                    r"^(?:keep playing|continue playing|play for me)$"]),
     "weather":    (a_weather, "current weather (place= optional)",
                    [r"^(?:what'?s the )?weather(?: like)?(?: in (?P<place>.+))?$"]),
     "datetime":   (a_datetime, "current date and time",
@@ -5357,7 +5415,7 @@ def match(text):
     return None, None
 
 
-_PRIORITY = ("research", "virus_scan", "selfie", "evil", "missiles", "camera_live", "devices", "now_playing", "note", "stopwatch", "focus", "coin", "dice", "record", "remind", "wifi", "bluetooth", "dnd", "nightlight", "power",
+_PRIORITY = ("play_game", "research", "virus_scan", "selfie", "evil", "missiles", "camera_live", "devices", "now_playing", "note", "stopwatch", "focus", "coin", "dice", "record", "remind", "wifi", "bluetooth", "dnd", "nightlight", "power",
              "play", "weather", "datetime", "battery", "calc", "processes",
              "colorpick", "cliphist")
 
