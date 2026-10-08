@@ -930,6 +930,28 @@ def history_append(role, content):
         pass
 
 
+def history_rewind(n_user):
+    """Forget the last `n_user` user messages and everything after the first of
+    them (an edited message replaces what followed it, like ChatGPT)."""
+    p = session_path()
+    try:
+        with open(p, encoding="utf-8") as fh:
+            lines = fh.readlines()
+    except OSError:
+        return 0
+    idx = [i for i, ln in enumerate(lines) if '"role": "user"' in ln]
+    if n_user <= 0 or not idx:
+        return 0
+    cut = idx[-min(n_user, len(idx))]
+    try:
+        with open(p + ".tmp", "w", encoding="utf-8") as fh:
+            fh.writelines(lines[:cut])
+        os.replace(p + ".tmp", p)
+    except OSError:
+        return 0
+    return len(lines) - cut
+
+
 # ----------------------------------------------------------------- chat
 
 # Models emit the bracketed form when they follow instructions, and a bare
@@ -1623,6 +1645,8 @@ def main():
     sub.add_parser("sessions", help="list past conversations")
     sub.add_parser("session-new", help="start a fresh conversation")
     sub.add_parser("session-auto", help="new conversation if the current one is idle 30+ min")
+    p = sub.add_parser("rewind", help="forget the last N user messages and what followed (edit)")
+    p.add_argument("n", type=int)
     p = sub.add_parser("session-open", help="reopen a past conversation")
     p.add_argument("id")
     p = sub.add_parser("mem")
@@ -1827,6 +1851,9 @@ def main():
 
     elif a.cmd == "sessions":
         emit("sessions", rows=session_list())
+
+    elif a.cmd == "rewind":
+        emit("rewound", n=history_rewind(a.n))
 
     elif a.cmd == "session-auto":
         if session_auto():

@@ -587,6 +587,9 @@ def _mark_exhausted(model, retry_s):
         pass
 
 
+LAST_MODEL = None          # the model that REALLY answered (after any quota fallback)
+
+
 def gemini_call(key, model, body):
     """generateContent with automatic fallback when a model's DAILY free quota
     is used up (remembered until it resets). TTS models don't fall back."""
@@ -597,7 +600,10 @@ def gemini_call(key, model, body):
         if m in gone and m != chain[-1]:
             continue
         try:
-            return _gemini_call_one(key, m, body)
+            r = _gemini_call_one(key, m, body)
+            global LAST_MODEL
+            LAST_MODEL = m
+            return r
         except _DailyQuota as e:
             _mark_exhausted(m, e.retry_s)
             emit("info", v="%s is out of free requests for today -- switching to %s" % (
@@ -947,7 +953,8 @@ def chat_gemini(message, model, max_turns=10):
     B._speak(reply)
 
     emit("state", v="idle")
-    emit("done", reply=reply, model=model,
+    used = LAST_MODEL or model
+    emit("done", reply=reply, model=used, asked=model, downgraded=(used != model),
          ms=int((time.time() - started) * 1000),
          first_token_ms=int((first or 0) * 1000),
          saved=None, task="chat", acted=(acted or None), backend="gemini")

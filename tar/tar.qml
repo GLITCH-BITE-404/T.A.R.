@@ -452,7 +452,8 @@ Item {
     Behavior on accent { ColorAnimation { duration: 450 } }
 
     readonly property string brandLine: cloudMode
-        ? "T.A.R. // CLOUD \u2014 " + String(cloudModel).replace("claude-", "")
+        ? "T.A.R. // CLOUD \u2014 " + String(usedModel || cloudModel).replace("claude-", "")
+          + (usedModel && usedModel !== cloudModel ? "  (backup)" : "")
         : "T.A.R. AIN'T RESTRICTED"
 
     // The host decides what closing means: the harness quits the process, the
@@ -668,6 +669,8 @@ Item {
     }
 
     ListModel { id: chatModel }
+    property string usedModel: ""            // model of the last cloud reply
+    property string lastDowngrade: ""
     ListModel { id: sessionsModel }
     ListModel { id: choiceModel }
 
@@ -898,7 +901,7 @@ Item {
             orbView.showToast(text, who === "act" ? "act"
                             : (window.mode === "error" ? "error" : "sys"));
         }
-        chatModel.append({ who: who, text: text });
+        chatModel.append({ who: who, text: text, via: "" });
         window.scrollToEnd();
         scrollPin.restart();          // keep pinned while the text wraps
         if (who === "you") { window.lastUser = text; window.lastReply = ""; }
@@ -1047,6 +1050,19 @@ Item {
         } else if (d.t === "nomatch") {
             // nothing: the brain falls through to inference on its own
         } else if (d.t === "done") {
+            // which Gemini model REALLY answered (it drops to a backup model
+            // when the daily free quota runs out)
+            if (d.backend === "gemini" && d.model) {
+                var tagAt = window.streamIndex >= 0 ? window.streamIndex : chatModel.count - 1;
+                if (tagAt >= 0 && chatModel.get(tagAt).who === "tar")
+                    chatModel.setProperty(tagAt, "via", d.model + (d.downgraded ? "  (backup)" : ""));
+                if (d.downgraded && window.lastDowngrade !== d.model) {
+                    window.lastDowngrade = d.model;
+                    say("sys", String(d.asked).replace("gemini-", "") + " is out of free requests for today -- "
+                        + "answered with " + String(d.model).replace("gemini-", "") + " (a weaker backup)");
+                }
+                window.usedModel = d.model;
+            }
             if (window.streamIndex >= 0) {
                 // the brain has stripped the action directives by now, so the
                 // final text is authoritative over anything we streamed
@@ -1148,6 +1164,28 @@ Item {
         stdout: SplitParser { splitMarker: "\n"; onRead: data => window.handlePanelLine(data) }
         onExited: (code, status) => { window.panelBusy = false; window.panelNext(); }
     }
+    // ---- copy / edit a message (like ChatGPT)
+    function copyMessage(i) {
+        var t = chatModel.get(i).text || "";
+        Quickshell.execDetached(["wl-copy", "--", t]);
+        window.statusNote = "\u2713 copied";
+    }
+    function editMessage(i) {
+        if (window.busy) return;
+        var t = chatModel.get(i).text || "";
+        // the edited message replaces itself and everything after it
+        var users = 0;
+        for (var k = i; k < chatModel.count; k++)
+            if (chatModel.get(k).who === "you") users++;
+        chatModel.remove(i, chatModel.count - i);
+        window.streamIndex = -1;
+        if (users > 0) window.panelRun(["rewind", String(users)]);
+        window.draft = t.replace(/^\u{f036c} /u, "");      // drop the mic marker
+        input.forceActiveFocus();
+        input.cursorPosition = input.text.length;
+        window.statusNote = "editing -- change it and press Enter";
+    }
+
     function panelRun(args) {
         window.panelQueue.push(args);
         window.panelNext();
@@ -2739,8 +2777,10 @@ Item {
                 ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
                 delegate: RowLayout {
+                    id: msgRow
                     width: transcript.width
                     spacing: window.s(10)
+                    HoverHandler { id: msgHover }
 
                     // left accent rail
                     Rectangle {
@@ -2761,6 +2801,9 @@ Item {
                         Layout.fillWidth: true
                         spacing: window.s(3)
 
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: window.s(8)
                         Text {
                             text: model.who === "you" ? "YOU"
                                 : model.who === "sys" ? "SYS"
@@ -2772,6 +2815,28 @@ Item {
                             font.pixelSize: window.s(9)
                             font.letterSpacing: window.s(2)
                             font.bold: true
+                        }
+                        Item { Layout.fillWidth: true }
+                        // COPY on every message, EDIT on yours -- shown on hover
+                        Row {
+                            spacing: window.s(10)
+                            visible: msgHover.hovered && (model.text || "") !== ""
+                            Text {
+                                text: "\u29C9 COPY"
+                                color: copyHov.hovered ? theme.text : theme.overlay1
+                                font.family: "JetBrains Mono"; font.pixelSize: window.s(9); font.bold: true
+                                HoverHandler { id: copyHov; cursorShape: Qt.PointingHandCursor }
+                                TapHandler { onTapped: window.copyMessage(index) }
+                            }
+                            Text {
+                                visible: model.who === "you" && !window.busy
+                                text: "\u270E EDIT"
+                                color: editHov.hovered ? theme.text : theme.overlay1
+                                font.family: "JetBrains Mono"; font.pixelSize: window.s(9); font.bold: true
+                                HoverHandler { id: editHov; cursorShape: Qt.PointingHandCursor }
+                                TapHandler { onTapped: window.editMessage(index) }
+                            }
+                        }
                         }
 
                         Text {
@@ -2786,6 +2851,13 @@ Item {
                             font.pixelSize: window.s(model.who === "sys" ? 11
                                                     : model.who === "act" ? 11 : 13)
                             lineHeight: 1.3
+                        }
+                        Text {
+                            visible: model.who === "tar" && (model.via || "") !== ""
+                            text: "via " + (model.via || "")
+                            color: theme.overlay0
+                            font.family: "JetBrains Mono"
+                            font.pixelSize: window.s(8)
                         }
                     }
                 }
