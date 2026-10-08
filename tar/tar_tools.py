@@ -921,6 +921,37 @@ def a_cam_view(args):
     return "camera up on " + dev
 
 
+def _camera_holder(dev):
+    """Which program has the camera open? e.g. 'Chrome (pid 74841)'."""
+    rc, out = sh(["fuser", dev], timeout=5)
+    pids = [p for p in re.findall(r"\d+", out or "") if int(p) != os.getpid()]
+    names = []
+    for pid in pids[:3]:
+        try:
+            comm = open("/proc/%s/comm" % pid).read().strip()
+        except OSError:
+            continue
+        nice = {"chrome": "Chrome", "firefox": "Firefox", "qs": "T.A.R.'s live view",
+                "quickshell": "T.A.R.'s live view", "mpv": "mpv", "obs": "OBS",
+                "zoom": "Zoom", "discord": "Discord"}.get(comm.lower(), comm)
+        names.append("%s (pid %s)" % (nice, pid))
+    return ", ".join(names)
+
+
+def a_selfie(args):
+    """Timed webcam photo: countdown on screen, then snap and show it."""
+    delay = max(0, min(30, _int(args.get("delay") or args.get("in") or 0, 0)))
+    for n in range(delay, 0, -1):
+        emit("ui", action="banner", text=str(n))
+        time.sleep(1)
+    if delay:
+        emit("ui", action="flash")
+    out = a_cam_snap({})
+    if out.startswith("captured"):
+        return "selfie taken%s: %s" % (" after a %d s countdown" % delay if delay else "", out)
+    return "NOT DONE (no photo taken): " + out
+
+
 def a_cam_snap(_):
     # the live view holds the camera -- take the photo FROM it instead
     live = os.path.join(DATA, "live-frame.jpg")
@@ -944,7 +975,10 @@ def a_cam_snap(_):
             break
         time.sleep(1.0)
     if rc or not os.path.exists(p):
-        return "camera grab failed (is another app using the camera?)"
+        who = _camera_holder(dev)
+        return ("camera grab failed -- %s is using the camera. Close it (or the browser tab "
+                "using the camera) and try again." % who) if who else \
+               "camera grab failed (the camera didn't answer)"
     emit("image", path=p, source="camera", caption="camera photo")
     return "captured %s -- to SEE what's in it, call look with path=%s" % (p, p)
 
@@ -4368,6 +4402,12 @@ ACTIONS = {
     "fill_cells": (a_fill_cells, "fill a TABLE or FORM: start=<first cell to fill> texts=<v1 || v2 || ...> "
                                  "(nav=tab default; Tab goes left->right then next row; '' skips a cell "
                                  "that already has text). Use this instead of clicking each cell.", []),
+    "selfie":     (a_selfie, "take a webcam photo of the user, optionally after a countdown (delay=seconds) "
+                             "-- for 'take a selfie (in 5 seconds)'. Never answer a photo request with an "
+                             "old screenshot.",
+                   [r"^(?:take|snap|grab) (?:a |me a |my )?(?:selfie|photo|picture|pic)(?: of me)?"
+                    r"(?: in (?P<delay>\d+) ?(?:s|sec|secs|seconds?))?$",
+                    r"^selfie(?: in (?P<delay>\d+) ?(?:s|sec|secs|seconds?))?$"]),
     "camera_live": (a_camera_live, "show the webcam LIVE inside T.A.R. (state=on|off) -- for "
                                    "'show me the camera', 'watch me', 'can you see me'. No app opens.",
                     [r"^(?:show (?:me )?(?:the )?(?:camera|webcam)|watch me|camera on|turn on the camera)$",
@@ -4699,7 +4739,7 @@ def match(text):
     return None, None
 
 
-_PRIORITY = ("evil", "missiles", "camera_live", "devices", "now_playing", "note", "stopwatch", "focus", "coin", "dice", "record", "remind", "wifi", "bluetooth", "dnd", "nightlight", "power",
+_PRIORITY = ("selfie", "evil", "missiles", "camera_live", "devices", "now_playing", "note", "stopwatch", "focus", "coin", "dice", "record", "remind", "wifi", "bluetooth", "dnd", "nightlight", "power",
              "play", "weather", "datetime", "battery", "calc", "processes",
              "colorpick", "cliphist")
 
