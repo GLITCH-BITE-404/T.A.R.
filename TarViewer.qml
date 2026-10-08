@@ -33,21 +33,28 @@ TarDeck {
 
     // ---------------------------------------------------------------- camera
     MediaDevices { id: devs }
-    CaptureSession {
-        id: session
-        camera: Camera {
-            id: cam
-            active: viewer.live && viewer.open
-            cameraDevice: {
-                var list = devs.videoInputs;
-                for (var i = 0; i < list.length; i++)
-                    if (viewer.cameraId && String(list[i].id).indexOf(viewer.cameraId) >= 0)
-                        return list[i];
-                return devs.defaultVideoInput;
+    // The camera exists ONLY while the live view is on. An inactive Camera can
+    // keep /dev/video0 open, and T.A.R.'s own photo grab then failed with
+    // "camera busy" right after the live view was switched off.
+    Loader {
+        id: camLoader
+        active: viewer.live && viewer.open
+        sourceComponent: CaptureSession {
+            camera: Camera {
+                active: true
+                cameraDevice: {
+                    var list = devs.videoInputs;
+                    for (var i = 0; i < list.length; i++)
+                        if (viewer.cameraId && String(list[i].id).indexOf(viewer.cameraId) >= 0)
+                            return list[i];
+                    return devs.defaultVideoInput;
+                }
             }
+            videoOutput: liveOut
         }
-        videoOutput: liveOut
     }
+    readonly property string camError: camLoader.item && camLoader.item.camera
+                                        ? camLoader.item.camera.errorString : ""
     Timer {                                 // live frame for camera_look
         interval: 1000; repeat: true
         running: viewer.live && viewer.open && viewer.frameFile !== ""
@@ -138,9 +145,9 @@ TarDeck {
         Text {
             width: parent.width
             visible: viewer.live
-            text: cam.errorString !== "" ? "camera error: " + cam.errorString
+            text: viewer.camError !== "" ? "camera error: " + viewer.camError
                 : "streaming your webcam -- ask \"am I smiling?\" or \"what am I holding?\""
-            color: cam.errorString !== "" ? viewer.theme.red : viewer.theme.subtext0
+            color: viewer.camError !== "" ? viewer.theme.red : viewer.theme.subtext0
             font.family: "JetBrains Mono"
             font.pixelSize: viewer.s(10)
             wrapMode: Text.Wrap
