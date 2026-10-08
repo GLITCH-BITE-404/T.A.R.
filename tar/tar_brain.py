@@ -1367,6 +1367,7 @@ def chat(message, no_history=False, no_memory=False, no_act=False,
         t = _tools()
         if t:
             # Compound first: "open chrome and look up X" is two actions.
+            t.RAW_MESSAGE = message     # actions that keep the user's own wording
             chain = t.match_all(message) if hasattr(t, "match_all") else []
             if chain is None:
                 t = None            # the shortcut can't do this safely

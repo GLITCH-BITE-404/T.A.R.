@@ -116,8 +116,11 @@ Scope {
         onLoaded: {
             try {
                 var p = JSON.parse(text());
-                if (p.right !== undefined) mini.homeRight = p.right;
-                if (p.bottom !== undefined) mini.homeBottom = p.bottom;
+                // the old window-moving drag could save spots off the screen
+                var sc = mini.screenFor("");
+                var sw = sc ? sc.width : 1920, sh = sc ? sc.height : 1080;
+                if (p.right !== undefined) mini.homeRight = Math.max(4, Math.min(sw - 60, p.right));
+                if (p.bottom !== undefined) mini.homeBottom = Math.max(4, Math.min(sh - 60, p.bottom));
             } catch (e) {}
         }
     }
@@ -133,19 +136,20 @@ Scope {
     }
 
     // ================================================================ HOME
+    // The window covers the whole screen (see-through, and click-through
+    // everywhere except the orb/card/bubble) and the orb moves INSIDE it.
+    // Moving the window itself made dragging jumpy: the compositor applies
+    // each move a frame late, so the cursor's local position kept overshooting.
     PanelWindow {
         id: dock
         screen: mini.screenFor("")
-        anchors { bottom: true; right: true }
-        margins { bottom: mini.homeBottom; right: mini.homeRight }
+        anchors { top: true; bottom: true; left: true; right: true }
         exclusionMode: ExclusionMode.Ignore
         color: "transparent"
         WlrLayershell.layer: WlrLayer.Overlay
         WlrLayershell.namespace: "tar-mini-dock"
         WlrLayershell.keyboardFocus: dock.cardOpen ? WlrKeyboardFocus.OnDemand : WlrKeyboardFocus.None
-        implicitWidth: mini.boxW
-        implicitHeight: mini.boxH
-        // only what's drawn takes clicks; the rest of the box is click-through
+        // only what's drawn takes clicks; everything else is click-through
         mask: Region {
             item: homeOrb
             Region { item: card.visible ? card : null }
@@ -196,9 +200,7 @@ Scope {
 
         // ---- masking box (screen coords) -- re-published when anything moves
         function publish() {
-            var s = dock.screen;
-            var sw = s ? s.width : 1920, sh = s ? s.height : 1080;
-            var ox = sw - mini.homeRight - mini.boxW, oy = sh - mini.homeBottom - mini.boxH;
+            var ox = home.x, oy = home.y;
             var x1 = homeOrb.x, y1 = homeOrb.y, x2 = homeOrb.x + homeOrb.width, y2 = homeOrb.y + homeOrb.height;
             var extra = card.visible ? card : (homeBubble.opacity > 0.05 ? homeBubble : null);
             if (extra) {
@@ -217,6 +219,13 @@ Scope {
             function onHomeRightChanged() { pubLater.restart(); }
             function onHomeBottomChanged() { pubLater.restart(); }
         }
+
+        Item {
+        id: home
+        width: mini.boxW
+        height: mini.boxH
+        x: dock.width - mini.homeRight - mini.boxW
+        y: dock.height - mini.homeBottom - mini.boxH
 
         // ---- the orb (click = card, right-click = full T.A.R., drag = move)
         Item {
@@ -282,21 +291,25 @@ Scope {
                 hoverEnabled: true
                 acceptedButtons: Qt.LeftButton | Qt.RightButton
                 cursorShape: drag ? Qt.ClosedHandCursor : Qt.PointingHandCursor
-                property real px: 0
+                property real px: 0           // press point, in screen (dock) coords
                 property real py: 0
+                property real r0: 0
+                property real b0: 0
                 property bool drag: false
-                onPressed: (m) => { px = m.x; py = m.y; drag = false; }
-                // the window moves with the margins, so the cursor's local
-                // position snaps back to the press point -> incremental drag
+                onPressed: (m) => {
+                    var g = mapToItem(dock.contentItem, m.x, m.y);
+                    px = g.x; py = g.y; r0 = mini.homeRight; b0 = mini.homeBottom; drag = false;
+                }
                 onPositionChanged: (m) => {
                     if (!pressed || m.buttons !== Qt.LeftButton) return;
-                    var dx = m.x - px, dy = m.y - py;
+                    var g = mapToItem(dock.contentItem, m.x, m.y);
+                    var dx = g.x - px, dy = g.y - py;
                     if (!drag && Math.abs(dx) + Math.abs(dy) < 5) return;
                     drag = true;
-                    var s = dock.screen;
-                    var sw = s ? s.width : 1920, sh = s ? s.height : 1080;
-                    mini.homeRight = Math.max(-mini.boxW + 70, Math.min(sw - mini.boxW, mini.homeRight - dx));
-                    mini.homeBottom = Math.max(-mini.boxH + 70, Math.min(sh - mini.boxH, mini.homeBottom - dy));
+                    // keep the orb itself on screen (the box around it may hang off)
+                    // the orb is the box's bottom-right corner: keep IT on screen
+                    mini.homeRight = Math.max(4, Math.min(dock.width - 60, r0 - dx));
+                    mini.homeBottom = Math.max(4, Math.min(dock.height - 60, b0 - dy));
                 }
                 onReleased: { if (drag) mini.savePos(); }
                 onClicked: (m) => {
@@ -530,6 +543,8 @@ Scope {
                 onClicked: { dock.cardOpen = true; focusLater.start(); }
             }
         }
+        }   // home
+
         function shortReply(r) {
             var t = String(r || "").replace(/[*_`#>]+/g, "").trim();
             var first = (t.split(/\n/)[0].match(/^.*?[.!?](?=\s|$)/) || [t.split(/\n/)[0]])[0];

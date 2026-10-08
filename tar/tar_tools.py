@@ -2554,6 +2554,50 @@ def a_play_game(args):
         g.get("every", 15), "VERIFIED" if "started" in out else out)
 
 
+RAW_MESSAGE = ""                    # the user's message as typed (set by the brain)
+
+
+# -- memory: facts T.A.R. keeps in its prompt (memory.json), NOT a notes file ------
+_VAGUE_FACT = re.compile(r"^(?:my|your|the|this|that|it|me|him|her|them|what i said)(?: \w+)?$", re.I)
+
+
+def a_remember(args):
+    """Save a fact to T.A.R.'s memory (shown to it on every turn)."""
+    fact = (args.get("fact") or args.get("text") or args.get("what") or "").strip().rstrip(".")
+    if not fact or _VAGUE_FACT.match(fact):
+        # "remember my name" -- which name? the model fills it in from the chat
+        return "don't know how to remember %r on its own -- say the actual fact" % fact
+    # the matcher lowercased it -- take the user's own spelling back ("Dana")
+    i = RAW_MESSAGE.lower().find(fact.lower())
+    if i >= 0:
+        fact = RAW_MESSAGE[i:i + len(fact)]
+    # memory is read as facts ABOUT the user: "i hate firefox" -> "The user hates firefox"
+    for a, b in ((r"\bi am\b|\bi'?m\b", "the user is"), (r"\bmy\b", "the user's"),
+                 (r"\bme\b", "the user"), (r"\bmine\b", "the user's"), (r"\bmyself\b", "the user")):
+        fact = re.sub(a, b, fact, flags=re.I)
+    fact = re.sub(r"\bi (\w+?)(s?)\b", lambda m: "the user " + m.group(1) + (
+        "" if m.group(1) in ("was", "can", "will", "should", "must", "do", "did", "had", "could",
+                             "would") else "es" if m.group(1).endswith(("sh", "ch", "x", "o"))
+        else "s"), fact, flags=re.I)
+    fact = fact[0].upper() + fact[1:]
+    import tar_brain as B
+    saved = B.mem_add(fact)
+    if not saved:
+        return "already remembered: %s -- VERIFIED" % fact
+    emit("mem", v=saved["text"])
+    return "remembered: %s -- VERIFIED (saved to T.A.R.'s memory)" % saved["text"]
+
+
+def a_forget(args):
+    what = (args.get("fact") or args.get("text") or args.get("what") or "").strip().rstrip(".")
+    if not what:
+        return "forget what?"
+    import tar_brain as B
+    n = B.mem_forget(what)
+    return ("forgot %d thing%s matching %r -- VERIFIED" % (n, "" if n == 1 else "s", what)
+            if n else "no remembered fact matches %r" % what)
+
+
 def a_stop_task(_):
     d = loop_running()
     if not d:
@@ -5147,7 +5191,18 @@ ACTIONS = {
     "recent":     (a_recent, "files changed recently: days= (default 1), where=", []),
     "write_file": (a_write_file, "create a text file: path=, text= (append=true to add; "
                                  "overwriting asks the user)", []),
-    "note":       (a_note, "save a quick note: text=",
+    "remember":   (a_remember, "REMEMBER a fact about the user or how to behave (fact= one clear "
+                               "sentence, e.g. 'The user's name is Rephael', 'Always greet the user "
+                               "by name'). Goes into your memory, seen every turn. Use this -- NOT "
+                               "note/write_file -- whenever they say remember / don't forget / keep "
+                               "in mind.",
+                   [r"^(?:please |can you |could you )?(?:remember|don'?t forget|keep in mind)"
+                    r"(?: that)?[,:]? (?P<fact>.+)$"]),
+    "forget":     (a_forget, "forget remembered facts matching fact=",
+                   [r"^(?:please )?forget (?:that |about )?(?P<fact>(?!it$|that$|this$|everything$).+)$"]),
+    "note":       (a_note, "write a line into the user's notes FILE (Documents/tar-notes.md) -- only "
+                           "when they say 'take a note' / 'write down'; facts to remember go to "
+                           "remember: text=",
                    [r"^(?:take a )?note[: ]+(?P<text>.+)$"]),
     "notes":      (a_notes, "read back saved notes", [r"^(?:my |show (?:my )?|read (?:my )?)notes$"]),
     "archive":    (a_archive, "zip (action=zip path=, to=) or unzip/extract (path=archive, to=)", []),
@@ -5418,7 +5473,7 @@ def match(text):
     return None, None
 
 
-_PRIORITY = ("play_game", "research", "virus_scan", "selfie", "evil", "missiles", "camera_live", "devices", "now_playing", "note", "stopwatch", "focus", "coin", "dice", "record", "remind", "wifi", "bluetooth", "dnd", "nightlight", "power",
+_PRIORITY = ("remember", "forget", "play_game", "research", "virus_scan", "selfie", "evil", "missiles", "camera_live", "devices", "now_playing", "note", "stopwatch", "focus", "coin", "dice", "record", "remind", "wifi", "bluetooth", "dnd", "nightlight", "power",
              "play", "weather", "datetime", "battery", "calc", "processes",
              "colorpick", "cliphist")
 
