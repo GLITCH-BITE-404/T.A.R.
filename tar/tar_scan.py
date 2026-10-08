@@ -84,8 +84,8 @@ TECHNIQUES = [
     ("T1027", "Obfuscated Files or Information (hides its real commands)", "Defense Evasion", 2,
      ALL, {"str_any": ["-encodedcommand", "powershell -enc", "powershell.exe -enc", "-e jab",
                        "frombase64string(", "eval(base64", "exec(base64", "eval(atob",
-                       "base64 -d | sh", "base64 -d|sh", "exec(compile(", "string.fromcharcode",
-                       "exec(zlib.decompress", "marshal.loads("]}),
+                       "base64 -d | sh", "base64 -d|sh", "exec(compile(", "exec(zlib.decompress",
+                       "marshal.loads("]}),
     ("T1497", "Virtualization/Sandbox Evasion (checks if it's being analysed)", "Defense Evasion",
      1, WIN, {"str_any": ["vboxservice", "vmtoolsd", "sandboxie", "sbiedll.dll", "wine_get_unix_file_name"]}),
     ("T1070.004", "Indicator Removal: deletes itself after running", "Defense Evasion", 2, WIN,
@@ -109,9 +109,9 @@ TECHNIQUES = [
       "imp_or_str": ["getasynckeystate", "getkeyboardstate", "getkeynametextw", "pynput.keyboard"]}),
     ("T1113", "Screen Capture", "Collection", 1, WIN,
      {"imp_all": ["bitblt", "getdc"], "str_any": ["screenshot", "copyfromscreen"]}),
-    ("T1552.004", "Steals private keys (SSH/crypto wallets)", "Credential Access", 3, ALL,
+    ("T1552.004", "Steals private keys (SSH/crypto wallets)", "Credential Access", 3, WIN,
      {"str_any": ["/.ssh/id_rsa", "/.ssh/id_ed25519", "wallet.dat", "exodus\\exodus.wallet",
-                  "\\electrum\\wallets", "metamask"]}),
+                  "\\electrum\\wallets"]}),
     # ---- Execution
     ("T1059.001", "PowerShell run hidden / with policy bypass", "Execution", 2, ALL,
      {"str_any": ["-windowstyle hidden", "-w hidden", "-executionpolicy bypass", "-ep bypass",
@@ -119,8 +119,12 @@ TECHNIQUES = [
     # ---- Command & control / exfiltration
     ("T1105", "Ingress Tool Transfer (downloads and runs more code)", "Command and Control", 2, ALL,
      {"imp_or_str": ["urldownloadtofilew", "urldownloadtofilea", "certutil -urlcache",
-                     "bitsadmin /transfer", "downloadstring(", "| sh", "| bash", "|sh", "|bash",
-                     "iex(", "iex (", "invoke-expression", "start-bitstransfer"]}),
+                     "bitsadmin /transfer", "downloadstring(", "start-bitstransfer"]}),
+    # pipe-to-shell is normal TEXT inside big programs (git, chrome) -- scripts only
+    ("T1105", "Ingress Tool Transfer (pipes a download into a shell)", "Command and Control", 2,
+     CODE, {"re": r"(?:curl|wget|invoke-webrequest|iwr|irm|invoke-restmethod)\b[^\n]*?"
+                  r"(?<!\|)\|\s*(?:sudo\s+)?(?:ba|z)?sh\b|(?:iex|invoke-expression)\s*\(?\s*"
+                  r"\(?\s*(?:new-object|iwr|irm|invoke-webrequest|invoke-restmethod)"}),
     ("T1567", "Exfiltration to web service (Discord/Telegram webhooks)", "Exfiltration", 3, ALL,
      {"str_any": ["discord.com/api/webhooks", "discordapp.com/api/webhooks",
                   "api.telegram.org/bot", "pastebin.com/raw"]}),
@@ -268,7 +272,7 @@ def analyze(path, shown=None):
     def tech(tid, what, tactic, w, ev):
         nonlocal score
         score += w
-        techs.append({"id": tid, "what": what, "tactic": tactic, "evidence": ev[:120]})
+        techs.append({"id": tid, "what": what, "tactic": tactic, "evidence": ev[:120], "w": w})
 
     # Masquerading (T1036): the only place a NAME matters -- when it lies
     stem2 = os.path.splitext(os.path.splitext(name)[0])[1].lower()
@@ -277,7 +281,7 @@ def analyze(path, shown=None):
              "Defense Evasion", 5, repr(name))
     elif stem2 in DOC_EXT and ext in EXEC_EXT:
         tech("T1036.007", "Masquerading: double extension (%s%s)" % (stem2, ext),
-             "Defense Evasion", 4, name)
+             "Defense Evasion", 5, name)
     if cat in ("pe", "elf") and ext in DOC_EXT:
         tech("T1036.008", "Masquerading: says %s but is really a program" % ext,
              "Defense Evasion", 5, ftype[:60])
@@ -301,6 +305,11 @@ def analyze(path, shown=None):
                                                 i in imps or i in text)]
                 ok = bool(got)
                 ev += got
+        if ok and "re" in spec:
+            m = re.search(spec["re"], text)
+            ok = bool(m)
+            if m:
+                ev.append(m.group(0)[:60])
         if not ok:
             continue
         if not ev:
@@ -336,6 +345,7 @@ def analyze(path, shown=None):
     elif cat in ("pe", "elf") and _entropy(data) > 7.5:
         tech("T1027.002", "Software Packing (contents encrypted/compressed)", "Defense Evasion", 1, "")
 
+    techs.sort(key=lambda t: -t["w"])          # the headline behaviour first
     level = _level(score)
     kind = ("Windows program" + (" (.NET)" if pe and pe["dotnet"] else "") +
             (" 64-bit" if pe and pe.get("x64") else "") if pe else
@@ -451,11 +461,17 @@ def scan(root, vt_key=None):
             tmp, members = _archive_members(p, root)
             if tmp:
                 temps.append(tmp)
+                arch = results[-1]
                 for mp, mshown in members[:200]:
                     try:
                         results.append(analyze(mp, mshown))
                     except OSError:
-                        pass
+                        continue
+                    if results[-1]["score"] > arch["score"]:
+                        # an archive is as dangerous as the worst file inside it
+                        arch["score"] = results[-1]["score"]
+                        arch["findings"] = [("contains %s (%s)" % (
+                            results[-1]["name"].split(" → ", 1)[-1], results[-1]["level"]), "")]
     if os.path.isdir(root):
         # USB-worm tricks live at the drive root, not inside one file
         for r in results:

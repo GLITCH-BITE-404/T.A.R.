@@ -81,6 +81,8 @@ def provider_of(model):
 
 def key_provider(key):
     """Which provider a pasted key belongs to. Anthropic keys are sk-ant-..."""
+    if re.fullmatch(r"[0-9a-f]{64}", key):
+        return "virustotal"
     return "anthropic" if key.startswith("sk-ant") else "google"
 
 
@@ -95,6 +97,8 @@ def active_model():
 
 def api_key(provider=None):
     provider = provider or provider_of(active_model())
+    if provider == "virustotal":
+        return os.environ.get("VT_API_KEY") or load_keys().get("virustotal") or ""
     if provider == "google":
         return (os.environ.get("GEMINI_API_KEY")
                 or os.environ.get("GOOGLE_API_KEY")
@@ -1170,7 +1174,7 @@ def main():
             cfg["cloud_model"] = "gemini-flash-lite-latest"
             B.save_config(cfg)
         emit("ok", v="%s API key saved (readable only by you)"
-                     % ("Gemini" if prov == "google" else "Anthropic"))
+                     % {"google": "Gemini", "virustotal": "VirusTotal"}.get(prov, "Anthropic"))
 
     elif cmd == "clear-key":
         keys = load_keys()

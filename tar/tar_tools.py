@@ -1999,6 +1999,119 @@ def _research_grounded(q, cache, cache_p, key_q):
     return _research_done(q, answer, sources, cache, cache_p, key_q)
 
 
+# -- file safety check -----------------------------------------------------------
+_USB_WORDS = re.compile(r"^(?:usb|usbs|usb drive|usb stick|flash ?drive|thumb ?drive|stick|"
+                        r"drive|disk on key|disk-on-key|disk|external drive|it'?s files)$", re.I)
+
+
+def _usb_mounts(mount=True):
+    """Mount points of attached removable drives; mounts them READ-ONLY if needed."""
+    rc, out = sh(["lsblk", "-J", "-o", "NAME,RM,TRAN,TYPE,MOUNTPOINT,FSTYPE"], timeout=15)
+    try:
+        tree = json.loads(out)
+    except ValueError:
+        return []
+    found = []
+
+    def walk(nodes, usb=False):
+        for n in nodes:
+            u = usb or n.get("rm") or n.get("tran") == "usb"
+            if u and n.get("type") == "part" or (u and n.get("type") == "disk" and n.get("fstype")):
+                if n.get("mountpoint"):
+                    found.append(n["mountpoint"])
+                elif mount and n.get("fstype") and shutil.which("udisksctl"):
+                    rc2, o2 = sh(["udisksctl", "mount", "-b", "/dev/" + n["name"], "-o", "ro"], timeout=30)
+                    m = re.search(r" at (/\S+)", o2 or "")
+                    if rc2 == 0 and m:
+                        found.append(m.group(1).rstrip("."))
+            walk(n.get("children") or [], u)
+    walk(tree.get("blockdevices") or [])
+    return found
+
+
+def _find_named(name):
+    """A bare file name -> where it is (USB drives first, then Downloads, then home)."""
+    roots = _usb_mounts(mount=False) + [xdg_dir("downloads") or "", xdg_dir("desktop") or "", _HOME]
+    for r in [x for x in roots if x and os.path.isdir(x)]:
+        rc, out = sh(["find", r, "-maxdepth", "5", "-iname", name, "-not", "-path", "*/.*",
+                      "-print", "-quit"], timeout=20)
+        if out.strip():
+            return out.strip().splitlines()[0]
+    return None
+
+
+def a_scan(args):
+    """Static malware check of a file/folder/USB: what it's BUILT to do, never its name."""
+    global REPLY_TEXT
+    what = (args.get("path") or args.get("what") or args.get("q") or "usb").strip().rstrip("?")
+    what = re.sub(r"^(?:the|my|this|that)\s+", "", what, flags=re.I)
+    if what.lower() in ("it", "this", "that", "them", "these", "those", "this file", "that file"):
+        return "no such file named -- which file or folder? (give its name or path)"
+    if _USB_WORDS.match(what):
+        roots = _usb_mounts()
+        if not roots:
+            return "no such drive: no USB drive is attached (or it couldn't be mounted)"
+    else:
+        p = resolve_path(what)
+        if not os.path.exists(p):
+            p = _find_named(os.path.basename(what)) or p
+        if not os.path.exists(p):
+            return "no such file or folder: %s" % what
+        roots = [p]
+    try:
+        import tar_scan as S
+    except ImportError:
+        return "could not load the scanner (tar_scan.py missing)"
+    try:
+        import tar_cloud as C
+        vt_key = C.api_key("virustotal")
+    except Exception:
+        vt_key = ""
+    emit("info", v="checking %s… (static analysis, nothing gets run)" % ", ".join(
+        os.path.basename(r) or r for r in roots))
+    lines, n, flagged, clean, clam = [], 0, 0, [], False
+    mark = {"likely malicious": "⛔", "suspicious": "⚠", "worth a look": "•", "test file": "🧪"}
+    for root in roots:
+        res = S.scan(root, vt_key)
+        clam = clam or res["clamav"]
+        n += len(res["files"])
+        for r in res["files"]:
+            vt = r.get("vt") or {}
+            vt_txt = ("VirusTotal: %d/%d engines flag it%s" % (
+                vt["malicious"], vt["total"], (" (%s)" % vt["label"]) if vt.get("label") else "")
+                if vt.get("known") else "VirusTotal: never seen this file" if "known" in vt else "")
+            if r["level"] == "nothing dangerous found" and not vt.get("malicious"):
+                clean.append(r["name"])
+                continue
+            flagged += r["level"] in ("likely malicious", "suspicious")
+            lines.append("%s %s -- %s (%s)" % (mark.get(r["level"], "•"), r["name"],
+                                                r["level"].upper(), r.get("type", "")))
+            for t in r.get("techniques", []):
+                lines.append("   %s%s: %s%s" % (t["tactic"], (" · " + t["id"]) if t["id"] else "",
+                                                t["what"], ("  [" + t["evidence"] + "]") if t["evidence"] else ""))
+            for why, ev in r.get("findings", []):
+                lines.append("   %s%s" % (why, ("  [" + ev + "]") if ev else ""))
+            if vt_txt:
+                lines.append("   " + vt_txt)
+            if r.get("sha256") and r["level"] in ("likely malicious", "suspicious"):
+                lines.append("   https://www.virustotal.com/gui/file/" + r["sha256"])
+    if clean:
+        lines.append("✓ nothing dangerous found in %d file%s: %s" % (
+            len(clean), "" if len(clean) == 1 else "s",
+            ", ".join(clean[:12]) + (" …" if len(clean) > 12 else "")))
+    head = ("Checked %d file%s in %s -- static analysis (nothing was run). Verdicts come from "
+            "what each file is built to do (imports, commands, ATT&CK techniques), not its name."
+            % (n, "" if n == 1 else "s", ", ".join(roots)))
+    tail = []
+    if not vt_key:
+        tail.append("Tip: a free VirusTotal key (/key <key>) adds a 70+ engine hash check -- "
+                    "files are never uploaded.")
+    if not clam:
+        tail.append("ClamAV isn't installed, so there was no signature scan.")
+    REPLY_TEXT = "\n".join([head, ""] + lines + ([""] + tail if tail else []))
+    return ("scanned %d files: %d flagged -- VERIFIED: report shown\n%s" % (n, flagged, REPLY_TEXT))
+
+
 def a_weather(args):
     place = (args.get("place") or args.get("where") or "").strip()
     rc, out = sh(["curl", "-s", "--max-time", "10",
@@ -4624,6 +4737,19 @@ ACTIONS = {
                                "so just relay it briefly with the links.",
                    [r"^(?:please |can you |could you )?(?:look up|research|find out(?: about)?|"
                     r"look into|what does the (?:web|internet) say about) (?!online )(?P<q>.+)$"]),
+    "virus_scan": (a_scan, "check files/folders/a USB drive for malware (path=file, folder, or "
+                           "'usb'). Static analysis of what each file is BUILT to do (imports, "
+                           "commands, MITRE ATT&CK techniques) -- nothing is run. NEVER judge a "
+                           "file as safe or malware by its NAME; call this and relay its report.",
+                   [r"^(?:scan|virus ?scan|malware ?scan|check) (?:the |my |this |that )?(?P<path>.+?) "
+                    r"for (?:any )?(?:viruses|virus|malware|ransomware|anything bad|threats)\??$",
+                    r"^(?:virus ?scan|malware ?scan|scan) (?!(?:(?:the|my|this|that) )?(?:room|area|"
+                    r"face|qr|code on|screen|page|document|paper|homework|me\b|camera)\b)"
+                    r"(?:the |my |this |that )?(?P<path>.+?)\??$",
+                    r"^(?:is|are) (?:the |my |this |that )?(?P<path>.+?) (?:safe|a virus|malware|"
+                    r"ransomware|dangerous|infected|malicious)\??$",
+                    r"^(?:does|do) (?:the |my |this |that )?(?P<path>.+?) (?:contain|have) (?:any )?"
+                    r"(?:viruses|a virus|virus|malware|ransomware)\??$"]),
     "weather":    (a_weather, "current weather (place= optional)",
                    [r"^(?:what'?s the )?weather(?: like)?(?: in (?P<place>.+))?$"]),
     "datetime":   (a_datetime, "current date and time",
@@ -5031,7 +5157,7 @@ def match(text):
     return None, None
 
 
-_PRIORITY = ("research", "selfie", "evil", "missiles", "camera_live", "devices", "now_playing", "note", "stopwatch", "focus", "coin", "dice", "record", "remind", "wifi", "bluetooth", "dnd", "nightlight", "power",
+_PRIORITY = ("research", "virus_scan", "selfie", "evil", "missiles", "camera_live", "devices", "now_playing", "note", "stopwatch", "focus", "coin", "dice", "record", "remind", "wifi", "bluetooth", "dnd", "nightlight", "power",
              "play", "weather", "datetime", "battery", "calc", "processes",
              "colorpick", "cliphist")
 
