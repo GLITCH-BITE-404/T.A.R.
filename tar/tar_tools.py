@@ -2740,6 +2740,423 @@ def a_make_fx(args):
             "play it again." % (name, secs, msg, name))
 
 
+# -- files skill: find by description/date/source, organize a folder, convert to PDF --
+_KINDS = {
+    "pdf": (".pdf",), "word": (".doc", ".docx", ".odt", ".rtf"),
+    "slides": (".ppt", ".pptx", ".odp", ".key"), "sheet": (".xls", ".xlsx", ".ods", ".csv"),
+    "image": (".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".bmp", ".svg"),
+    "video": (".mp4", ".mkv", ".mov", ".webm", ".avi"),
+    "audio": (".mp3", ".wav", ".ogg", ".m4a", ".flac", ".opus"),
+    "archive": (".zip", ".rar", ".7z", ".tar", ".gz", ".xz", ".tgz"),
+    "text": (".txt", ".md"), "program": (".exe", ".msi", ".appimage", ".deb", ".rpm"),
+}
+_KIND_WORDS = [
+    ("pdf", r"pdfs?"), ("word", r"word|docx?|documents?|essay|מסמך"),
+    ("slides", r"powerpoints?|pptx?|presentations?|slides?|decks?|מצגת"),
+    ("sheet", r"excel|xlsx?|spreadsheets?|sheets?|csv|גיליון"),
+    ("image", r"images?|photos?|pictures?|pics?|screenshots?|jpe?g|png|תמונה|תמונות"),
+    ("video", r"videos?|clips?|movies?|mp4|סרטון|סרטונים"),
+    ("audio", r"songs?|audio|mp3|music|voice notes?|שיר"),
+    ("archive", r"zips?|archives?|rar"), ("program", r"installers?|exe|programs?|setup"),
+]
+# where a download came from (Chrome's own download list): who "sent" it
+_SOURCES = [
+    (r"teachers?|school|class(?:es)?|homework|assignments?|מורה|המורה|בית ?ספר|שיעורי",
+     ("classroom.google", "mail.google", "drive.google", "drive.usercontent", "docs.google",
+      "web.whatsapp", "moodle", "webtop", "mashov", "edu")),
+    (r"whats ?app|ווטסאפ", ("web.whatsapp",)), (r"e-?mail|gmail|mail", ("mail.google",)),
+    (r"drive|google drive", ("drive.google", "drive.usercontent", "docs.google")),
+    (r"classroom", ("classroom.google",)), (r"discord", ("discord",)),
+    (r"telegram", ("telegram",)), (r"canva", ("canva",)),
+]
+_FIND_STOP = set("""the a an my me that which this those these i you it is was were sent send got get
+gave give from file files find where wheres look for search locate show open did put
+to of in on at with and or last this week weeks day days ago today yesterday month recent
+recently new latest one some please can could would me us our""".split()) | {
+    "ששלח", "שלח", "שלחה", "את", "של", "הקובץ", "קובץ"}
+
+
+def _when_window(text):
+    """(newest_age_s, oldest_age_s) the user means, or None."""
+    t = text.lower()
+    now = time.time()
+    midnight = now - (time.localtime().tm_hour * 3600 + time.localtime().tm_min * 60)
+    if re.search(r"\btoday\b|היום", t):
+        return 0, now - midnight + 1
+    if re.search(r"\byesterday\b|אתמול", t):
+        return now - midnight, now - midnight + 86400 * 1.5
+    m = re.search(r"\b(\d+) days? ago\b", t)
+    if m:
+        d = int(m.group(1))
+        return max(0, d - 1.5) * 86400, (d + 1.5) * 86400
+    if re.search(r"\blast week\b|שבוע שעבר", t):
+        return 2 * 86400, 15 * 86400
+    if re.search(r"\bthis week\b|השבוע", t):
+        return 0, 8 * 86400
+    if re.search(r"\blast month\b|חודש שעבר", t):
+        return 20 * 86400, 65 * 86400
+    if re.search(r"\b(recent(ly)?|latest|new(est)?)\b", t):
+        return 0, 10 * 86400
+    return None
+
+
+def _chrome_downloads():
+    """[(path, when, host)] from every Chrome profile's download list (a temp copy
+    of the History DB -- only the downloads table is read)."""
+    import sqlite3
+    import tempfile
+    import urllib.parse
+    base = os.path.expanduser("~/.config/google-chrome")
+    out = []
+    if not os.path.isdir(base):
+        return out
+    for prof in os.listdir(base):
+        h = os.path.join(base, prof, "History")
+        if not os.path.isfile(h):
+            continue
+        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False).name
+        try:
+            shutil.copyfile(h, tmp)
+            c = sqlite3.connect(tmp)
+            for path, tab, ref, start in c.execute(
+                    "select target_path, tab_url, referrer, start_time from downloads"):
+                if path and os.path.exists(path):
+                    when = start / 1e6 - 11644473600 if start else os.path.getmtime(path)
+                    host = urllib.parse.urlparse(tab or ref or "").netloc
+                    out.append((path, when, host))
+            c.close()
+        except Exception:
+            pass
+        finally:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+    return out
+
+
+def _search_roots():
+    roots = [xdg_dir(n) for n in ("downloads", "documents", "desktop", "pictures", "videos", "music")]
+    return [r for r in dict.fromkeys(roots) if r and os.path.isdir(r)]
+
+
+def _file_text(p, limit=6000):
+    ext = os.path.splitext(p)[1].lower()
+    try:
+        if ext == ".pdf" and shutil.which("pdftotext"):
+            return sh(["pdftotext", "-l", "3", "-q", p, "-"], timeout=15)[1][:limit]
+        if ext in (".docx", ".pptx", ".xlsx", ".odt", ".odp", ".ods"):
+            import zipfile
+            with zipfile.ZipFile(p) as z:
+                xml = " ".join(z.read(n).decode("utf-8", "replace") for n in z.namelist()
+                               if n.endswith(".xml") and ("word/document" in n or "slides/slide" in n
+                                                          or "content.xml" in n or "sharedStrings" in n))
+            return re.sub(r"<[^>]+>", " ", xml)[:limit]
+        if ext in (".txt", ".md", ".csv"):
+            return open(p, errors="replace").read(limit)
+    except Exception:
+        pass
+    return ""
+
+
+LAST_FOUND = os.path.join(DATA, "last-found.json")
+
+
+def a_find_file(args):
+    """Find files from a loose description: type, when, who sent it, words."""
+    desc = (args.get("desc") or args.get("q") or args.get("what") or "").strip()
+    if not desc:
+        return "find which file? describe it (type, when, from who, words in it)"
+    low = desc.lower()
+    kind = args.get("kind") or next((k for k, rx in _KIND_WORDS if re.search(r"\b(?:%s)\b" % rx, low)), None)
+    exts = _KINDS.get(kind, ())
+    win = _when_window(args.get("when") or low)
+    hosts = ()
+    for rx, hs in _SOURCES:
+        if re.search(r"\b(?:%s)\b" % rx, (args.get("source") or "") + " " + low):
+            hosts = hosts + hs
+    used = r"\b(?:%s)\b" % "|".join([rx for _k, rx in _KIND_WORDS] + [rx for rx, _h in _SOURCES])
+    words = [w for w in re.findall(r"[\w֐-׿'-]+", re.sub(used, " ", low))
+             if w not in _FIND_STOP and len(w) > 1 and not w.isdigit()]
+    now = time.time()
+    cands = {}
+    for path, when, host in _chrome_downloads():
+        cands[path] = {"when": when, "host": host}
+    for root in _search_roots():
+        argv = ["fd", "--type", "f", "--max-results", "3000", "--exclude", "node_modules",
+                "--exclude", ".git"]
+        if win:
+            argv += ["--changed-within", "%dd" % (win[1] / 86400 * 2 + 2)]
+        for e in exts:
+            argv += ["-e", e.lstrip(".")]
+        argv += [".", root]
+        if shutil.which("fd"):
+            for p in sh(argv, timeout=30)[1].splitlines():
+                if p and p not in cands:
+                    try:
+                        cands[p] = {"when": os.path.getmtime(p), "host": ""}
+                    except OSError:
+                        pass
+    scored = []
+    for p, c in cands.items():
+        ext = os.path.splitext(p)[1].lower()
+        if exts and ext not in exts:
+            continue
+        if ext in (".crdownload", ".part"):
+            continue
+        s, why = 0.0, []
+        if exts:
+            s += 3
+            why.append(kind)
+        age = now - c["when"]
+        if win:
+            if win[0] <= age <= win[1]:
+                s += 3
+                why.append("from the right time")
+            elif age <= win[1] * 2:
+                s += 1
+            else:
+                s -= 2
+        if hosts:
+            if c["host"] and any(h in c["host"] for h in hosts):
+                s += 4
+                why.append("came from " + c["host"])
+            elif not c["host"]:
+                s -= 1
+        name = os.path.basename(p).lower()
+        hit = [w for w in words if w in name]
+        if hit:
+            s += 2 * len(hit)
+            why.append("name has " + ", ".join(hit))
+        s += max(0, 1 - age / (90 * 86400)) * 0.5          # newer wins ties
+        root = next((r for r in _search_roots() if p.startswith(r + os.sep)), None)
+        if root:
+            s -= 0.6 * max(0, p[len(root) + 1:].count(os.sep) - 1)   # deep in a source tree
+        scored.append([s, p, c, why, hit, bool(win and win[0] <= age <= win[1])])
+    scored.sort(key=lambda x: -x[0])
+    # read inside the best few for the words the name didn't have
+    if words:
+        for x in scored[:15]:
+            missing = [w for w in words if w not in x[4]]
+            if missing:
+                txt = _file_text(x[1]).lower()
+                inside = [w for w in missing if w in txt]
+                if inside:
+                    x[0] += 2 * len(inside)
+                    x[3].append("mentions " + ", ".join(inside))
+        scored.sort(key=lambda x: -x[0])
+    # a real match beats "recent" alone: drop fillers that only scored on age
+    top = [x for x in scored[:5] if x[0] > 1] or [x for x in scored[:3] if x[0] > 0]
+    if not top:
+        return "no such file found matching %r -- try other words, or say the folder" % desc
+    in_time = [x for x in top if x[5]]
+    note = ""
+    if win and not in_time:
+        note = "Nothing like that from %s -- closest matches:\n" % (
+            re.search(r"today|yesterday|last week|this week|last month|\d+ days? ago|recently|"
+                      r"היום|אתמול|השבוע|שבוע שעבר|חודש שעבר", low) or re.search(r"$", low)
+        ).group(0).strip() or "that time"
+    with open(LAST_FOUND, "w", encoding="utf-8") as f:
+        json.dump({"at": now, "paths": [x[1] for x in top]}, f, ensure_ascii=False)
+    lines = []
+    for i, (s, p, c, why, _h, _t) in enumerate(top, 1):
+        lines.append("%d. %s\n    %s · %s%s%s" % (
+            i, os.path.basename(p), os.path.dirname(p).replace(_HOME, "~"),
+            time.strftime("%d %b %H:%M", time.localtime(c["when"])),
+            (" · from " + c["host"]) if c["host"] else "",
+            ("  (" + ", ".join(why) + ")") if why else ""))
+    global REPLY_TEXT
+    REPLY_TEXT = (note + ("Best match%s for \"%s\":\n" % ("es" if len(top) > 1 else "", desc)
+                          if not note else "") + "\n".join(lines) + "\n\nSay \"open the first one\" or \"convert it to pdf\".")
+    return "found %d candidate(s) -- VERIFIED:\n%s" % (len(top), "\n".join(lines))
+
+
+def _found(n=1):
+    try:
+        d = json.load(open(LAST_FOUND, encoding="utf-8"))
+        if time.time() - d.get("at", 0) < 1800 and len(d["paths"]) >= n:
+            return d["paths"][n - 1]
+    except (OSError, ValueError, KeyError):
+        pass
+    return None
+
+
+_ORD = {"first": 1, "1st": 1, "one": 1, "second": 2, "2nd": 2, "two": 2, "third": 3, "3rd": 3,
+        "three": 3, "fourth": 4, "4th": 4, "fifth": 5, "5th": 5, "last": 1}
+
+
+def a_open_found(args):
+    n = _ORD.get(str(args.get("n") or "first").lower(), _int(args.get("n"), 1))
+    p = _found(n)
+    if not p:
+        return "no such file -- find it first (e.g. 'find the pdf from last week')"
+    sh(["xdg-open", p], detach=True)
+    return "opened %s -- VERIFIED" % os.path.basename(p)
+
+
+# organize: type -> subfolder
+_ORG = [("PDFs", _KINDS["pdf"]), ("Images", _KINDS["image"]), ("Videos", _KINDS["video"]),
+        ("Audio", _KINDS["audio"]), ("Documents", _KINDS["word"] + _KINDS["text"]),
+        ("Slides", _KINDS["slides"]), ("Sheets", _KINDS["sheet"]), ("Archives", _KINDS["archive"]),
+        ("Programs", _KINDS["program"] + (".iso", ".sh", ".run")),
+        ("Code", (".py", ".js", ".ts", ".json", ".qml", ".c", ".cpp", ".h", ".java", ".html", ".css",
+                  ".fish", ".rs", ".go"))]
+
+
+def _org_plan(folder):
+    plan = []
+    for f in sorted(os.listdir(folder)):
+        p = os.path.join(folder, f)
+        if f.startswith(".") or not os.path.isfile(p) or os.path.islink(p):
+            continue
+        if f.endswith((".crdownload", ".part")) or time.time() - os.path.getmtime(p) < 120:
+            continue                    # still downloading / just arrived
+        ext = os.path.splitext(f)[1].lower()
+        dest = next((d for d, es in _ORG if ext in es), "Other")
+        plan.append((p, dest))
+    return plan
+
+
+def a_organize(args):
+    """Sort a folder's loose files into type folders. Shows the plan and asks first."""
+    folder = resolve_path(args.get("path") or args.get("what") or "downloads")
+    err = _safe_path(folder)
+    if err:
+        return err
+    if not os.path.isdir(folder):
+        return "no such folder: " + folder
+    plan = _org_plan(folder)
+    if not plan:
+        return "nothing to organize in %s -- no loose files" % folder
+    counts = {}
+    for _p, d in plan:
+        counts[d] = counts.get(d, 0) + 1
+    summary = "move %d files in %s into folders: %s (undo with 'undo organize')" % (
+        len(plan), folder.replace(_HOME, "~"),
+        ", ".join("%s %d" % (d, n) for d, n in sorted(counts.items(), key=lambda kv: -kv[1])))
+    if not args.get("_confirmed"):
+        # always ask -- even from the instant path: this moves lots of files
+        try:
+            with open(PENDING, "w", encoding="utf-8") as f:
+                json.dump({"name": "organize", "args": {"path": folder}, "summary": summary,
+                           "at": time.time()}, f)
+        except OSError:
+            return "refused (could not store the confirmation)"
+        emit("confirm", v=summary)
+        return ("NEEDS CONFIRMATION -- nothing moved yet. Plan: %s. It only runs if the user "
+                "replies yes." % summary)
+    moved = []
+    for p, d in plan:
+        if not os.path.exists(p):
+            continue
+        os.makedirs(os.path.join(folder, d), exist_ok=True)
+        dst = os.path.join(folder, d, os.path.basename(p))
+        stem, ext = os.path.splitext(dst)
+        i = 1
+        while os.path.exists(dst):
+            dst = "%s (%d)%s" % (stem, i, ext)
+            i += 1
+        shutil.move(p, dst)
+        moved.append([p, dst])
+    log = os.path.join(DATA, "organize-undo.json")
+    with open(log, "w", encoding="utf-8") as f:
+        json.dump({"at": time.time(), "folder": folder, "moved": moved}, f, ensure_ascii=False)
+    left = [m for m in moved if not os.path.exists(m[1])]
+    return "organized %d files in %s -- %s" % (
+        len(moved), folder.replace(_HOME, "~"),
+        "VERIFIED: every file is in its folder" if not left else "NOT VERIFIED: %d missing" % len(left))
+
+
+def a_undo_organize(_):
+    log = os.path.join(DATA, "organize-undo.json")
+    try:
+        d = json.load(open(log, encoding="utf-8"))
+    except (OSError, ValueError):
+        return "nothing to undo -- no organize was done"
+    back, skipped = 0, 0
+    for src, dst in d.get("moved", []):
+        if os.path.exists(dst) and not os.path.exists(src):
+            shutil.move(dst, src)
+            back += 1
+        else:
+            skipped += 1
+    for sub in {os.path.dirname(m[1]) for m in d.get("moved", [])}:
+        try:
+            os.rmdir(sub)               # only if it's empty again
+        except OSError:
+            pass
+    os.remove(log)
+    return "put %d files back%s -- VERIFIED" % (back, " (%d were moved since, left alone)" % skipped
+                                                if skipped else "")
+
+
+def a_to_pdf(args):
+    """Convert a document/slides/sheet/text/image(s) to PDF next to the original."""
+    what = (args.get("path") or args.get("what") or "").strip()
+    if what.lower() in ("", "it", "that", "this", "that file", "this file", "the file", "them"):
+        p = _found(1)
+        if not p:
+            return "no such file -- which file? (or find it first)"
+        paths = [p]
+    else:
+        paths = []
+        for one in re.split(r"\s*(?:,| and )\s*", what):
+            p = resolve_path(one)
+            if not os.path.exists(p):
+                hit = None
+                for root in _search_roots():
+                    o = sh(["fd", "-i", "--type", "f", "--max-results", "1", "-F", one, root], timeout=20)[1]
+                    if o.strip():
+                        hit = o.strip().splitlines()[0]
+                        break
+                p = hit or p
+            if not os.path.exists(p):
+                return "no such file: %s" % one
+            paths.append(p)
+    exts = {os.path.splitext(p)[1].lower() for p in paths}
+    if exts == {".pdf"}:
+        return "that's already a PDF: %s" % os.path.basename(paths[0])
+    first = paths[0]
+    outdir = resolve_path(args.get("to")) if args.get("to") else os.path.dirname(first)
+    err = _safe_path(os.path.join(outdir, "x.pdf"))
+    if err:
+        return err
+    stem = os.path.splitext(os.path.basename(first))[0]
+    out = os.path.join(outdir, stem + ".pdf")
+    i = 1
+    while os.path.exists(out):
+        out = os.path.join(outdir, "%s (%d).pdf" % (stem, i))
+        i += 1
+    import tempfile
+    tmpd = tempfile.mkdtemp(prefix="tar-pdf-")
+    try:
+        if exts <= set(_KINDS["image"]):
+            if not shutil.which("magick"):
+                return "could not convert: ImageMagick (magick) isn't installed"
+            rc, o = sh(["magick"] + paths + [out], timeout=120)
+        else:
+            if len(paths) > 1:
+                return "convert one document at a time (or several images together)"
+            exe = shutil.which("soffice") or shutil.which("libreoffice")
+            if not exe:
+                return "could not convert: LibreOffice isn't installed"
+            # own profile dir: works even while the user has LibreOffice open
+            rc, o = sh([exe, "-env:UserInstallation=file://" + tmpd + "/profile", "--headless",
+                        "--convert-to", "pdf", "--outdir", tmpd, first], timeout=180)
+            made = os.path.join(tmpd, stem + ".pdf")
+            if os.path.exists(made):
+                shutil.move(made, out)
+        ok = os.path.exists(out) and os.path.getsize(out) > 500 and open(out, "rb").read(4) == b"%PDF"
+    finally:
+        shutil.rmtree(tmpd, ignore_errors=True)
+    if not ok:
+        return "NOT DONE: conversion failed -- %s" % (o or "no PDF came out")[-200:]
+    with open(LAST_FOUND, "w", encoding="utf-8") as f:
+        json.dump({"at": time.time(), "paths": [out]}, f, ensure_ascii=False)
+    return "made %s (%d KB) in %s -- VERIFIED: it's a real PDF" % (
+        os.path.basename(out), os.path.getsize(out) // 1024, outdir.replace(_HOME, "~"))
+
+
 RAW_MESSAGE = ""                    # the user's message as typed (set by the brain)
 
 
@@ -5377,6 +5794,34 @@ ACTIONS = {
     "recent":     (a_recent, "files changed recently: days= (default 1), where=", []),
     "write_file": (a_write_file, "create a text file: path=, text= (append=true to add; "
                                  "overwriting asks the user)", []),
+    "find_file":  (a_find_file, "find a file from a LOOSE description: desc= the user's words "
+                                "(type, when, who sent it, words in it -- e.g. 'the pdf my teacher "
+                                "sent last week'); optional kind=pdf|word|slides|sheet|image|video|"
+                                "audio|archive, when=, source=. Searches Downloads/Documents/Desktop/"
+                                "Pictures/Videos/Music (Hebrew folder names handled) and Chrome's "
+                                "download list (where each file came from), reads inside PDFs/docs. "
+                                "Returns the best matches.",
+                   [r"^(?:find|where(?:'s| is| are| did i put)|look for|locate|get me|show me) "
+                    r"(?:the |my |that |those |all )?(?P<desc>(?=.*\b(?:pdfs?|files?|documents?|docx?|"
+                    r"photos?|pictures?|images?|videos?|songs?|presentations?|powerpoint|slides|"
+                    r"sheets?|excel|word|zip|downloads?|downloaded|sent|got|homework|assignments?|"
+                    r"recordings?|screenshots?|essay)\b).+?)\??$"]),
+    "open_found": (a_open_found, "open a file from the last find_file results: n=1..5",
+                   [r"^open (?:the )?(?P<n>first|second|third|fourth|fifth|1st|2nd|3rd|4th|5th|last)"
+                    r"(?: one| file| result| match)?$",
+                    r"^open (?:number|#|no\.?) ?(?P<n>\d)$"]),
+    "organize":   (a_organize, "sort a folder's loose files into type folders (PDFs, Images, "
+                               "Videos...) -- shows the plan and asks the user first: path= "
+                               "(default downloads). Undo: undo_organize",
+                   [r"^(?:organi[sz]e|clean up|sort|tidy(?: up)?) (?:my |the )?(?P<path>downloads?|"
+                    r"documents|desktop|pictures|videos|music|הורדות|מסמכים)(?: folder)?$"]),
+    "undo_organize": (a_undo_organize, "put files back after organize",
+                   [r"^undo (?:the )?(?:organi[sz]e|organizing|sorting|clean ?up)$"]),
+    "to_pdf":     (a_to_pdf, "convert a document/slides/sheet/text or images to PDF: path= file "
+                             "name or path (several images: 'a.jpg and b.jpg'), 'it' = the last "
+                             "found file; to= folder (default: next to it)",
+                   [r"^(?:convert|turn|make|export|save) (?P<path>.+?) (?:in)?to (?:a )?pdf$",
+                    r"^(?:pdf) (?P<path>.+)$"]),
     "screen_fx":  (a_screen_fx, "show a full-screen visual effect over the WHOLE screen "
                                 "(click-through): effect=<name> -- built-in matrix, snow, glitch, "
                                 "shake (shakes the real screen), fireworks, black hole, orbs, "
@@ -5693,7 +6138,7 @@ def match(text):
     return None, None
 
 
-_PRIORITY = ("screen_fx", "stop_fx", "remember", "forget", "play_game", "research", "virus_scan", "selfie", "evil", "missiles", "camera_live", "devices", "now_playing", "note", "stopwatch", "focus", "coin", "dice", "record", "remind", "wifi", "bluetooth", "dnd", "nightlight", "power",
+_PRIORITY = ("screen_fx", "stop_fx", "remember", "forget", "play_game", "research", "find_file", "open_found", "organize", "undo_organize", "to_pdf", "virus_scan", "selfie", "evil", "missiles", "camera_live", "devices", "now_playing", "note", "stopwatch", "focus", "coin", "dice", "record", "remind", "wifi", "bluetooth", "dnd", "nightlight", "power",
              "play", "weather", "datetime", "battery", "calc", "processes",
              "colorpick", "cliphist")
 
