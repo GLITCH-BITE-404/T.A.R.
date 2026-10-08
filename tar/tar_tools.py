@@ -1323,6 +1323,7 @@ def put_text(text, timeout=20):
     act = _active_window() or {}
     cls = (act.get("class") or "").lower()
     term = any(t == cls or cls.endswith("." + t) for t in _TERMINALS)
+    mini_say("typing: " + text[:60] + ("…" if len(text) > 60 else ""))
     old = _clip_save()
     try:
         _clip_put(text)
@@ -2598,6 +2599,124 @@ def _tar_window():
         return None
 
 
+# -- mini orb ------------------------------------------------------------------------
+# While T.A.R. works on the screen, a small click-through orb (TarMiniOrb.qml)
+# rests in a corner of the window being worked on, glides to just BESIDE each
+# spot before it's clicked, and says what it's doing in a speech bubble. Python
+# decides the whole layout and writes it to $TAR_DATA/mini.json (so background
+# tasks drive it too); screenshots black out exactly that layout, so T.A.R.
+# never sees -- or clicks -- its own orb.
+MINI_PATH = os.path.join(DATA, "mini.json")
+MINI_R = 26                       # orb radius incl. glow (px)
+BUBBLE_W, BUBBLE_H = 264, 72
+
+
+def _mini_read():
+    try:
+        with open(MINI_PATH, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def mini(**kw):
+    """Merge kw into the orb state and publish it. Never raises."""
+    try:
+        d = _mini_read()
+        if time.time() - d.get("at", 0) > 6:
+            d = {"click": d.get("click", 0)}          # stale: start fresh
+        d.update(kw)
+        d["at"] = time.time()
+        d["seq"] = d.get("seq", 0) + 1
+        if "x" in d and "bx" not in kw:
+            d.update(_mini_bubble(d["x"], d["y"], d.get("mw", 1920), d.get("mh", 1080),
+                                  d.get("tx"), d.get("ty")))
+        os.makedirs(DATA, exist_ok=True)
+        tmp = MINI_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(d, f)
+        os.replace(tmp, MINI_PATH)
+        return d
+    except Exception:
+        return {}
+
+
+def _mini_bubble(x, y, mw, mh=1080, tx=None, ty=None):
+    """Bubble box on the side of the orb AWAY from the target (it must never
+    cover what's about to be clicked), flipped at screen edges."""
+    tx = x if tx is None else tx
+    ty = y + 1 if ty is None else ty
+    up = ty > y                                   # target below the orb -> bubble above
+    if up and y - MINI_R - 8 - BUBBLE_H < 8:
+        up = False
+    if not up and y + MINI_R + 8 + BUBBLE_H > mh - 8:
+        up = True
+    bx = x - 20 if tx < x else x + 20 - BUBBLE_W  # extend away from the target sideways
+    bx = int(min(max(8, bx), mw - BUBBLE_W - 8))
+    by = int(y - MINI_R - 8 - BUBBLE_H) if up else int(y + MINI_R + 8)
+    return {"bx": bx, "by": by}
+
+
+def mini_say(text):
+    d = _mini_read()
+    if "x" not in d or time.time() - d.get("at", 0) > 6:
+        mini_rest()                     # give it a place before it talks
+    mini(on=True, say=str(text)[:110])
+
+
+def _mini_glide(x, y, mon):
+    """Move the orb to monitor-local (x, y); wait for the glide if it's far."""
+    d = _mini_read()
+    far = not d.get("on") or time.time() - d.get("at", 0) > 6 or \
+        abs(d.get("x", -999) - x) + abs(d.get("y", -999) - y) > 40
+    mini(on=True, x=int(x), y=int(y), mon=mon.get("name", ""),
+         mw=mon.get("width", 1920), mh=mon.get("height", 1080))
+    if far and d.get("on") and time.time() - d.get("at", 0) < 6:
+        time.sleep(0.32)                # matches the QML glide duration
+
+
+def mini_beside(tx, ty, mon=None):
+    """Park the orb just beside a target (never on it), flipping at screen edges."""
+    mon = mon or _monitor()
+    off = MINI_R + 22
+    x = tx + off if tx + off + MINI_R < mon.get("width", 1920) else tx - off
+    y = ty + off if ty + off + MINI_R < mon.get("height", 1080) else ty - off
+    mini(tx=int(tx), ty=int(ty))
+    _mini_glide(x, y, mon)
+
+
+def mini_rest(mon=None):
+    """Orb back to the lower-right corner of the window being worked on."""
+    mon = mon or _monitor()
+    w = target_window({}) if "target_window" in globals() else None
+    if w and w.get("at") and w.get("size"):
+        x = w["at"][0] - mon.get("x", 0) + w["size"][0] - 48
+        y = w["at"][1] - mon.get("y", 0) + w["size"][1] - 48
+    else:
+        x, y = mon.get("width", 1920) - 70, mon.get("height", 1080) - 70
+    _mini_glide(min(max(40, x), mon.get("width", 1920) - 40),
+                min(max(40, y), mon.get("height", 1080) - 40), mon)
+
+
+def _mini_mask(path):
+    """Black out the orb + its bubble in a screenshot (monitor-local pixels)."""
+    d = _mini_read()
+    if not d.get("on") or time.time() - d.get("at", 0) > 6 or "x" not in d:
+        return
+    try:
+        from PIL import Image, ImageDraw
+        im = Image.open(path)
+        dr = ImageDraw.Draw(im)
+        dr.rectangle([d["x"] - MINI_R - 4, d["y"] - MINI_R - 4, d["x"] + MINI_R + 4,
+                      d["y"] + MINI_R + 4], fill=(0, 0, 0))
+        if d.get("say"):
+            dr.rectangle([d["bx"] - 2, d["by"] - 2, d["bx"] + BUBBLE_W + 2,
+                          d["by"] + BUBBLE_H + 2], fill=(0, 0, 0))
+        im.save(path, quality=85)
+    except Exception:
+        pass
+
+
 class _TarHidden:
     """Get T.A.R. out of the way while looking/clicking.
 
@@ -2610,6 +2729,9 @@ class _TarHidden:
         # T.A.R.'s pop-out side tabs (viewer, tasks, console) sit OVER the
         # neighbouring app -- hide them for the shot or they block the text
         emit("ui", action="capture", state="on")
+        md = _mini_read()
+        if not md.get("on") or "x" not in md or time.time() - md.get("at", 0) > 6:
+            mini_rest()                 # the mini orb appears while T.A.R. works
         time.sleep(0.2)
         self.w = _tar_window()
         self.rect = None
@@ -2643,7 +2765,10 @@ class _TarHidden:
 
 def _shot(path):
     rc, out = sh(["grim", "-t", "jpeg", "-q", "80", path], timeout=10)
-    return rc == 0 and os.path.exists(path)
+    ok = rc == 0 and os.path.exists(path)
+    if ok:
+        _mini_mask(path)                # T.A.R. must not see its own mini orb
+    return ok
 
 
 def _monitor():
@@ -2786,6 +2911,7 @@ def _locate_once(target):
     OCR first (exact for text buttons), vision second (icons, images)."""
     path = os.path.join(DATA, "screen-look.jpg")
     mon = _monitor()
+    mini_rest(mon)                      # out of the way of what it's looking for
     with _TarHidden() as hid:
         if not _shot(path):
             return None, "couldn't take a screenshot"
@@ -2829,11 +2955,13 @@ _NO_POINTER = ("can't click yet: the mouse tool isn't installed. Tell the user t
 
 def _move(x, y, mon=None):
     mon = mon or _monitor()
+    mini_beside(x, y, mon)              # the orb flies over first, then the pointer goes
     sh(["hyprctl", "dispatch", "movecursor", str(int(mon.get("x", 0) + x)),
         str(int(mon.get("y", 0) + y))])
 
 
 def _click(button="left", double=False):
+    mini(click=_mini_read().get("click", 0) + 1)    # flash ring at the target
     for _ in range(2 if double else 1):
         sh([_wlrctl(), "pointer", "click", button])
         if double:

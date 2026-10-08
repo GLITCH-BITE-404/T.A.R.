@@ -267,6 +267,13 @@ def _voice_grounding(action, args):
     return None
 
 
+# screen actions narrate themselves in the mini orb's speech bubble
+_MINI_LABELS = {"look": "looking at the screen", "click_on": "clicking", "click": "clicking",
+                "type_into": "typing into", "type": "typing", "scroll": "scrolling",
+                "key": "pressing", "fill_table": "filling the table", "fill_sheet":
+                "filling in the sheet", "close_tab": "closing tabs", "browser": "browser:"}
+
+
 def run_tool(name, payload):
     os.environ["TAR_BACKEND"] = "cloud"     # unlocks the shell action
     import tar_tools as T
@@ -286,6 +293,9 @@ def run_tool(name, payload):
     stop = _voice_grounding(action, args)
     if stop:
         return stop
+    if action in _MINI_LABELS:
+        what = args.get("target") or args.get("q") or args.get("what") or args.get("text") or ""
+        T.mini_say("%s%s…" % (_MINI_LABELS[action], (" " + str(what)[:60]) if what else ""))
     try:
         out = T.run(action, args)
     except Exception as e:          # never let a tool crash the turn
@@ -1070,6 +1080,8 @@ def background_loop(task, every, minutes, autoclick="", rate=8):
         t0 = time.time()
 
         def push(kind, text):
+            if kind == "think":
+                T.mini_say(text[:110])         # the orb thinks out loud too
             d = T.loop_running() or {}
             feed = (d.get("feed") or []) + [{"r": n, "k": kind, "t": text[:220],
                                               "at": time.time()}]
