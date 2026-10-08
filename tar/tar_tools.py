@@ -1593,7 +1593,9 @@ def a_web(args):
         return ("no Chrome profile matching %r. profiles: %s" % (
             args.get("profile"), ", ".join(p["name"] + (" (school/managed)" if p["managed"] else "")
                                            for p in chrome_profiles()) or "none found"))
-    if not prof and not str(args.get("new", "")).lower() in ("1", "true", "yes"):
+    if not str(args.get("new", "")).lower() in ("1", "true", "yes"):
+        # also when a profile is named: "play cookie clicker" opened a second
+        # copy of the game because the model passed profile=main
         w = _already_open(q)
         if w:
             sh(["hyprctl", "dispatch", "focuswindow", "address:" + w["address"]])
@@ -2435,6 +2437,11 @@ def a_keep_doing(args):
     # check in now and then to make decisions
     every = max(3, min(300, _int(args.get("every"), 15 if autoclick else 3)))
     minutes = max(1, min(120, _int(args.get("minutes"), 20)))
+    win = target_window({"what": args.get("app") or args.get("window")} if (
+        args.get("app") or args.get("window")) else {})
+    if win and not window_on_screen(win)[0]:
+        sh(["hyprctl", "dispatch", "focuswindow", "address:" + win["address"]])
+        time.sleep(0.3)                 # starting a task = show its window
     here = os.path.dirname(os.path.abspath(__file__))
     log = open(os.path.join(DATA, "loop.log"), "a")
     p = subprocess.Popen([sys.executable, os.path.join(here, "tar_cloud.py"), "loop",
@@ -2447,12 +2454,51 @@ def a_keep_doing(args):
                    "until": time.time() + minutes * 60, "every": every,
                    "round": 0, "status": "starting", "last": "", "paused": False, "feed": [],
                    "autoclick": autoclick, "rate": rate, "clicks": 0,
-                   "beat": time.time()}, f)
+                   "win": (win or {}).get("address", ""),
+                   "win_title": (win or {}).get("title", ""), "beat": time.time()}, f)
     sh(["notify-send", "-a", "T.A.R.", "T.A.R. is working", task[:120] + "  (say stop to end)"])
     return ("started in the background: %r%s -- an AI round every %ds for up to %d min. "
             "Say 'stop' to end it. -- VERIFIED" % (
                 task[:80], (" + autoclicking %r %d/s between rounds" % (autoclick, rate))
                 if autoclick else "", every, minutes))
+
+
+def window_on_screen(w):
+    """(True, "") if window w is on a workspace that's showing right now."""
+    if not w:
+        return False, "the window is gone"
+    rc, out = sh(["hyprctl", "-j", "monitors"])
+    try:
+        shown = {m["activeWorkspace"]["id"] for m in json.loads(out)}
+        shown |= {m["specialWorkspace"]["id"] for m in json.loads(out)
+                  if (m.get("specialWorkspace") or {}).get("id")}
+    except (ValueError, KeyError, TypeError):
+        return True, ""
+    ws = (w.get("workspace") or {})
+    if ws.get("id") in shown:
+        return True, ""
+    return False, "it's on workspace %s" % (ws.get("name") or ws.get("id"))
+
+
+def task_window_ok():
+    """Is the background task's window still there AND on screen?"""
+    d = loop_running() or {}
+    addr = d.get("win")
+    if not addr:
+        return True, ""                 # task wasn't tied to a window
+    w = next((c for c in _clients() if c.get("address") == addr), None)
+    if not w:
+        return False, "its window was closed"
+    return window_on_screen(w)
+
+
+def cursor_pos():
+    rc, out = sh(["hyprctl", "cursorpos"], timeout=3)
+    try:
+        x, y = out.replace(" ", "").split(",")
+        return int(float(x)), int(float(y))
+    except ValueError:
+        return None
 
 
 def a_stop_task(_):
@@ -2658,6 +2704,14 @@ def _mini_bubble(x, y, mw, mh=1080, tx=None, ty=None):
     bx = int(min(max(8, bx), mw - BUBBLE_W - 8))
     by = int(y - MINI_R - 8 - BUBBLE_H) if up else int(y + MINI_R + 8)
     return {"bx": bx, "by": by}
+
+
+def short_say(text, words=6):
+    """Orb bubbles stay tiny: first clause, a few words."""
+    t = re.sub(r"[*_`#>]+", "", str(text or "")).strip()
+    t = re.split(r"(?<=[.!?:;])\s|\n|, ", t)[0]
+    w = t.split()
+    return " ".join(w[:words]) + ("…" if len(w) > words else "")
 
 
 def mini_say(text):

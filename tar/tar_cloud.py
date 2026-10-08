@@ -294,8 +294,8 @@ def run_tool(name, payload):
     if stop:
         return stop
     if action in _MINI_LABELS:
-        what = args.get("target") or args.get("q") or args.get("what") or args.get("text") or ""
-        T.mini_say("%s%s…" % (_MINI_LABELS[action], (" " + str(what)[:60]) if what else ""))
+        what = "" if action in ("look", "scroll") else (args.get("target") or args.get("what") or "")
+        T.mini_say(_MINI_LABELS[action] + (" " + T.short_say(what, 3) if what else ""))
     try:
         out = T.run(action, args)
     except Exception as e:          # never let a tool crash the turn
@@ -993,12 +993,32 @@ def _autoclick_burst(target, rate, until_ts, push):
     x, y = loc["x"], loc["y"]
     n = 0
     gap = 1.0 / max(1, rate)
+    ok, why = T.task_window_ok()
+    if not ok:
+        push("warn", "autoclick paused: " + why)
+        return 0
+    mon = T._monitor()
+    want = (mon.get("x", 0) + int(x), mon.get("y", 0) + int(y))
     with T._TarHidden():
         T._move(x, y)
+        T.mini_say("clicking " + T.short_say(target, 3))
         while time.time() < until_ts:
             d = T.loop_running()
             if not d or d.get("paused"):
                 break
+            if n % 8 == 0:
+                # the clicker presses wherever the pointer IS: if the user moved
+                # it or switched away, stop instead of clicking their stuff
+                cur = T.cursor_pos()
+                if cur and abs(cur[0] - want[0]) + abs(cur[1] - want[1]) > 6:
+                    push("warn", "you moved the mouse -- stopped autoclicking until next round")
+                    T.mini_say("you're using the mouse, waiting")
+                    break
+                ok, why = T.task_window_ok()
+                if not ok:
+                    push("warn", "autoclick paused: " + why)
+                    T.mini_say("waiting: " + why)
+                    break
             T._click("left", False)
             n += 1
             if n % 20 == 0:
@@ -1071,6 +1091,18 @@ def background_loop(task, every, minutes, autoclick="", rate=8):
             T.loop_update(status="paused", beat=time.time())
             time.sleep(1)
             continue
+        ok, why = T.task_window_ok()
+        if not ok:
+            # never act on whatever happens to be on screen instead (and don't
+            # spend a Gemini call looking at the wrong thing)
+            if (T.loop_running() or {}).get("status") != "waiting for the window":
+                T.loop_update(status="waiting for the window", last="paused: " + why)
+            T.mini_say("waiting: " + why)
+            if "closed" in why:
+                break
+            time.sleep(3)
+            T.loop_update(beat=time.time())
+            continue
         n += 1
         T.loop_update(round=n, status="working", beat=time.time())
         before = len(open(B.ACTLOG_PATH).readlines()) if os.path.exists(B.ACTLOG_PATH) else 0
@@ -1081,7 +1113,7 @@ def background_loop(task, every, minutes, autoclick="", rate=8):
 
         def push(kind, text):
             if kind == "think":
-                T.mini_say(text[:110])         # the orb thinks out loud too
+                T.mini_say("thinking…")        # the full thought is in the orb's card
             d = T.loop_running() or {}
             feed = (d.get("feed") or []) + [{"r": n, "k": kind, "t": text[:220],
                                               "at": time.time()}]
