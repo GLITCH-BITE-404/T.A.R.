@@ -1232,9 +1232,14 @@ def main():
     elif cmd == "loop":
         def opt(name, default=""):
             return sys.argv[sys.argv.index(name) + 1] if name in sys.argv else default
-        return background_loop(opt("--task"), int(opt("--every", "15")),
-                               int(opt("--minutes", "20")), opt("--autoclick"),
-                               int(opt("--rate", "8")))
+        import tar_tools as _T
+        _T.MINI_HOLD = 90               # a task keeps its orb out between rounds
+        try:
+            return background_loop(opt("--task"), int(opt("--every", "15")),
+                                   int(opt("--minutes", "20")), opt("--autoclick"),
+                                   int(opt("--rate", "8")))
+        finally:
+            _T.mini(on=False, say="")   # task over: the orb flies home
 
     elif cmd == "chat":
         msg = None

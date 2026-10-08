@@ -2607,6 +2607,8 @@ def _tar_window():
 # tasks drive it too); screenshots black out exactly that layout, so T.A.R.
 # never sees -- or clicks -- its own orb.
 MINI_PATH = os.path.join(DATA, "mini.json")
+MINI_DOCK = os.path.join(DATA, "mini-dock.json")     # where the home orb sits (QML writes it)
+MINI_HOLD = 6                     # seconds the working orb stays out after an update
 MINI_R = 26                       # orb radius incl. glow (px)
 BUBBLE_W, BUBBLE_H = 264, 72
 
@@ -2623,9 +2625,10 @@ def mini(**kw):
     """Merge kw into the orb state and publish it. Never raises."""
     try:
         d = _mini_read()
-        if time.time() - d.get("at", 0) > 6:
+        if time.time() - d.get("at", 0) > d.get("hold", 6):
             d = {"click": d.get("click", 0)}          # stale: start fresh
         d.update(kw)
+        d["hold"] = MINI_HOLD
         d["at"] = time.time()
         d["seq"] = d.get("seq", 0) + 1
         if "x" in d and "bx" not in kw:
@@ -2659,7 +2662,7 @@ def _mini_bubble(x, y, mw, mh=1080, tx=None, ty=None):
 
 def mini_say(text):
     d = _mini_read()
-    if "x" not in d or time.time() - d.get("at", 0) > 6:
+    if "x" not in d or time.time() - d.get("at", 0) > d.get("hold", 6):
         mini_rest()                     # give it a place before it talks
     mini(on=True, say=str(text)[:110])
 
@@ -2667,12 +2670,13 @@ def mini_say(text):
 def _mini_glide(x, y, mon):
     """Move the orb to monitor-local (x, y); wait for the glide if it's far."""
     d = _mini_read()
-    far = not d.get("on") or time.time() - d.get("at", 0) > 6 or \
+    live = d.get("on") and time.time() - d.get("at", 0) < d.get("hold", 6)
+    far = not live or \
         abs(d.get("x", -999) - x) + abs(d.get("y", -999) - y) > 40
     mini(on=True, x=int(x), y=int(y), mon=mon.get("name", ""),
          mw=mon.get("width", 1920), mh=mon.get("height", 1080))
-    if far and d.get("on") and time.time() - d.get("at", 0) < 6:
-        time.sleep(0.32)                # matches the QML glide duration
+    if far:
+        time.sleep(0.32)                # glide (or fly out from home): QML takes 0.3 s
 
 
 def mini_beside(tx, ty, mon=None):
@@ -2701,12 +2705,26 @@ def mini_rest(mon=None):
 def _mini_mask(path):
     """Black out the orb + its bubble in a screenshot (monitor-local pixels)."""
     d = _mini_read()
-    if not d.get("on") or time.time() - d.get("at", 0) > 6 or "x" not in d:
+    try:
+        with open(MINI_DOCK, encoding="utf-8") as f:
+            dock = json.load(f)
+    except (OSError, ValueError):
+        dock = {}
+    working = d.get("on") and time.time() - d.get("at", 0) < d.get("hold", 6) and "x" in d
+    # the home orb may still be on screen for a moment after it hides
+    home = dock.get("w") and (dock.get("visible") or time.time() - dock.get("at", 0) < 1.5)
+    if not working and not home:
         return
     try:
         from PIL import Image, ImageDraw
         im = Image.open(path)
         dr = ImageDraw.Draw(im)
+        if home:
+            dr.rectangle([dock["x"], dock["y"], dock["x"] + dock["w"], dock["y"] + dock["h"]],
+                         fill=(0, 0, 0))
+        if not working:
+            im.save(path, quality=85)
+            return
         dr.rectangle([d["x"] - MINI_R - 4, d["y"] - MINI_R - 4, d["x"] + MINI_R + 4,
                       d["y"] + MINI_R + 4], fill=(0, 0, 0))
         if d.get("say"):
@@ -2730,7 +2748,7 @@ class _TarHidden:
         # neighbouring app -- hide them for the shot or they block the text
         emit("ui", action="capture", state="on")
         md = _mini_read()
-        if not md.get("on") or "x" not in md or time.time() - md.get("at", 0) > 6:
+        if not md.get("on") or "x" not in md or time.time() - md.get("at", 0) > md.get("hold", 6):
             mini_rest()                 # the mini orb appears while T.A.R. works
         time.sleep(0.2)
         self.w = _tar_window()

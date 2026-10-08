@@ -252,5 +252,5 @@ ShellRoot {
     }
 
     // small click-through orb that shows what T.A.R. is doing on screen
-    TarMiniOrb {}
+    TarMiniOrb { host: loader.item }
 }
