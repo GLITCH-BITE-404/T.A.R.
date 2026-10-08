@@ -2554,68 +2554,185 @@ def a_play_game(args):
         g.get("every", 15), "VERIFIED" if "started" in out else out)
 
 
-# -- screen effects: real overlays (tar/fx/<name>.qml), checked after launch --------
+# -- screen effects: real overlays (tar/fx/<name>.qml + AI-written ones) ------------
+# Built-ins live in tar/fx/, effects the model writes (make_fx) in
+# $TAR_DATA/fx-custom/. Every launch is checked: the overlay host prints
+# FX_READY / FX_FAIL and QML errors land in fx.log, which goes back to the
+# model so it fixes its code instead of claiming it worked.
 FX_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fx")
-FX_PID = os.path.join(DATA, "fx.pid")
+FX_HOST = os.path.join(FX_DIR, "host.qml")
+FX_CUSTOM = os.path.join(DATA, "fx-custom")
+FX_LOG = os.path.join(DATA, "fx.log")
 _FX_ALIASES = {"matrix": "matrix", "matrix rain": "matrix", "code rain": "matrix", "the matrix": "matrix",
                "snow": "snow", "snowfall": "snow", "it snow": "snow", "snowing": "snow",
-               "glitch": "glitch", "glitches": "glitch", "screen glitch": "glitch", "glitchy": "glitch"}
+               "glitch": "glitch", "glitches": "glitch", "screen glitch": "glitch", "glitchy": "glitch",
+               "shake": "shake", "screen shake": "shake", "earthquake": "shake", "shaking": "shake"}
+_FX_INSTANT = {"shake": 2}           # built from a screenshot: no fade, short
+
+
+def _fx_file(name):
+    for d, ext in ((FX_DIR, ".qml"), (FX_CUSTOM, ".qml")):
+        p = os.path.join(d, name + ext)
+        if name != "host" and os.path.exists(p):
+            return p
+    return None
 
 
 def fx_list():
-    return sorted(f[:-4] for f in os.listdir(FX_DIR) if f.endswith(".qml") and f != "host.qml")
+    names = [f[:-4] for f in os.listdir(FX_DIR) if f.endswith(".qml") and f != "host.qml"]
+    if os.path.isdir(FX_CUSTOM):
+        names += [f[:-4] for f in os.listdir(FX_CUSTOM) if f.endswith(".qml")]
+    return sorted(set(names))
 
 
-def _fx_running():
-    try:
-        pid = int(open(FX_PID).read().strip())
-        os.kill(pid, 0)
-        return pid
-    except (OSError, ValueError):
-        return None
+def _fx_pids():
+    """Every running effect host (argv match, not pkill -f on a pattern)."""
+    out = []
+    for d in os.listdir("/proc"):
+        if not d.isdigit():
+            continue
+        try:
+            argv = open("/proc/%s/cmdline" % d, "rb").read().split(b"\0")
+        except OSError:
+            continue
+        if FX_HOST.encode() in argv:
+            out.append(int(d))
+    return out
+
+
+def fx_running():
+    return bool(_fx_pids())
 
 
 def a_stop_fx(_):
-    pid = _fx_running()
-    if not pid:
+    pids = _fx_pids()
+    if not pids:
         return "no screen effect is running"
-    try:
-        os.kill(pid, 15)
-    except OSError:
-        pass
-    try:
-        os.remove(FX_PID)
-    except OSError:
-        pass
-    return "stopped the screen effect -- VERIFIED"
+    for pid in pids:
+        try:
+            os.kill(pid, 15)
+        except OSError:
+            pass
+    time.sleep(0.4)
+    left = _fx_pids()
+    for pid in left:
+        try:
+            os.kill(pid, 9)
+        except OSError:
+            pass
+    return "stopped the screen effect -- VERIFIED: no effect overlay left"
 
 
-def a_screen_fx(args):
-    """Show a full-screen effect (click-through) for a while."""
-    raw = (args.get("effect") or args.get("what") or "").strip().lower()
-    raw = re.sub(r"^(?:a|an|the|some)\s+|\s+(?:effect|on (?:my|the) screen|on screen)$", "", raw).strip()
-    name = _FX_ALIASES.get(raw, raw)
-    if name not in fx_list():
-        return "don't know how to show %r -- effects I have: %s" % (raw, ", ".join(fx_list()))
-    secs = max(3, min(600, _int(args.get("seconds"), 30)))
+def _fx_shots():
+    """A screenshot of every monitor, for effects that distort the screen."""
+    rc, out = sh(["hyprctl", "-j", "monitors"])
+    try:
+        mons = [m["name"] for m in json.loads(out)]
+    except (ValueError, KeyError, TypeError):
+        mons = []
+    for m in mons:
+        sh(["grim", "-o", m, os.path.join(DATA, "fx-%s.png" % m)], timeout=10)
+
+
+def _fx_launch(src, secs, fade=600, shot=False):
+    """Start the overlay host; wait for FX_READY. -> (ok, message)"""
     a_stop_fx({})                        # one effect at a time
     qs = shutil.which("qs") or shutil.which("quickshell")
     if not qs:
-        return "could not start it: quickshell isn't installed"
-    p = subprocess.Popen([qs, "-p", os.path.join(FX_DIR, "host.qml")], start_new_session=True,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                         env=dict(os.environ, TAR_FX=name, TAR_FX_SECS=str(secs)))
-    with open(FX_PID, "w") as f:
-        f.write(str(p.pid))
-    # really on screen? the overlay layer must show up in Hyprland
-    for _ in range(12):
+        return False, "quickshell isn't installed"
+    if shot:
+        _fx_shots()
+    log = open(FX_LOG, "w")
+    p = subprocess.Popen([qs, "-p", FX_HOST], start_new_session=True, stdout=log, stderr=log,
+                         env=dict(os.environ, TAR_FX=src, TAR_FX_SECS=str(secs),
+                                  TAR_FX_FADE=str(fade), TAR_FX_SHOTS=DATA,
+                                  QT_FORCE_STDERR_LOGGING="1"))
+    for _ in range(24):
         time.sleep(0.25)
-        if p.poll() is not None:
-            return "NOT DONE: the %s effect crashed on start" % name
-        if "tar-fx" in sh(["hyprctl", "layers"])[1]:
-            return ("showing %s on the screen for %ds (say 'stop the effect' to end it) -- "
-                    "VERIFIED: overlay is up" % (name, secs))
-    return "NOT VERIFIED: started %s but its overlay never appeared" % name
+        try:
+            text = re.sub(r"\x1b\[[0-9;]*m", "", open(FX_LOG, errors="replace").read())
+        except OSError:
+            text = ""
+        text = text.replace("file://" + FX_CUSTOM + "/", "")     # short file names for the model
+        errs = [l for l in text.splitlines() if re.search(
+            r"ERROR|Error:|TypeError|ReferenceError|SyntaxError|is not a type|not installed|"
+            r"Cannot assign|Invalid property|Expected token|Unexpected token", l)]
+        if "FX_FAIL" in text or p.poll() is not None or (errs and "FX_READY" not in text):
+            a_stop_fx({})
+            return False, "\n".join(e.strip()[-240:] for e in errs[:8]) or "it exited right away"
+        if "FX_READY" in text and "tar-fx" in sh(["hyprctl", "layers"])[1]:
+            # runtime errors right after start (bad bindings) count too
+            time.sleep(0.6)
+            text = re.sub(r"\x1b\[[0-9;]*m", "", open(FX_LOG, errors="replace").read())
+            text = text.replace("file://" + FX_CUSTOM + "/", "")
+            errs = [l for l in text.splitlines() if re.search(
+                r"TypeError|ReferenceError|Error:|Cannot assign", l)]
+            if errs:
+                a_stop_fx({})
+                return False, "\n".join(e.strip()[-240:] for e in errs[:8])
+            return True, "overlay is up"
+    a_stop_fx({})
+    return False, "the overlay never appeared"
+
+
+def a_screen_fx(args):
+    """Show a full-screen effect (built-in or one T.A.R. made earlier)."""
+    raw = (args.get("effect") or args.get("what") or "").strip().lower()
+    raw = re.sub(r"^(?:a|an|the|some)\s+|\s+(?:effect|on (?:my|the) screen|on screen)$", "", raw).strip()
+    name = _FX_ALIASES.get(raw, re.sub(r"[^a-z0-9_-]+", "-", raw).strip("-"))
+    path = _fx_file(name)
+    if not path:
+        return ("don't know how to show %r yet -- effects I have: %s. To make a new one, "
+                "write it with make_fx" % (raw, ", ".join(fx_list())))
+    secs = _FX_INSTANT.get(name) or max(3, min(600, _int(args.get("seconds"), 30)))
+    code = open(path, errors="replace").read()
+    ok, msg = _fx_launch(path, secs, fade=0 if name in _FX_INSTANT else 600,
+                         shot="property string shot" in code)
+    if not ok:
+        return "NOT DONE: the %s effect failed -- %s" % (name, msg)
+    return ("showing %s on the screen for %ds (say 'stop' to end it) -- VERIFIED: %s"
+            % (name, secs, msg))
+
+
+_FX_OK_IMPORTS = {"QtQuick", "QtQuick.Shapes", "QtQuick.Particles", "QtQuick.Effects",
+                  "QtQuick.Window"}
+_FX_BANNED = re.compile(r"XMLHttpRequest|openUrlExternally|createQmlObject|Quickshell|"
+                        r"\bProcess\b|FileView|Qt\.labs|LocalStorage|https?://|file://|"
+                        r"\bLoader\b|\bsource\s*:\s*[\"'](?!file:)", re.I)
+
+
+def a_make_fx(args):
+    """The model writes a visual effect (QML) -> checked, run, errors reported back."""
+    name = re.sub(r"[^a-z0-9_-]+", "-", (args.get("name") or "custom").lower()).strip("-")[:40] or "custom"
+    code = args.get("qml") or args.get("code") or ""
+    if not code.strip():
+        return "make_fx needs qml= (a complete QML file) and name="
+    if len(code) > 24000:
+        return "NOT DONE: effect code too long (keep it under 24 KB)"
+    if name in [f[:-4] for f in os.listdir(FX_DIR)]:
+        name += "-custom"
+    # visuals only: plain QtQuick modules, nothing that reaches files/network/programs
+    bad_imp = [m for m in re.findall(r"^\s*import\s+([\w.]+)", code, re.M) if m not in _FX_OK_IMPORTS]
+    if bad_imp:
+        return ("NOT DONE: effects may only import %s (not %s) -- rewrite it with those"
+                % (", ".join(sorted(_FX_OK_IMPORTS)), ", ".join(bad_imp)))
+    hit = _FX_BANNED.search(code)
+    if hit:
+        return ("NOT DONE: effects are visuals only -- %r isn't allowed in them. Rewrite without it"
+                % hit.group(0))
+    os.makedirs(FX_CUSTOM, exist_ok=True)
+    path = os.path.join(FX_CUSTOM, name + ".qml")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(code)
+    secs = max(2, min(600, _int(args.get("seconds"), 20)))
+    ok, msg = _fx_launch(path, secs, fade=0 if args.get("instant") in ("1", "true", True) else 400,
+                         shot="property string shot" in code)
+    if not ok:
+        os.remove(path)
+        return ("NOT DONE: your effect code failed to run. Errors:\n%s\nFix the code and call "
+                "make_fx again." % msg)
+    return ("made and showing effect %r for %ds -- VERIFIED: %s. Saved: say 'show %s' to "
+            "play it again." % (name, secs, msg, name))
 
 
 RAW_MESSAGE = ""                    # the user's message as typed (set by the brain)
@@ -5255,15 +5372,35 @@ ACTIONS = {
     "recent":     (a_recent, "files changed recently: days= (default 1), where=", []),
     "write_file": (a_write_file, "create a text file: path=, text= (append=true to add; "
                                  "overwriting asks the user)", []),
-    "screen_fx":  (a_screen_fx, "show a REAL full-screen visual effect over everything "
-                                "(click-through): effect=matrix|snow|glitch, seconds= (default 30). "
-                                "Only these exist -- say so if asked for another.",
+    "screen_fx":  (a_screen_fx, "show a full-screen visual effect over the WHOLE screen "
+                                "(click-through): effect=<name> -- built-in matrix, snow, glitch, "
+                                "shake (shakes the real screen), or any effect you made with "
+                                "make_fx. seconds= (default 30). For an effect that doesn't exist "
+                                "yet, write it with make_fx.",
                    [r"^(?:(?:can|could) you |please )?(?:make|put|show|start|do|give me|turn on)? ?"
                     r"(?:a |an |the |some )?(?P<effect>matrix(?: rain)?|code rain|snow(?:fall)?|"
                     r"(?:screen )?glitch(?:es)?)(?: effect)?(?: on (?:my|the) screen)?"
                     r"(?: for (?P<seconds>\d+) ?(?:s|sec|secs|seconds))?$",
                     r"^make it (?P<effect>snow)(?: on (?:my|the) screen)?$",
+                    r"^(?:make |let )?(?:my |the )?screen (?P<effect>shake)$",
+                    r"^(?P<effect>shake) (?:my|the) screen$",
+                    r"^make (?:my|the) screen (?P<effect>shake)$",
+                    r"^(?:show|play|run|do|replay) (?:the |my |that )?(?P<effect>[a-z0-9 _-]+?) "
+                    r"effect(?: again)?$",
+                    r"^(?:do an? |make an? )?(?P<effect>earthquake)(?: on (?:my|the) screen)?$",
                     r"^make (?:my|the) screen (?P<effect>glitch)(?:y)?$"]),
+    "make_fx":    (a_make_fx, "WRITE a new full-screen visual effect and run it: name=, qml= a "
+                              "complete QML file: `import QtQuick` (also allowed: QtQuick.Shapes, "
+                              "QtQuick.Particles, QtQuick.Effects) and ONE root Item; the host makes "
+                              "it fill the screen, so use the root's width/height (they start at 0 "
+                              "-- start motion only once width > 0). Keep it light: <= 300 items, "
+                              "move things with ONE Timer at ~30 fps, no Canvas full-screen redraws. "
+                              "Visuals only: no network, files or programs. To distort the REAL "
+                              "screen, declare `property string shot` on the root -- it gets set to "
+                              "a screenshot path of that screen (show it with Image, source: "
+                              "\"file://\" + shot). instant=true for no fade-in. seconds= (default "
+                              "20). If it returns errors, fix the code and call make_fx again.",
+                   []),
     "stop_fx":    (a_stop_fx, "stop the screen effect",
                    [r"^(?:stop|end|kill|remove|turn off) (?:the |that )?(?:screen )?(?:effect|matrix|"
                     r"rain|snow|glitch|matrix rain)$"]),
@@ -5360,7 +5497,7 @@ UI_PATTERNS = {
                   r"^hacker ?mode$", r"^enhance$"],
     "matrix":    [r"^(?:enter the matrix|wake up,? neo|follow the white rabbit|red pill)$"],
     "party":     [r"^(?:party|rave|disco)(?: mode| time)?$", r"^let'?s party$"],
-    "shake":     [r"^(?:earthquake|shake(?: it)?)$"],
+    "shake":     [r"^shake(?: it| yourself)?$"],
     "heartbeat": [r"^are you alive$", r"^heartbeat$"],
     "flash":     [r"^lumos$", r"^flashbang$"],
     "shock":     [r"^shockwave$", r"^boom$", r"^kamehameha$"],
@@ -5567,6 +5704,8 @@ _STOP_RE = re.compile(r"^(?:stop|stop it|stop now|stop playing|stop that|ok stop
 
 
 def _match_one(low):
+    if fx_running() and _STOP_RE.match(low):
+        return "stop_fx", {}            # "stop" ends the effect on screen, not the music
     if loop_running():
         if _STOP_RE.match(low):
             return "stop_task", {}

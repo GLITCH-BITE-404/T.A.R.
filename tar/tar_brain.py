@@ -1354,6 +1354,13 @@ def _act_failed(out):
 def chat(message, no_history=False, no_memory=False, no_act=False,
          attach=None):
     cfg = config()
+    # "exec <request>": do it FOR REAL -- no animating T.A.R.'s own window as a
+    # stand-in ("make my screen shake" used to just shake T.A.R.)
+    m_exec = re.match(r"^\s*(?:exec|execute)\b[\s:,-]*(.+)$", message, re.I | re.S)
+    os.environ.pop("TAR_EXEC", None)
+    if m_exec:
+        message = m_exec.group(1).strip()
+        os.environ["TAR_EXEC"] = "1"
     # NOTE ON ORDER: the deterministic matcher runs BEFORE the cloud backend,
     # not after. An unambiguous command ("open firefox", "screenshot") is then
     # executed locally -- instantly, free, and with no chance of a model
@@ -1387,6 +1394,8 @@ def chat(message, no_history=False, no_memory=False, no_act=False,
             # a chain can collapse to one action ("open a terminal and run
             # btop" -> run btop); use it rather than re-matching the raw text
             name, args = chain[0] if len(chain) == 1 else t.match(message)
+            if name and os.environ.get("TAR_EXEC") and name in getattr(t, "UI_ACTIONS", {}):
+                name = None             # exec wants the real thing, not a T.A.R. animation
             if name:
                 out = _run_act(name, args, direct=True)
                 if _act_failed(out):

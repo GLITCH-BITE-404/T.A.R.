@@ -362,6 +362,10 @@ def run_tool(name, payload):
     stop = _voice_grounding(action, args)
     if stop:
         return stop
+    if os.environ.get("TAR_EXEC") and action in T.UI_ACTIONS:
+        return ("not allowed: the user said exec, and %r only animates T.A.R.'s OWN window. Do it "
+                "for real on their screen/system: screen_fx / make_fx for visual effects, or the "
+                "real action that does it." % action)
     if action in _MINI_LABELS:
         what = "" if action in ("look", "scroll") else (args.get("target") or args.get("what") or "")
         T.mini_say(_MINI_LABELS[action] + (" " + T.short_say(what, 3) if what else ""))
@@ -1074,6 +1078,12 @@ def chat_gemini(message, model, max_turns=10):
     if gap > 300:
         system += (" The conversation was idle for %d minutes -- treat the latest message as "
                    "a fresh start." % int(gap // 60))
+    if os.environ.get("TAR_EXEC"):
+        system += ("\n\nEXEC MODE: the user wants this DONE FOR REAL on their screen/system right "
+                   "now. Use real actions. A visual effect that doesn't exist yet: WRITE it with "
+                   "make_fx (and fix it if it returns errors). Never use T.A.R.'s own UI animations "
+                   "(shake, glitch, barrel roll...) as a stand-in. Report only what the action "
+                   "results show.")
     voice = os.environ.get("TAR_VOICE") == "1"
     global VOICE_MSG
     VOICE_MSG = message if voice else ""
