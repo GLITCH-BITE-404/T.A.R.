@@ -2554,6 +2554,70 @@ def a_play_game(args):
         g.get("every", 15), "VERIFIED" if "started" in out else out)
 
 
+# -- screen effects: real overlays (tar/fx/<name>.qml), checked after launch --------
+FX_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fx")
+FX_PID = os.path.join(DATA, "fx.pid")
+_FX_ALIASES = {"matrix": "matrix", "matrix rain": "matrix", "code rain": "matrix", "the matrix": "matrix",
+               "snow": "snow", "snowfall": "snow", "it snow": "snow", "snowing": "snow",
+               "glitch": "glitch", "glitches": "glitch", "screen glitch": "glitch", "glitchy": "glitch"}
+
+
+def fx_list():
+    return sorted(f[:-4] for f in os.listdir(FX_DIR) if f.endswith(".qml") and f != "host.qml")
+
+
+def _fx_running():
+    try:
+        pid = int(open(FX_PID).read().strip())
+        os.kill(pid, 0)
+        return pid
+    except (OSError, ValueError):
+        return None
+
+
+def a_stop_fx(_):
+    pid = _fx_running()
+    if not pid:
+        return "no screen effect is running"
+    try:
+        os.kill(pid, 15)
+    except OSError:
+        pass
+    try:
+        os.remove(FX_PID)
+    except OSError:
+        pass
+    return "stopped the screen effect -- VERIFIED"
+
+
+def a_screen_fx(args):
+    """Show a full-screen effect (click-through) for a while."""
+    raw = (args.get("effect") or args.get("what") or "").strip().lower()
+    raw = re.sub(r"^(?:a|an|the|some)\s+|\s+(?:effect|on (?:my|the) screen|on screen)$", "", raw).strip()
+    name = _FX_ALIASES.get(raw, raw)
+    if name not in fx_list():
+        return "don't know how to show %r -- effects I have: %s" % (raw, ", ".join(fx_list()))
+    secs = max(3, min(600, _int(args.get("seconds"), 30)))
+    a_stop_fx({})                        # one effect at a time
+    qs = shutil.which("qs") or shutil.which("quickshell")
+    if not qs:
+        return "could not start it: quickshell isn't installed"
+    p = subprocess.Popen([qs, "-p", os.path.join(FX_DIR, "host.qml")], start_new_session=True,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         env=dict(os.environ, TAR_FX=name, TAR_FX_SECS=str(secs)))
+    with open(FX_PID, "w") as f:
+        f.write(str(p.pid))
+    # really on screen? the overlay layer must show up in Hyprland
+    for _ in range(12):
+        time.sleep(0.25)
+        if p.poll() is not None:
+            return "NOT DONE: the %s effect crashed on start" % name
+        if "tar-fx" in sh(["hyprctl", "layers"])[1]:
+            return ("showing %s on the screen for %ds (say 'stop the effect' to end it) -- "
+                    "VERIFIED: overlay is up" % (name, secs))
+    return "NOT VERIFIED: started %s but its overlay never appeared" % name
+
+
 RAW_MESSAGE = ""                    # the user's message as typed (set by the brain)
 
 
@@ -5191,6 +5255,18 @@ ACTIONS = {
     "recent":     (a_recent, "files changed recently: days= (default 1), where=", []),
     "write_file": (a_write_file, "create a text file: path=, text= (append=true to add; "
                                  "overwriting asks the user)", []),
+    "screen_fx":  (a_screen_fx, "show a REAL full-screen visual effect over everything "
+                                "(click-through): effect=matrix|snow|glitch, seconds= (default 30). "
+                                "Only these exist -- say so if asked for another.",
+                   [r"^(?:(?:can|could) you |please )?(?:make|put|show|start|do|give me|turn on)? ?"
+                    r"(?:a |an |the |some )?(?P<effect>matrix(?: rain)?|code rain|snow(?:fall)?|"
+                    r"(?:screen )?glitch(?:es)?)(?: effect)?(?: on (?:my|the) screen)?"
+                    r"(?: for (?P<seconds>\d+) ?(?:s|sec|secs|seconds))?$",
+                    r"^make it (?P<effect>snow)(?: on (?:my|the) screen)?$",
+                    r"^make (?:my|the) screen (?P<effect>glitch)(?:y)?$"]),
+    "stop_fx":    (a_stop_fx, "stop the screen effect",
+                   [r"^(?:stop|end|kill|remove|turn off) (?:the |that )?(?:screen )?(?:effect|matrix|"
+                    r"rain|snow|glitch|matrix rain)$"]),
     "remember":   (a_remember, "REMEMBER a fact about the user or how to behave (fact= one clear "
                                "sentence, e.g. 'The user's name is Rephael', 'Always greet the user "
                                "by name'). Goes into your memory, seen every turn. Use this -- NOT "
@@ -5473,7 +5549,7 @@ def match(text):
     return None, None
 
 
-_PRIORITY = ("remember", "forget", "play_game", "research", "virus_scan", "selfie", "evil", "missiles", "camera_live", "devices", "now_playing", "note", "stopwatch", "focus", "coin", "dice", "record", "remind", "wifi", "bluetooth", "dnd", "nightlight", "power",
+_PRIORITY = ("screen_fx", "stop_fx", "remember", "forget", "play_game", "research", "virus_scan", "selfie", "evil", "missiles", "camera_live", "devices", "now_playing", "note", "stopwatch", "focus", "coin", "dice", "record", "remind", "wifi", "bluetooth", "dnd", "nightlight", "power",
              "play", "weather", "datetime", "battery", "calc", "processes",
              "colorpick", "cliphist")
 
