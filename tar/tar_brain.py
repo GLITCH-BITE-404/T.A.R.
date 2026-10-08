@@ -1382,10 +1382,17 @@ def chat(message, no_history=False, no_memory=False, no_act=False,
                 # already says it. But the turn IS recorded, as a short
                 # third-person note rather than the raw machine output, so the
                 # next question ("did it work?") has something to refer to.
+                # a short human sentence instead of "[did: camera_live]"
+                try:
+                    import tar_cloud as _C
+                    human = _C._humanize(out)
+                except Exception:
+                    human = "Done."
+                emit("token", v=human)
                 history_append("user", message)
-                history_append("assistant", "[did: %s]" % name)
+                history_append("assistant", human)
                 emit("state", v="idle")
-                emit("done", reply="", model=None, ms=0,
+                emit("done", reply=human, model=None, ms=0,
                      first_token_ms=0, saved=None, acted=name)
                 return
 

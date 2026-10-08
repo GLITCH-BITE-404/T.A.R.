@@ -17,6 +17,7 @@ Protocol out is identical to tar_brain.py, so tar.qml needs no new parser.
 """
 
 import json
+import re
 import os
 import sys
 
@@ -142,6 +143,17 @@ MODELS = [
      "blurb": "Google free tier. Smarter, but only ~5 requests a minute free.",
      "in_per_mtok": 0.0, "out_per_mtok": 0.0},
 ]
+
+
+def _humanize(out):
+    """Action result -> one short sentence for the user (no machine tags)."""
+    t = str(out or "").split("\n")[0]
+    t = re.sub(r"\s*--\s*(NOT )?VERIFIED.*$", "", t).strip()
+    t = re.sub(r"\s*\(done instantly.*?\)", "", t).strip()
+    if not t:
+        return "Done."
+    t = t[0].upper() + t[1:]
+    return (t[:140].rstrip() + ("." if not t[:140].rstrip().endswith((".", "!", "?")) else ""))
 
 
 def default_model():
@@ -333,8 +345,12 @@ SYSTEM = (
     "name what you see. Typing into "
     "a field -> type_into. Scrolling -> scroll with what=<window>. Never fake "
     "a click with key presses. 'ask claude ...' -> ask_claude.\n"
-    "LANGUAGE: reply in the language of the user's LATEST message -- English "
-    "unless they wrote in Hebrew. Hebrew names in the context don't change that.\n"
+    "LANGUAGE: reply in the language the user is writing in -- English unless they "
+    "wrote in Hebrew. A short or ambiguous message ('again', 'ok', 'yes', 'do it') "
+    "keeps the language of their previous messages. Hebrew names or Hebrew text on "
+    "screen don't change that.\n"
+    "REPLIES: after acting, tell the user the RESULT in plain words (what you found, "
+    "what changed, what failed) -- never just list the actions you called.\n"
     "TABS vs WINDOWS: to close tabs use close_tab. NEVER close a browser window "
     "or kill the browser to get rid of a tab -- that destroys every other tab.\n"
     "PROFILES: only say something opened in a profile if the action result "
@@ -905,9 +921,24 @@ def chat_gemini(message, model, max_turns=10):
 
     reply = "".join(reply_parts).strip()
     if not reply and acted:
-        # model went quiet after acting: say *something* so it isn't a void
-        reply = "Done: " + ", ".join(a for a in dict.fromkeys(acted) if a != "?") + "."
-        emit("token", v=reply)
+        # model went quiet after acting ("Done: shell, web, look, click_on." was
+        # all you got for a virus scan): ask it once for the actual result
+        try:
+            contents.append({"role": "user", "parts": [{"text":
+                "Now tell me the RESULT of what you just did in 1-2 short sentences, from the "
+                "action results above (what you found / what changed / what failed). Don't "
+                "list action names."}]})
+            r2 = gemini_call(key, model, {"systemInstruction": {"parts": [{"text": system}]},
+                                          "contents": contents,
+                                          "generationConfig": {"maxOutputTokens": 400}})
+            p2 = ((r2.get("candidates") or [{}])[0].get("content") or {}).get("parts") or []
+            reply = "".join(p.get("text", "") for p in p2 if not p.get("thought")).strip()
+        except Exception:
+            reply = ""
+        if not reply and trace:
+            reply = _humanize(trace[-1][2])
+        if reply:
+            emit("token", v=reply)
     B.history_append("user", message)
     if reply:
         B.history_append("assistant", reply)
