@@ -337,7 +337,7 @@ def a_close_tab(args):
                 break                       # the window closed (its last tab went)
             title = (cur.get("title") or "")
             if q in title.lower():
-                sh(["wtype", "-M", "ctrl", "-k", "w", "-m", "ctrl"])
+                wkeys("-M", "ctrl", "-k", "w", "-m", "ctrl")
                 closed += 1
                 time.sleep(0.35)
                 seen.clear()
@@ -345,7 +345,7 @@ def a_close_tab(args):
             if title in seen:
                 break                       # full circle: no more matching tabs
             seen.add(title)
-            sh(["wtype", "-M", "ctrl", "-k", "Tab", "-m", "ctrl"])
+            wkeys("-M", "ctrl", "-k", "Tab", "-m", "ctrl")
             time.sleep(0.25)
     left = [c for c in _clients() if _is_browser(c) and q in (c.get("title") or "").lower()]
     if not closed:
@@ -1245,6 +1245,102 @@ def _personal_guard(text, target=""):
     return None
 
 
+# -- typing safety -------------------------------------------------------------
+# Synthetic keys go through Hyprland's keybind handling like real ones, and
+# wtype typing has twice coincided with the rice-switch bind firing. So while
+# T.A.R. types, Hyprland sits in an EMPTY submap (no binds but SUPER+Escape =
+# leave it), and text goes in by paste instead of key-by-key. The user's own
+# binds are never touched: the submap is registered at runtime and a watchdog
+# drops back to the normal map if this process dies mid-type.
+TYPE_SUBMAP = "tar_typing"
+_paused = 0
+
+
+def _submap_now():
+    rc, out = sh(["hyprctl", "submap"], timeout=5)
+    return out.strip() if rc == 0 else ""
+
+
+class keys_paused:
+    """Context: user keybinds can't fire while synthetic keys are sent. Nests."""
+    def __enter__(self):
+        global _paused
+        _paused += 1
+        if _paused == 1 and shutil.which("hyprctl"):
+            # registered at runtime, so a config reload drops it -- check each time
+            rc, out = sh(["hyprctl", "binds", "-j"], timeout=5)
+            if '"submap": "%s"' % TYPE_SUBMAP not in out:
+                sh(["hyprctl", "--batch", "keyword submap %s ; keyword bind SUPER,escape,submap,reset"
+                    " ; keyword submap reset" % TYPE_SUBMAP], timeout=5)
+            sh(["hyprctl", "dispatch", "submap", TYPE_SUBMAP], timeout=5)
+            sh(["sh", "-c", 'for i in $(seq 180); do kill -0 %d 2>/dev/null || break; sleep 1; done; '
+                '[ "$(hyprctl submap)" = %s ] && hyprctl dispatch submap reset' % (os.getpid(), TYPE_SUBMAP)],
+               detach=True)
+        return self
+
+    def __exit__(self, *exc):
+        global _paused
+        _paused -= 1
+        if _paused == 0 and _submap_now() == TYPE_SUBMAP:
+            sh(["hyprctl", "dispatch", "submap", "reset"], timeout=5)
+        return False
+
+
+def wkeys(*args, timeout=15):
+    """wtype with the keybinds paused -- every key press goes through here."""
+    with keys_paused():
+        return sh(["wtype"] + list(args), timeout=timeout)
+
+
+def _clip_put(txt, mime=None):
+    # wl-copy stays alive as the clipboard OWNER after reading stdin, so
+    # subprocess.run() waits on it forever. Hand it the data and walk away.
+    p_ = subprocess.Popen(["wl-copy"] + (["-t", mime] if mime else []), stdin=subprocess.PIPE,
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                          start_new_session=True)
+    p_.stdin.write(txt if isinstance(txt, bytes) else txt.encode())
+    p_.stdin.close()
+
+
+def _clip_save():
+    """(mime, bytes) of the current clipboard, so a paste can put it back."""
+    try:
+        types = subprocess.run(["wl-paste", "-l"], capture_output=True, text=True, timeout=3).stdout.split()
+        if not types:
+            return None
+        mime = next((t for t in types if t.startswith("text/plain")), types[0])
+        data = subprocess.run(["wl-paste", "-n", "-t", mime], capture_output=True, timeout=3).stdout
+        return (mime, data) if len(data) < 20_000_000 else None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def put_text(text, timeout=20):
+    """Insert text into the focused window: clipboard + Ctrl+V (Ctrl+Shift+V in
+    a terminal), keybinds paused. The user's clipboard is restored after."""
+    if not shutil.which("wl-copy") or not shutil.which("wtype"):
+        return 127, "need wl-copy and wtype"
+    act = _active_window() or {}
+    cls = (act.get("class") or "").lower()
+    term = any(t == cls or cls.endswith("." + t) for t in _TERMINALS)
+    old = _clip_save()
+    try:
+        _clip_put(text)
+    except (OSError, subprocess.SubprocessError) as e:
+        return 1, "copy failed: %s" % e
+    time.sleep(0.12)                    # let wl-copy take the selection
+    with keys_paused():
+        rc, out = sh(["wtype", "-M", "ctrl"] + (["-M", "shift"] if term else []) + ["-k", "v"]
+                     + (["-m", "shift"] if term else []) + ["-m", "ctrl"], timeout=timeout)
+    time.sleep(0.5)                     # the app reads the clipboard asynchronously
+    if old:
+        try:
+            _clip_put(old[1], old[0])
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return rc, out
+
+
 def a_type(args):
     """Type text into whatever window has focus."""
     txt = args.get("text") or args.get("what") or ""
@@ -1258,7 +1354,7 @@ def a_type(args):
     err = _away_from_tar(args)
     if err:
         return err
-    rc, out = sh(["wtype", txt], timeout=20)
+    rc, out = put_text(txt)
     return "typed %d chars" % len(txt) if rc == 0 else "typing failed: " + out
 
 
@@ -1295,7 +1391,10 @@ def a_key(args):
     argv += ["-k", parts[-1]]
     for p in reversed(parts[:-1]):
         argv += ["-m", mods.get(p.lower(), p.lower())]
-    rc, out = sh(argv, timeout=15)
+    if _SYSTEM_COMBO.search(combo.replace(" ", "")):
+        rc, out = sh(argv, timeout=15)  # a confirmed desktop shortcut must reach Hyprland
+    else:
+        rc, out = wkeys(*argv[1:])
     return "pressed " + combo if rc == 0 else "key failed: " + out
 
 
@@ -1343,15 +1442,8 @@ def a_clip_set(args):
         return "copy what?"
     if not shutil.which("wl-copy"):
         return "wl-copy isn't installed"
-    # wl-copy stays alive as the clipboard OWNER after reading stdin, so
-    # subprocess.run() waits on it forever. Hand it the text and walk away.
     try:
-        p_ = subprocess.Popen(["wl-copy"], stdin=subprocess.PIPE, text=True,
-                              stdout=subprocess.DEVNULL,
-                              stderr=subprocess.DEVNULL,
-                              start_new_session=True)
-        p_.stdin.write(txt)
-        p_.stdin.close()
+        _clip_put(txt)
     except (OSError, subprocess.SubprocessError) as e:
         return "copy failed: %s" % e
     return "copied %d chars" % len(txt)
@@ -2978,12 +3070,12 @@ def _type_slots(slots, mon):
             # typing replaces it (End would put the answer after the full stop)
             _click("left", True)
             time.sleep(0.15)
-            sh(["wtype", ans], timeout=30)
+            put_text(ans, timeout=30)
         else:
             _click("left", False)
             time.sleep(0.15)
-            sh(["wtype", "-k", "End"])
-            sh(["wtype", (" " + ans) if x.get("kind") == "line" else ans], timeout=30)
+            wkeys("-k", "End")
+            put_text((" " + ans) if x.get("kind") == "line" else ans, timeout=30)
         time.sleep(0.2)
     _sheet_log(typed=[[str(x.get("question", ""))[:30], x.get("_typed_at")] for x in slots])
     return doc_x
@@ -3032,7 +3124,7 @@ def a_fill_table(args):
         _mask(a0, rect, mon)
         if not _page_moved(b0, a0)[0]:
             with _TarHidden():
-                sh(["wtype", "-M", "ctrl", "-k", "Home", "-m", "ctrl"])   # top of the document
+                wkeys("-M", "ctrl", "-k", "Home", "-m", "ctrl")   # top of the document
                 time.sleep(0.4)
             break
     for page in range(8):
@@ -3076,9 +3168,9 @@ def a_fill_table(args):
             # some editors ignore the mouse wheel (it read "scrolled 0.0" and
             # stopped after 8 of 11 questions): Page Down in the document
             with _TarHidden() as hid:
-                sh(["wtype", "-k", "Next"])
+                wkeys("-k", "Next")
                 time.sleep(0.15)
-                sh(["wtype", "-k", "Next"])
+                wkeys("-k", "Next")
                 time.sleep(0.6)
                 _shot(after)
                 rect = hid.rect
@@ -3119,9 +3211,9 @@ def a_fill_table(args):
         moved, _f = _page_moved(before, after)
         if not moved:
             with _TarHidden() as hid:
-                sh(["wtype", "-k", "Prior"])
+                wkeys("-k", "Prior")
                 time.sleep(0.15)
-                sh(["wtype", "-k", "Prior"])
+                wkeys("-k", "Prior")
                 time.sleep(0.5)
                 _shot(after)
                 rect = hid.rect
@@ -3174,15 +3266,15 @@ def a_fill_cells(args):
     mon = _monitor()
     b_path = os.path.join(DATA, "fill-before.jpg")
     a_path = os.path.join(DATA, "fill-after.jpg")
-    with _TarHidden() as hid:
+    with _TarHidden() as hid, keys_paused():
         have_b = _shot(b_path)
         typed = 0
         for i, t in enumerate(texts):
             if t.strip():
-                sh(["wtype", t], timeout=30)
+                put_text(t, timeout=30)
                 typed += 1
             if i < len(texts) - 1:
-                sh(["wtype", "-k", nav])
+                wkeys("-k", nav)
                 time.sleep(0.12)
         time.sleep(0.5)
         have_a = _shot(a_path)
@@ -3213,7 +3305,7 @@ def a_type_into(args):
     if not clicked.startswith("clicked"):
         return clicked
     time.sleep(0.15)
-    rc, out = sh(["wtype", text], timeout=20)
+    rc, out = put_text(text)
     return clicked + (" -- typed %d chars" % len(text) if rc == 0 else " -- typing failed")
 
 
@@ -3477,13 +3569,13 @@ def _browser_window(args):
 
 
 def _press(mods, key):
-    argv = ["wtype"]
+    argv = []
     for m_ in mods.split("+"):
         argv += ["-M", m_]
     argv += ["-k", key]
     for m_ in reversed(mods.split("+")):
         argv += ["-m", m_]
-    sh(argv)
+    wkeys(*argv)
 
 
 def a_browser(args):
@@ -3533,7 +3625,7 @@ def a_browser(args):
     _press(mods, key)
     if act == "find" and args.get("text"):
         time.sleep(0.2)
-        sh(["wtype", args["text"]])
+        put_text(args["text"])
     return "%s in %s" % (act.replace("_", " "), _label(w))
 
 
