@@ -37,11 +37,27 @@ reminders, searches the web — with a free cloud brain or a fully offline one.
 
 ## Features
 
-- **Real control, not a chatbot** — 77 built-in actions covering windows, apps,
+- **Real control, not a chatbot** — 136 built-in actions covering windows, apps,
   files, wifi, bluetooth, audio, media, power, reminders and more, plus a guarded
-  shell for anything else.
-- **Two brains** — a free cloud brain (Google Gemini, or Anthropic Claude with your
-  own key) with proper tool calling, or a fully offline local model through Ollama.
+  shell for anything else. Every action reports VERIFIED / NOT VERIFIED.
+- **Two brains** — a cloud brain with proper tool calling (free: Google Gemini, Groq,
+  Mistral, OpenRouter · paid: Anthropic Claude), or a fully offline local model
+  through Ollama. When one free quota runs out, T.A.R. switches to your strongest
+  other provider before falling back to a weaker model.
+- **Mini orb** — a small draggable orb that stays on screen while T.A.R. runs.
+  Click it to type, see the full reply and manage background tasks; while T.A.R.
+  clicks or types for you, it flies to each spot and narrates in a speech bubble.
+- **Research** — "look up X" searches the web, reads the top pages and answers in a
+  few sentences with clickable source links.
+- **File safety check** — "scan the usb" / "is this file safe?" judges files by what
+  they're built to do (import table, MITRE ATT&CK techniques with evidence), never
+  by their name. Optional VirusTotal hash lookup, never uploads.
+- **Plays games** — "play cookie clicker" finds or opens the game and plays it in the
+  background (autoclicker + an AI buying round), pausing if the game leaves the
+  screen or you grab the mouse.
+- **Screen effects it can write itself** — matrix rain, snow, fireworks, a black
+  hole, a real screen shake… and with `exec`, T.A.R. writes new effects on the
+  spot, runs them and fixes its own errors.
 - **Instant commands** — unambiguous requests ("volume 40", "next song", "close it")
   are matched and run locally in ~0.2 s without calling any model.
 - **Understands follow-ups** — "open a terminal and run btop", then "close it".
@@ -51,8 +67,9 @@ reminders, searches the web — with a free cloud brain or a fully offline one.
   `/persona`.
 - **Effects & easter eggs** — glitch, scanline, shockwave, matrix takeover, party
   mode, a fake self-destruct… all plain-QML, cheap enough to stay at 60 fps.
-- **Memory** — "remember that my main browser is chrome" persists across sessions;
-  past chats are kept and can be reopened.
+- **Memory** — "remember that my teacher is Dana" goes into T.A.R.'s memory and
+  persists across sessions ("forget that…" removes it); past chats are kept and can
+  be reopened.
 - **Looks the part** — orb and chat views, a slide-out console, matrix rain, and
   colours that follow your Matugen theme.
 
@@ -142,7 +159,11 @@ Plain language works — you don't need exact phrases. Some examples:
 | Time | "remind me in 10 minutes to drink water" · "set a timer for 5 minutes" · "what time is it" |
 | Info | "what's the weather in tel aviv" · "convert 20 euros to shekels" · "15% of 80" |
 | Desktop | "night light on" · "do not disturb on" · "pick a colour" · "start recording" · "take a screenshot" |
-| Memory | "remember that my main browser is chrome" |
+| Memory | "remember that my main browser is chrome" · "forget that…" |
+| Research | "look up when the chanukah break starts" · "research the best budget laptop" |
+| Safety | "scan the usb" · "is rans0m.exe safe?" · "check my downloads for viruses" |
+| Games | "play cookie clicker" · "play it for 10 minutes" · "stop" |
+| Screen effects | "make a matrix rain on my screen" · "make it snow" · "shake my screen" · "show fireworks" · "exec make a black hole that sucks in orbs" |
 | Fun | "flip a coin" · "roll a d20" · "do a barrel roll" · …and a few hidden ones |
 
 ## Slash commands
@@ -153,7 +174,7 @@ Type `/` in T.A.R. to see them all.
 |---|---|
 | `/new` | start a new chat |
 | `/cloud` · `/cloud off` | switch to the cloud brain · back to local |
-| `/key <key>` | save a Gemini or Anthropic (`sk-ant-…`) API key |
+| `/key` | add an API key: pick Gemini, Groq, Mistral, OpenRouter, Anthropic or VirusTotal, get a link to a free key, paste it (hidden) |
 | `/model <name>` | pick a model, e.g. `/model gemini-flash-latest` |
 | `/models` | list local and cloud models |
 | `/persona <text>` · `/persona reset` | change how T.A.R. talks · back to default |
@@ -161,15 +182,16 @@ Type `/` in T.A.R. to see them all.
 | `/settings` | capabilities, engines and devices |
 | `/speak on\|off` | read replies aloud |
 | `/stop` | stop the current reply |
+| `exec <request>` | do it for real — no T.A.R. animation as a stand-in; writes a new screen effect if needed |
 | `/clear` | clear the transcript |
 
 ## Cloud vs local brain
 
-| | Cloud (Gemini / Claude) | Local (Ollama) |
+| | Cloud (Gemini / Groq / Mistral / OpenRouter / Claude) | Local (Ollama) |
 |---|---|---|
 | Smarts | strong; real tool calling, handles loose phrasing and follow-ups | limited on laptop-sized models |
 | Speed | ~1–2 s per reply | depends heavily on your CPU/GPU |
-| Cost | Gemini: free tier · Claude: pay per use | free |
+| Cost | Gemini, Groq, Mistral, OpenRouter: free tiers · Claude: pay per use | free |
 | Privacy | your messages go to the provider | nothing leaves your machine |
 | Full shell access | yes (guarded) | no |
 
@@ -230,8 +252,12 @@ T.A.R. runs on *your* machine, so it is fenced off from the irreversible stuff:
 
 ## Roadmap
 
-- [ ] Voice loop: push-to-talk dictation → reply → speech
-- [ ] Wake word
+- [x] Voice loop: push-to-talk dictation → reply → speech
+- [x] Wake word
+- [ ] Files: "the PDF my teacher sent last week", organize, convert to PDF
+- [ ] System upkeep: updates, disk space, caches, failed services
+- [ ] Write & send: email / WhatsApp drafts, sent only after you say yes
+- [ ] Homework helper and Google Classroom
 - [ ] Camera frames into a vision model ("what am I holding?")
 - [ ] Packaging for the BITE-OS ISO / AUR
 

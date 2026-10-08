@@ -2566,7 +2566,12 @@ FX_LOG = os.path.join(DATA, "fx.log")
 _FX_ALIASES = {"matrix": "matrix", "matrix rain": "matrix", "code rain": "matrix", "the matrix": "matrix",
                "snow": "snow", "snowfall": "snow", "it snow": "snow", "snowing": "snow",
                "glitch": "glitch", "glitches": "glitch", "screen glitch": "glitch", "glitchy": "glitch",
-               "shake": "shake", "screen shake": "shake", "earthquake": "shake", "shaking": "shake"}
+               "shake": "shake", "screen shake": "shake", "earthquake": "shake", "shaking": "shake",
+               # effects T.A.R. wrote itself, now built in
+               "black hole": "black_hole_orbs", "blackhole": "black_hole_orbs",
+               "black hole orbs": "black_hole_orbs", "fireworks": "fireworks", "firework": "fireworks",
+               "orbs": "four_orbs", "four orbs": "four_orbs", "spinning orb": "spinning_orb",
+               "spin": "spinning_orb", "orb": "spinning_orb"}
 _FX_INSTANT = {"shake": 2}           # built from a screenshot: no fade, short
 
 
@@ -5374,11 +5379,13 @@ ACTIONS = {
                                  "overwriting asks the user)", []),
     "screen_fx":  (a_screen_fx, "show a full-screen visual effect over the WHOLE screen "
                                 "(click-through): effect=<name> -- built-in matrix, snow, glitch, "
-                                "shake (shakes the real screen), or any effect you made with "
+                                "shake (shakes the real screen), fireworks, black hole, orbs, "
+                                "spinning orb, or any effect you made with "
                                 "make_fx. seconds= (default 30). For an effect that doesn't exist "
                                 "yet, write it with make_fx.",
                    [r"^(?:(?:can|could) you |please )?(?:make|put|show|start|do|give me|turn on)? ?"
                     r"(?:a |an |the |some )?(?P<effect>matrix(?: rain)?|code rain|snow(?:fall)?|"
+                    r"fireworks?|black ?hole(?: orbs)?|spinning orb|"
                     r"(?:screen )?glitch(?:es)?)(?: effect)?(?: on (?:my|the) screen)?"
                     r"(?: for (?P<seconds>\d+) ?(?:s|sec|secs|seconds))?$",
                     r"^make it (?P<effect>snow)(?: on (?:my|the) screen)?$",
