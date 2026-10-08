@@ -150,10 +150,21 @@ Scope {
         WlrLayershell.namespace: "tar-mini-dock"
         WlrLayershell.keyboardFocus: dock.cardOpen ? WlrKeyboardFocus.OnDemand : WlrKeyboardFocus.None
         // only what's drawn takes clicks; everything else is click-through
+        // Regions use explicit screen boxes: an `item:` region only follows that
+        // item's OWN geometry, so when the parent `home` moved (drag) the input
+        // area stayed behind and the orb stopped taking clicks.
         mask: Region {
-            item: homeOrb
-            Region { item: card.visible ? card : null }
-            Region { item: homeBubble.opacity > 0.05 ? homeBubble : null }
+            x: home.x + homeOrb.x; y: home.y + homeOrb.y
+            width: homeOrb.width; height: homeOrb.height
+            Region {
+                x: home.x + card.x; y: home.y + card.y
+                width: card.visible ? card.width : 0; height: card.visible ? card.height : 0
+            }
+            Region {
+                x: home.x + homeBubble.x; y: home.y + homeBubble.y
+                width: homeBubble.opacity > 0.05 ? homeBubble.width : 0
+                height: homeBubble.opacity > 0.05 ? homeBubble.height : 0
+            }
         }
 
         property bool cardOpen: false
@@ -312,6 +323,8 @@ Scope {
                     mini.homeBottom = Math.max(4, Math.min(dock.height - 60, b0 - dy));
                 }
                 onReleased: { if (drag) mini.savePos(); }
+                // focus jumped elsewhere mid-drag (e.g. onto T.A.R.): end cleanly
+                onCanceled: { if (drag) mini.savePos(); drag = false; }
                 onClicked: (m) => {
                     if (drag) return;
                     if (m.button === Qt.RightButton) {
