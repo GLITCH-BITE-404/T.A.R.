@@ -893,6 +893,20 @@ Item {
     }
     property real scanY: -1
 
+    // T.A.R. replies with source links (research) get clickable links; the
+    // link opens in the user's browser profile through the web action.
+    function hasLink(t) { return /https?:\/\//.test(t || ""); }
+    function linkify(t) {
+        return String(t).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+            .replace(/(https?:\/\/[^\s<]+)/g, '<a href="$1">$1</a>')
+            .replace(/\n/g, "<br>");
+    }
+    function openLink(url) {
+        Quickshell.execDetached(["python3", Quickshell.env("HOME")
+            + "/.config/hypr/scripts/quickshell/tar/tar_tools.py", "run", "web",
+            "q=" + String(url).replace(/&amp;/g, "&")]);
+    }
+
     function say(who, text) {
         // Orb mode has no transcript -- surface it as a popup there instead of
         // letting it vanish.
@@ -2840,13 +2854,21 @@ Item {
                         }
 
                         Text {
+                            id: msgText
                             Layout.fillWidth: true
-                            text: model.text
+                            property bool linked: model.who === "tar" && window.hasLink(model.text)
+                            text: (linked ? window.linkify(model.text) : model.text)
                                 + (index === window.streamIndex ? "▊" : "")
                             color: model.who === "sys" ? theme.subtext0
                                  : model.who === "act" ? theme.subtext1 : theme.text
+                            linkColor: window.accent
+                            onLinkActivated: link => window.openLink(link)
+                            HoverHandler {
+                                enabled: msgText.linked
+                                cursorShape: msgText.hoveredLink ? Qt.PointingHandCursor : Qt.ArrowCursor
+                            }
                             wrapMode: Text.Wrap
-                            textFormat: Text.PlainText
+                            textFormat: linked ? Text.StyledText : Text.PlainText
                             font.family: "JetBrains Mono"
                             font.pixelSize: window.s(model.who === "sys" ? 11
                                                     : model.who === "act" ? 11 : 13)

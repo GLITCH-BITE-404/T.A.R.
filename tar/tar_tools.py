@@ -1805,6 +1805,200 @@ def a_battery(_):
     return "; ".join(keep)
 
 
+# -- research ------------------------------------------------------------------
+# "look up X": search, read the top pages, answer briefly WITH the links. One
+# Gemini call per question (search is DuckDuckGo's key-less HTML page), and
+# answers are cached for a few hours so a repeat costs nothing.
+REPLY_TEXT = None                  # set by an action whose result IS the reply
+_UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130 Safari/537.36"
+
+
+def _http_get(url, timeout=5, limit=1_500_000):
+    import urllib.request
+    req = urllib.request.Request(url, headers={"User-Agent": _UA, "Accept-Language": "en,he;q=0.8"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        ctype = r.headers.get("Content-Type", "")
+        raw = r.read(limit)
+    cs = re.search(r"charset=([\w-]+)", ctype)
+    return ctype, raw.decode(cs.group(1) if cs else "utf-8", errors="replace")
+
+
+def web_search(q, n=5):
+    """[(title, url)] from DuckDuckGo's HTML endpoint (no key, no JS)."""
+    import html as _html
+    import urllib.parse
+    url = "https://html.duckduckgo.com/html/?q=" + urllib.parse.quote_plus(q)
+    try:
+        _ct, page = _http_get(url, timeout=6)
+    except Exception:
+        _ct, page = _http_get(url, timeout=6)    # it stalls now and then; once more
+    out = []
+    for href, title in re.findall(r'class="result__a" href="([^"]+)"[^>]*>(.*?)</a>', page, re.S):
+        href = _html.unescape(href)
+        u = urllib.parse.parse_qs(urllib.parse.urlparse(href).query).get("uddg", [href])[0]
+        if not u.startswith("http") or "duckduckgo.com/y.js" in u or u in [x[1] for x in out]:
+            continue                    # ads and duplicates
+        out.append((_html.unescape(re.sub(r"<[^>]+>", "", title)).strip(), u))
+        if len(out) >= n:
+            break
+    return out
+
+
+def page_text(url, limit=7000):
+    """Readable text of a web page (scripts, menus and footers dropped)."""
+    from html.parser import HTMLParser
+    ctype, page = _http_get(url)
+    if "html" not in ctype and "text" not in ctype:
+        return ""
+
+    class _P(HTMLParser):
+        skip_tags = {"script", "style", "noscript", "nav", "footer", "header", "aside", "form", "svg"}
+
+        def __init__(self):
+            HTMLParser.__init__(self)
+            self.depth, self.bits = 0, []
+
+        def handle_starttag(self, tag, _a):
+            if tag in self.skip_tags:
+                self.depth += 1
+
+        def handle_endtag(self, tag):
+            if tag in self.skip_tags and self.depth:
+                self.depth -= 1
+
+        def handle_data(self, d):
+            if not self.depth and d.strip():
+                self.bits.append(d.strip())
+
+    p = _P()
+    try:
+        p.feed(page)
+    except Exception:
+        pass
+    text = re.sub(r"\s+", " ", " ".join(p.bits))     # short bits too: table cells hold the facts
+    return text[:limit]
+
+
+def a_research(args):
+    """Search the web, read the top pages, answer in a few sentences + links."""
+    global REPLY_TEXT
+    q = (args.get("q") or args.get("what") or "").strip().rstrip("?")
+    if not q:
+        return "look up what?"
+    cache_p = os.path.join(DATA, "research-cache.json")
+    try:
+        with open(cache_p, encoding="utf-8") as f:
+            cache = json.load(f)
+    except (OSError, ValueError):
+        cache = {}
+    key_q = re.sub(r"\s+", " ", q.lower())
+    hit = cache.get(key_q)
+    if hit and time.time() - hit.get("at", 0) < 6 * 3600 and not args.get("fresh"):
+        REPLY_TEXT = hit["reply"]
+        return "researched %r (cached from earlier) -- VERIFIED: answer + %d sources shown" % (
+            q, hit.get("n", 0))
+    try:
+        results = web_search(q)
+    except Exception:
+        results = []
+    if not results:
+        # DuckDuckGo stalled or found nothing: Gemini's own Google search
+        return _research_grounded(q, cache, cache_p, key_q)
+    emit("info", v="reading %d pages about %s…" % (min(3, len(results)), q[:60]))
+    from concurrent.futures import ThreadPoolExecutor, wait
+
+    def grab(r):
+        try:
+            return r, page_text(r[1])
+        except Exception:
+            return r, ""                # 403 / timeout / not html
+    ex = ThreadPoolExecutor(5)
+    futs = [ex.submit(grab, r) for r in results[:5]]
+    wait(futs, timeout=6)               # slow sites don't hold the answer up
+    ex.shutdown(wait=False, cancel_futures=True)
+    read = [f.result() for f in futs if f.done() and len(f.result()[1]) > 200][:3]
+    if not read:
+        read = [(r, "") for r in results[:3]]   # pages blocked us: titles only
+    try:
+        import tar_cloud as C
+    except ImportError:
+        return "NOT DONE: research needs the cloud backend"
+    key = C.api_key("google")
+    if not key:
+        return "NOT DONE: research needs a Gemini key (/key <key>)"
+    src = "\n\n".join("[%d] %s (%s)\n%s" % (i + 1, t, u, txt or "(page could not be read)")
+                      for i, ((t, u), txt) in enumerate(read))
+    prompt = _research_prompt(q) + "\n\nSources:\n" + src
+    model = cfg().get("cloud_model") or "gemini-flash-lite-latest"
+    try:
+        r = C.gemini_call(key, model, {"contents": [{"role": "user", "parts": [{"text": prompt}]}],
+                                       "generationConfig": {"maxOutputTokens": 3000, "temperature": 0.2}})
+    except Exception as e:
+        return "NOT DONE: couldn't summarise (%s). Top links: %s" % (
+            e, " ".join(u for (_t, u), _x in read))
+    parts = ((r.get("candidates") or [{}])[0].get("content") or {}).get("parts") or []
+    answer = "".join(p.get("text", "") for p in parts if not p.get("thought")).strip()
+    if not answer:
+        return "NOT DONE: the model returned nothing. Top links: " + " ".join(u for (_t, u), _x in read)
+    return _research_done(q, answer, [tu for tu, _x in read], cache, cache_p, key_q)
+
+
+def _research_prompt(q):
+    return ("Today is %s.\nQuestion: %s\n\nAnswer in 2-5 short sentences, in the language of "
+            "the question, using ONLY the sources. Lead with the specific fact (number, name, "
+            "date, version). Cite every claim like [1]. If sources disagree, say which says "
+            "what. If they don't answer it, say so plainly. No intro like 'based on the "
+            "sources', no markdown." % (time.strftime("%d %B %Y"), q))
+
+
+def _research_done(q, answer, sources, cache, cache_p, key_q):
+    global REPLY_TEXT
+    import urllib.parse
+    # unquoted so Hebrew URLs are readable; spaces stay escaped so the link holds
+    reply = answer + "\n\nSources:\n" + "\n".join(
+        "[%d] %s\n    %s" % (i + 1, t[:70], urllib.parse.unquote(u).replace(" ", "%20"))
+        for i, (t, u) in enumerate(sources))
+    REPLY_TEXT = reply
+    cache[key_q] = {"at": time.time(), "reply": reply, "n": len(sources)}
+    try:
+        cache = dict(sorted(cache.items(), key=lambda kv: kv[1].get("at", 0))[-60:])
+        with open(cache_p, "w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False)
+    except OSError:
+        pass
+    return "researched %r, read %d pages -- VERIFIED: answer shown with sources:\n%s" % (
+        q, len(sources), reply)
+
+
+def _research_grounded(q, cache, cache_p, key_q):
+    """Fallback: one Gemini call with Google Search grounding."""
+    try:
+        import tar_cloud as C
+    except ImportError:
+        return "NOT DONE: web search failed and research needs the cloud backend"
+    key = C.api_key("google")
+    if not key:
+        return "NOT DONE: web search failed (no internet?) and there's no Gemini key"
+    emit("info", v="searching with Google for %s…" % q[:60])
+    try:
+        r = C.gemini_call(key, cfg().get("cloud_model") or "gemini-flash-lite-latest", {
+            "contents": [{"role": "user", "parts": [{"text": _research_prompt(q).replace(
+                "using ONLY the sources", "searching the web first")}]}],
+            "tools": [{"google_search": {}}],
+            "generationConfig": {"maxOutputTokens": 3000, "temperature": 0.2}})
+    except Exception as e:
+        return "NOT DONE: web search failed and so did Google search (%s)" % e
+    cand = (r.get("candidates") or [{}])[0]
+    answer = "".join(p.get("text", "") for p in ((cand.get("content") or {}).get("parts") or [])
+                     if not p.get("thought")).strip()
+    chunks = (cand.get("groundingMetadata") or {}).get("groundingChunks") or []
+    sources = [((c.get("web") or {}).get("title") or "source", (c.get("web") or {}).get("uri"))
+               for c in chunks if (c.get("web") or {}).get("uri")][:5]
+    if not answer or not sources:
+        return "NOT DONE: couldn't find sources for %r -- try rewording it" % q
+    return _research_done(q, answer, sources, cache, cache_p, key_q)
+
+
 def a_weather(args):
     place = (args.get("place") or args.get("where") or "").strip()
     rc, out = sh(["curl", "-s", "--max-time", "10",
@@ -4424,6 +4618,12 @@ ACTIONS = {
                    [r"^(?:turn )?bluetooth (?P<state>on|off)$", r"^turn (?P<state>on|off) (?:the )?bluetooth$"]),
     "battery":    (a_battery, "battery level and time left",
                    [r"^(?:battery|how much battery(?: do i have)?(?: left)?|battery (?:level|status))$"]),
+    "research":   (a_research, "look something up properly: searches the web, reads the top "
+                               "pages and returns a short answer with source links (q=question). "
+                               "Use this for facts/questions; the user already sees the answer, "
+                               "so just relay it briefly with the links.",
+                   [r"^(?:please |can you |could you )?(?:look up|research|find out(?: about)?|"
+                    r"look into|what does the (?:web|internet) say about) (?!online )(?P<q>.+)$"]),
     "weather":    (a_weather, "current weather (place= optional)",
                    [r"^(?:what'?s the )?weather(?: like)?(?: in (?P<place>.+))?$"]),
     "datetime":   (a_datetime, "current date and time",
@@ -4831,7 +5031,7 @@ def match(text):
     return None, None
 
 
-_PRIORITY = ("selfie", "evil", "missiles", "camera_live", "devices", "now_playing", "note", "stopwatch", "focus", "coin", "dice", "record", "remind", "wifi", "bluetooth", "dnd", "nightlight", "power",
+_PRIORITY = ("research", "selfie", "evil", "missiles", "camera_live", "devices", "now_playing", "note", "stopwatch", "focus", "coin", "dice", "record", "remind", "wifi", "bluetooth", "dnd", "nightlight", "power",
              "play", "weather", "datetime", "battery", "calc", "processes",
              "colorpick", "cliphist")
 
@@ -5006,6 +5206,8 @@ def _post_verify(name, args, pre, out):
 
 
 def run(name, args):
+    global REPLY_TEXT
+    REPLY_TEXT = None                   # only the action that sets it may use it
     if name in UI_ACTIONS:
         args = dict(args or {})
         egg = next((k for k in BANNER_EGG if k in args), None)

@@ -1394,7 +1394,8 @@ def chat(message, no_history=False, no_memory=False, no_act=False,
                     # the cloud model, which has the conversation, try it.
                     name = None
             if name:
-                emit("acted", action=name, args=args, v=out, direct=True)
+                emit("acted", action=name, args=args, direct=True,
+                     v=out.split("\n")[0] if getattr(t, "REPLY_TEXT", None) else out)
                 # Deliberately NOT written to conversation history. Action
                 # output is machine text ("up 3 hours · 3.5Gi / 7.4Gi RAM"), and
                 # once it sits in history as an assistant turn a small model
@@ -1410,6 +1411,9 @@ def chat(message, no_history=False, no_memory=False, no_act=False,
                     human = _C._humanize(out)
                 except Exception:
                     human = "Done."
+                if getattr(t, "REPLY_TEXT", None):
+                    # the action's result IS the answer (research): show all of it
+                    human, t.REPLY_TEXT = t.REPLY_TEXT, None
                 emit("token", v=human)
                 history_append("user", message)
                 history_append("assistant", human)
