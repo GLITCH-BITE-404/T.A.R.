@@ -239,13 +239,51 @@ def best_move(board, seconds=2.5):
 
 # --------------------------------------------------------------------- player
 class Player:
-    def __init__(self, box, white_bottom, board, mon):
+    def __init__(self, box, white_bottom, board, mon, junk=()):
         self.box = box
         self.white_bottom = white_bottom
         self.board = board
         self.mon = mon
         self.side = (box[2] - box[0]) / 8.0
         self.shot = os.path.join(T.DATA, "chess-board.png")
+        self.junk = set(junk)           # squares an overlay covers: never compared
+
+    def occ(self):
+        """{square: is_white} of what's REALLY on the board right now (pixels)."""
+        if not _grab(self.box, self.shot):
+            return None
+        _IMG_CACHE.clear()
+        w = self.box[2] - self.box[0]
+        o = occupancy(self.shot, (0, 0, w, w), (0, 0))
+        return {_sq(r, c, self.white_bottom): is_w for (r, c), is_w in o.items()
+                if _sq(r, c, self.white_bottom) not in self.junk}
+
+    def expect(self, board=None):
+        """{square: is_white} our copy of the game says should be there."""
+        import chess
+        b = board or self.board
+        return {sq: p.color == chess.WHITE for sq, p in b.piece_map().items() if sq not in self.junk}
+
+    def find_move(self, seen, plies=1):
+        """The legal move (or our move + their instant reply) that turns our copy of
+        the game into exactly what's on screen. -> list of moves, or None."""
+        b = self.board
+        for m in b.legal_moves:
+            b.push(m)
+            try:
+                if self.expect(b) == seen:
+                    return [m]
+                if plies > 1:
+                    for r in b.legal_moves:
+                        b.push(r)
+                        try:
+                            if self.expect(b) == seen:
+                                return [m, r]
+                        finally:
+                            b.pop()
+            finally:
+                b.pop()
+        return None
 
     def center(self, sq):
         import chess
@@ -439,13 +477,16 @@ def setup():
     except (AttributeError, ValueError):
         return None, "couldn't read which pieces are where"
     board = chess.Board(None)
+    junk = set()
     for sq, is_w in want.items():
         t = str(labels.get(names[sq], "P")).strip()[:1].upper()
         if t in ("-", ".", "", "0", "N/A"[:1]) and t != "N":
+            junk.add(sq)
             continue                    # an overlay (T.A.R.'s own voice bar once), not a piece
         pt = {"K": chess.KING, "Q": chess.QUEEN, "R": chess.ROOK, "B": chess.BISHOP,
               "N": chess.KNIGHT}.get(t, chess.PAWN)
         if pt == chess.PAWN and chess.square_rank(sq) in (0, 7):
+            junk.add(sq)
             continue                    # pawns never stand there: screen junk
         board.set_piece_at(sq, chess.Piece(pt, chess.WHITE if is_w else chess.BLACK))
     me = chess.WHITE if wb else chess.BLACK
@@ -462,7 +503,7 @@ def setup():
         # one more look decides the doubtful kings/pawns
         return None, ("read a position that isn't legal (%s) -- start a new game and say 'play "
                       "chess' right away" % board.status())
-    return Player(box, wb, board, mon), None
+    return Player(box, wb, board, mon, junk), None
 
 
 def play(minutes=30):
@@ -477,16 +518,32 @@ def play(minutes=30):
         T.mini_say("chess: " + T.short_say(err, 8))
         return 1
     me = chess.WHITE if p.white_bottom else chess.BLACK
-    T.loop_update(status="playing", last="found the board, playing %s, %d moves in" % (
-        "white" if me else "black", len(p.board.move_stack)))
+    T.loop_update(status="playing", last="found the board, playing %s" % ("white" if me else "black"))
     p.park()
-    time.sleep(0.3)
-    base = p.cells()
-    ignore = set()                      # our last move's squares (their highlight fades)
-    rnd = 0
-    misses = 0
-    lost = 0
+    rnd, misses, lost = 0, 0, 0
     until = time.time() + minutes * 60
+
+    def resync(why):
+        # our copy of the game disagrees with the screen: read the board again
+        nonlocal p
+        T.mini_say("re-reading the board…")
+        T.loop_update(last="re-reading the board (%s)" % why)
+        q, e2 = setup()
+        if q:
+            q.board.turn = me
+            p = q
+            p.park()
+            return True
+        T.loop_update(last="couldn't re-read the board: %s" % e2)
+        return False
+
+    def apply(moves, who):
+        for m in moves:
+            san = p.board.san(m)
+            p.board.push(m)
+            T.mini_say(("they played " if p.board.turn == me else "played ") + san)
+            T.loop_update(last="%s %s" % ("they played" if p.board.turn == me else "played", san))
+
     while T.loop_running() and time.time() < until:
         d = T.loop_running() or {}
         if d.get("paused"):
@@ -505,77 +562,70 @@ def play(minutes=30):
                 res, "T.A.R. won" if won else "draw" if res == "1/2-1/2" else "T.A.R. lost"))
             T.mini_say("checkmate! " + ("I won" if won else "draw" if res == "1/2-1/2" else "I lost"))
             break
-        if p.board.turn == me:
-            rnd += 1
-            T.mini_say("thinking…")
-            m = best_move(p.board)
-            san = p.board.san(m)
-            T.mini_say("playing " + san)
-            before = p.cells()
-            p.click_sq(m.from_square)
-            time.sleep(0.25)
-            p.click_sq(m.to_square)
-            if m.promotion:
-                time.sleep(0.5)
-                p.click_sq(m.to_square)          # the queen sits on the target square
-            p.park()
-            time.sleep(0.9)
-            after = p.cells()
-            moved = p.changed(before, after) if before and after else set()
-            if not (Player.touched(p.board, m) <= moved):
-                # didn't take: a popup, or it's really THEIR move (joined mid-game)
-                misses += 1
-                T.loop_update(last="tried %s but the board didn't change -- retrying" % san)
-                if misses >= 2 and not p.board.move_stack:
-                    p.board.turn = not p.board.turn      # their turn after all: wait for them
-                    T.mini_say("your move first, watching")
-                    misses = 0
-                time.sleep(1.5)
+        seen = p.occ()
+        if seen is None:
+            time.sleep(1)
+            continue
+        if seen != p.expect():
+            # the screen moved on without us knowing: work out the move(s)
+            time.sleep(0.35)
+            seen2 = p.occ()
+            if seen2 != seen:
+                continue                 # still animating
+            found = p.find_move(seen2, plies=2)
+            if found:
+                apply(found, "they")
+                lost = 0
                 continue
-            misses = 0
-            ignore = Player.touched(p.board, m)
-            p.board.push(m)
-            base = after
+            lost += 1
+            if lost >= 3:
+                resync("the board doesn't match any legal move")
+                lost = 0
+            time.sleep(0.6)
+            continue
+        lost = 0
+        if p.board.turn != me:
+            T.loop_update(status="waiting for them")
+            time.sleep(0.6)
+            continue
+        # our move
+        rnd += 1
+        T.loop_update(status="thinking", round=rnd)
+        T.mini_say("thinking…")
+        m = best_move(p.board)
+        san = p.board.san(m)
+        T.mini_say("playing " + san)
+        p.click_sq(m.from_square)
+        time.sleep(0.25)
+        p.click_sq(m.to_square)
+        if m.promotion:
+            time.sleep(0.5)
+            p.click_sq(m.to_square)      # chess.com: the queen sits on the target square
+        p.park()
+        time.sleep(0.9)
+        after = p.occ()
+        p.board.push(m)
+        if after == p.expect():
             T.loop_update(round=rnd, clicks=rnd, last="played %s" % san, status="waiting for them")
-        else:
-            # wait for the opponent: a stable change that one legal move explains
-            time.sleep(0.7)
-            now = p.cells()
-            if not now or not base:
-                continue
-            ch = p.changed(base, now)
-            if len(ch - ignore) < 2:
-                continue
-            time.sleep(0.5)                       # let the animation finish
-            now2 = p.cells()
-            # squares still changing on their own (an overlay's moving meter, a
-            # hover effect) are noise, not a move
-            ch = p.changed(base, now2) - p.changed(now, now2)
-            m = p.explain(ch, ignore)
-            if not m:
-                lost += 1
-                T.loop_update(last="couldn't tell their move (changed %d squares) -- watching" % len(ch))
-                if lost >= 3:
-                    # our copy of the game is off (a misread piece): read it again
-                    T.mini_say("re-reading the board…")
-                    q, err2 = setup()
-                    if q:
-                        q.board.turn = me
-                        p = q
-                        p.park()
-                        time.sleep(0.3)
-                        base = p.cells()
-                        ignore = set()
-                        T.loop_update(last="re-read the position from the screen", status="playing")
-                    lost = 0
-                continue
-            lost = 0
-            san = p.board.san(m)
-            p.board.push(m)
-            base = now2
-            ignore = set()
-            T.mini_say("they played " + san)
-            T.loop_update(last="they played %s" % san, status="playing")
+            misses = 0
+            continue
+        reply = p.find_move(after) if after else None
+        if reply:                        # the bot answered instantly
+            T.loop_update(round=rnd, clicks=rnd, last="played %s" % san)
+            apply(reply, "they")
+            misses = 0
+            continue
+        p.board.pop()                    # the move didn't happen on screen
+        misses += 1
+        T.loop_update(last="tried %s but the board didn't change -- retrying" % san)
+        if misses >= 2:
+            if not p.board.move_stack:
+                p.board.turn = not p.board.turn      # it was really THEIR move
+                T.mini_say("your move first, watching")
+            else:
+                resync("my move didn't register")
+            misses = 0
+        time.sleep(1.0)
     try:
         os.remove(T.LOOP)
     except OSError:
