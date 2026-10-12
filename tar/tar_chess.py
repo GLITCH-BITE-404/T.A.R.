@@ -605,9 +605,14 @@ def learn_pieces(png, box, mon_off, wb):
         if pc:
             tpl.append([pc.symbol(), bits])
     try:
+        try:
+            allsz = json.load(open(TEMPLATES)).get("sizes", {})
+        except (OSError, ValueError):
+            allsz = {}
+        allsz[str(int(box[2] - box[0]))] = tpl        # every board size seen is kept
         with open(TEMPLATES, "w") as f:
-            json.dump({"side": int(box[2] - box[0]), "pieces": tpl}, f)
-        log("learned", len(tpl), "piece shapes from the start position")
+            json.dump({"sizes": allsz}, f)
+        log("learned", len(tpl), "piece shapes for a %d px board" % int(box[2] - box[0]))
     except OSError:
         pass
 
@@ -619,8 +624,12 @@ def recognise(png, box, mon_off, want, wb):
         t = json.load(open(TEMPLATES))
     except (OSError, ValueError):
         return None
-    if abs(t.get("side", 0) - (box[2] - box[0])) > 6:
-        return None                     # different board size: shapes don't apply
+    sizes = t.get("sizes") or ({str(t["side"]): t["pieces"]} if "side" in t else {})
+    side = box[2] - box[0]
+    near = [k for k in sizes if abs(int(k) - side) <= 6]
+    if not near:
+        return None                     # never seen a board this size: shapes don't apply
+    t = {"pieces": sizes[min(near, key=lambda k: abs(int(k) - side))]}
     masks = piece_masks(png, box, mon_off)
     ranked = {}                         # square -> [(score, symbol)] best first
     for (row, col), bits in masks.items():
@@ -784,6 +793,44 @@ def _cached_box(w):
     return None
 
 
+GAME = os.path.join(T.DATA, "chess-game.json")
+
+
+def save_game(board, wb):
+    try:
+        with open(GAME, "w") as f:
+            json.dump({"fen": board.fen(), "white_bottom": wb, "at": time.time()}, f)
+    except OSError:
+        pass
+
+
+def _resume(want, wb):
+    """The saved game, if the board on screen is it (or it plus 1-2 moves) --
+    a crash/restart mid-game then needs no reading at all."""
+    import chess
+    try:
+        g = json.load(open(GAME))
+    except (OSError, ValueError):
+        return None
+    if g.get("white_bottom") != wb or time.time() - g.get("at", 0) > 3 * 3600:
+        return None
+    b = chess.Board(g["fen"])
+    have = lambda bb: {sq: p.color == chess.WHITE for sq, p in bb.piece_map().items()}
+    if have(b) == want:
+        return b
+    for m in list(b.legal_moves):
+        b.push(m)
+        if have(b) == want:
+            return b
+        for r in list(b.legal_moves):
+            b.push(r)
+            if have(b) == want:
+                return b
+            b.pop()
+        b.pop()
+    return None
+
+
 def _position(png, box, mon, wb, moves, guess_side):
     """Board state from the pixels (+ the move list, + one labelling call only
     when joining a game that's already going)."""
@@ -799,6 +846,7 @@ def _position(png, box, mon, wb, moves, guess_side):
         top_white = all(start_rows[0]) and all(start_rows[1]) and not any(start_rows[7])
         if bottom_white or top_white:
             learn_pieces(png, box, (mx, my), bottom_white)
+            save_game(chess.Board(), bottom_white)
             return Player(box, bottom_white, chess.Board(), mon), None
     if guess_side:
         # cached board, game in progress: which side is ours? white's pieces
@@ -824,7 +872,12 @@ def _position(png, box, mon, wb, moves, guess_side):
             break
     if ok and matches(board):
         return Player(box, wb, board, mon), None
-    # 2) learned piece shapes (no AI): accepted only if the position is plausible
+    # 2) the game T.A.R. was already playing (saved after every move)
+    resumed = _resume(want, wb)
+    if resumed is not None:
+        log("resumed the saved game:", resumed.fen())
+        return Player(box, wb, resumed, mon), None
+    # 3) learned piece shapes (no AI): accepted only if the position is plausible
     shapes = recognise(png, box, (mx, my), want, wb)
     if shapes:
         b2 = chess.Board(None)
@@ -840,7 +893,7 @@ def _position(png, box, mon, wb, moves, guess_side):
             log("read the position from learned piece shapes:", b2.fen())
             return Player(box, wb, b2, mon), None
         log("learned shapes gave an impossible position -- asking the AI")
-    # 3) read the position off the board: pixels say WHERE and which colour,
+    # 4) read the position off the board: pixels say WHERE and which colour,
     #    the model only names the piece type on each occupied square
     crop = os.path.join(T.DATA, "chess-crop.jpg")
     Image.open(png).crop((box[0] - mx, box[1] - my, box[2] - mx, box[3] - my)).convert("RGB").save(crop)
@@ -950,6 +1003,9 @@ def play(minutes=30):
         for m in moves:
             san = p.board.san(m)
             log("read move from screen:", san, "| fen before", p.board.fen())
+            p.board.push(m)
+            save_game(p.board, p.white_bottom)
+            p.board.pop()
             p.board.push(m)
             T.mini_say(("they played " if p.board.turn == me else "played ") + san)
             T.loop_update(last="%s %s" % ("they played" if p.board.turn == me else "played", san))
@@ -1090,6 +1146,7 @@ def play(minutes=30):
             continue
         p.board.push(m)
         if after == p.expect():
+            save_game(p.board, p.white_bottom)
             T.loop_update(round=rnd, clicks=rnd, last="played %s" % san, status="waiting for them")
             misses = fails_total = resyncs_in_row = 0
             p.tries.clear()
