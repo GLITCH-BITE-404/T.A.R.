@@ -158,7 +158,49 @@ def _pattern_score(path, box, mon_off):
     return abs(st.mean(light) - st.mean(dark)) - 0.5 * (st.pstdev(light) + st.pstdev(dark))
 
 
+def board_edges(shot, box, mon_off, reach=40):
+    """Exact board edges: where the page background meets the squares, found on
+    a few scan lines through the middle (the snapped grid alone wandered by
+    ~12 px between screenshots, which wrecked piece-shape matching)."""
+    import statistics as st
+    px, (W, H) = _pixels(shot)
+    x1, y1, x2, y2 = [v - o for v, o in zip(box, mon_off * 2)]
+    side = (x2 - x1) / 8.0
+    rows = [int(y1 + (k + 0.5) * side) for k in (1, 3, 5)]
+    cols = [int(x1 + (k + 0.5) * side) for k in (1, 3, 5)]
+
+    def best(line, positions, rising):
+        top = None
+        for q in positions:
+            d = (line(q + 3) - line(q - 3)) * (1 if rising else -1)
+            if top is None or d > top[0]:
+                top = (d, q)
+        return top[1]
+    cx = lambda v: max(0, min(W - 1, v))
+    cy = lambda v: max(0, min(H - 1, v))
+    L = st.median(best(lambda x, y=y: px[cx(x), y], range(int(x1) - reach, int(x1) + reach), True) for y in rows)
+    R = st.median(best(lambda x, y=y: px[cx(x), y], range(int(x2) - reach, int(x2) + reach), False) for y in rows)
+    T_ = st.median(best(lambda y, x=x: px[x, cy(y)], range(int(y1) - reach, int(y1) + reach), True) for x in cols)
+    B = st.median(best(lambda y, x=x: px[x, cy(y)], range(int(y2) - reach, int(y2) + reach), False) for x in cols)
+    side = round(((R - L) + (B - T_)) / 2)
+    return (int(L + mon_off[0]), int(T_ + mon_off[1]), int(L + mon_off[0] + side), int(T_ + mon_off[1] + side))
+
+
 def snap_board(shot, box, mon_off):
+    """Find the 8x8 grid near the vision box, then pin it to the board's real
+    edges. -> (box, score)"""
+    box, score = _snap_grid(shot, box, mon_off)
+    try:
+        e = board_edges(shot, box, mon_off)
+        es = _pattern_score(shot, e, mon_off)
+        if es >= 8 and abs(e[0] - box[0]) < 30 and abs(e[1] - box[1]) < 30:
+            return e, es
+    except Exception:
+        pass
+    return box, score
+
+
+def _snap_grid(shot, box, mon_off):
     """Nudge the vision box until the 8x8 pattern fits best."""
     best = (_pattern_score(shot, box, mon_off), box)
     x1, y1, x2, y2 = box
@@ -523,6 +565,116 @@ def last_mover(png, box, mon_off, occ):
     return occ[best[1]]
 
 
+TEMPLATES = os.path.join(T.DATA, "chess-pieces.json")
+_MASK = 20                              # piece silhouette grid (20x20)
+
+
+def piece_masks(png, box, mon_off):
+    """{(row, col): silhouette bits} -- pixels that differ from the square's own
+    colour, so the same piece looks the same on light, dark or highlighted squares."""
+    import statistics as st
+    px, (W, H) = _pixels(png)
+    x1, y1 = box[0] - mon_off[0], box[1] - mon_off[1]
+    side = (box[2] - box[0]) / 8.0
+    out = {}
+    for row in range(8):
+        for col in range(8):
+            X0, Y0 = x1 + col * side, y1 + row * side
+            base = st.mean(px[int(X0 + dx * side), int(Y0 + dy * side)]
+                           for dx in (0.08, 0.92) for dy in (0.08, 0.92))
+            bits = []
+            for j in range(_MASK):
+                for i in range(_MASK):
+                    # middle 70% only: corner labels (a-h, 1-8) and things lying
+                    # on the board's edge stay out of the silhouette
+                    v = px[int(X0 + (0.15 + 0.7 * (i + 0.5) / _MASK) * side),
+                           int(Y0 + (0.12 + 0.7 * (j + 0.5) / _MASK) * side)]
+                    bits.append(1 if abs(v - base) > 40 else 0)
+            out[(row, col)] = bits
+    return out
+
+
+def learn_pieces(png, box, mon_off, wb):
+    """Fresh game = every piece on a known square: remember what each looks like."""
+    import chess
+    masks = piece_masks(png, box, mon_off)
+    start = chess.Board()
+    tpl = []
+    for (row, col), bits in masks.items():
+        pc = start.piece_at(_sq(row, col, wb))
+        if pc:
+            tpl.append([pc.symbol(), bits])
+    try:
+        with open(TEMPLATES, "w") as f:
+            json.dump({"side": int(box[2] - box[0]), "pieces": tpl}, f)
+        log("learned", len(tpl), "piece shapes from the start position")
+    except OSError:
+        pass
+
+
+def recognise(png, box, mon_off, want, wb):
+    """{square: symbol} for every occupied square, from the learned shapes --
+    None if there are no shapes for this board size."""
+    try:
+        t = json.load(open(TEMPLATES))
+    except (OSError, ValueError):
+        return None
+    if abs(t.get("side", 0) - (box[2] - box[0])) > 6:
+        return None                     # different board size: shapes don't apply
+    masks = piece_masks(png, box, mon_off)
+    ranked = {}                         # square -> [(score, symbol)] best first
+    for (row, col), bits in masks.items():
+        sq = _sq(row, col, wb)
+        if sq not in want:
+            continue
+        best = {}
+        for sym, tb in t["pieces"]:
+            if sym.isupper() != want[sq]:
+                continue                # pixels already know the colour
+            inter = sum(a & b for a, b in zip(bits, tb))
+            union = sum(a | b for a, b in zip(bits, tb)) or 1
+            best[sym] = max(best.get(sym, 0), inter / union)
+        ranked[sq] = sorted(((v, k) for k, v in best.items()), reverse=True)
+    return _resolve(ranked)
+
+
+_MAX = {"k": 1, "q": 1, "r": 2, "b": 2, "n": 2, "p": 8}
+
+
+def _resolve(ranked):
+    """Best shape per square, then chess sense: while a side has more of a piece
+    than a real game allows (4 knights...), the least sure square takes its
+    next-best shape."""
+    pick = {sq: 0 for sq in ranked}
+    for _ in range(64):
+        counts = {}
+        for sq, i in pick.items():
+            sym = ranked[sq][i][1]
+            counts.setdefault(sym, []).append(sq)
+        over = [(sym, sqs) for sym, sqs in counts.items() if len(sqs) > _MAX[sym.lower()]]
+        if not over:
+            break
+        sym, sqs = over[0]
+        # the square whose best guess is least ahead of its next option gives way
+        movable = [sq for sq in sqs if pick[sq] + 1 < len(ranked[sq])]
+        if not movable:
+            break
+        sq = min(movable, key=lambda q: ranked[q][pick[q]][0] - ranked[q][pick[q] + 1][0])
+        pick[sq] += 1
+    return {sq: ranked[sq][i][1] if ranked[sq] else None for sq, i in pick.items()}
+
+
+def plausible(board):
+    """Could this position come from a real game? (rejects '3 white bishops')"""
+    import chess
+    for color in (chess.WHITE, chess.BLACK):
+        n = {pt: len(board.pieces(pt, color)) for pt in range(1, 7)}
+        extra = max(0, n[2] - 2) + max(0, n[3] - 2) + max(0, n[4] - 2) + max(0, n[5] - 1)
+        if n[6] != 1 or n[1] + extra > 8:
+            return False
+    return board.is_valid()
+
+
 def _sq(row, col, white_bottom):
     import chess
     f = col if white_bottom else 7 - col
@@ -646,6 +798,7 @@ def _position(png, box, mon, wb, moves, guess_side):
         bottom_white = all(start_rows[7]) and all(start_rows[6]) and not any(start_rows[0])
         top_white = all(start_rows[0]) and all(start_rows[1]) and not any(start_rows[7])
         if bottom_white or top_white:
+            learn_pieces(png, box, (mx, my), bottom_white)
             return Player(box, bottom_white, chess.Board(), mon), None
     if guess_side:
         # cached board, game in progress: which side is ours? white's pieces
@@ -671,7 +824,23 @@ def _position(png, box, mon, wb, moves, guess_side):
             break
     if ok and matches(board):
         return Player(box, wb, board, mon), None
-    # 2) read the position off the board: pixels say WHERE and which colour,
+    # 2) learned piece shapes (no AI): accepted only if the position is plausible
+    shapes = recognise(png, box, (mx, my), want, wb)
+    if shapes:
+        b2 = chess.Board(None)
+        for sq, sym in shapes.items():
+            if sym:
+                b2.set_piece_at(sq, chess.Piece.from_symbol(sym))
+        b2.turn = chess.WHITE if wb else chess.BLACK
+        lm0 = last_mover(png, box, (mx, my), occ)
+        if lm0 is not None:
+            b2.turn = not lm0
+        _castling_from_board(b2)
+        if plausible(b2):
+            log("read the position from learned piece shapes:", b2.fen())
+            return Player(box, wb, b2, mon), None
+        log("learned shapes gave an impossible position -- asking the AI")
+    # 3) read the position off the board: pixels say WHERE and which colour,
     #    the model only names the piece type on each occupied square
     crop = os.path.join(T.DATA, "chess-crop.jpg")
     Image.open(png).crop((box[0] - mx, box[1] - my, box[2] - mx, box[3] - my)).convert("RGB").save(crop)
@@ -707,6 +876,15 @@ def _position(png, box, mon, wb, moves, guess_side):
     me = chess.WHITE if wb else chess.BLACK
     lm = last_mover(png, box, (mx, my), occ)
     board.turn = me if lm is None else (not lm)   # whoever didn't move last
+    _castling_from_board(board)
+    if not plausible(board):
+        return None, ("couldn't read the pieces reliably (got an impossible position) -- start a "
+                      "new game and say 'play chess' at the start, so I can learn the pieces")
+    return Player(box, wb, board, mon, junk), None
+
+
+def _castling_from_board(board):
+    import chess
     rights = ""
     if board.piece_at(chess.E1) == chess.Piece(chess.KING, chess.WHITE):
         if board.piece_at(chess.H1) == chess.Piece(chess.ROOK, chess.WHITE): rights += "K"
@@ -715,11 +893,6 @@ def _position(png, box, mon, wb, moves, guess_side):
         if board.piece_at(chess.H8) == chess.Piece(chess.ROOK, chess.BLACK): rights += "k"
         if board.piece_at(chess.A8) == chess.Piece(chess.ROOK, chess.BLACK): rights += "q"
     board.set_castling_fen(rights or "-")
-    if not board.is_valid():
-        # one more look decides the doubtful kings/pawns
-        return None, ("read a position that isn't legal (%s) -- start a new game and say 'play "
-                      "chess' right away" % board.status())
-    return Player(box, wb, board, mon, junk), None
 
 
 def play(minutes=30):
@@ -886,11 +1059,19 @@ def play(minutes=30):
         avoid = {mv for (fen, mv), n in failed.items() if fen == p.board.board_fen() and n >= 4}
         m = best_move(p.board, avoid=avoid)
         san = p.board.san(m)
-        if seen.get(m.from_square) != (me == chess.WHITE):
+        if m.from_square not in p.junk and seen.get(m.from_square) != (me == chess.WHITE):
             # never touch a piece that isn't ours on the REAL board
+            # (a covered square can't be checked: there we trust our copy)
             T.loop_update(last="the screen doesn't show my piece on %s -- re-reading"
                           % chess.square_name(m.from_square))
+            if resyncs_in_row >= 3:
+                why = "my copy of the game keeps disagreeing with the board -- stopped"
+                log("giving up:", why)
+                T.loop_update(status="failed", last=why)
+                T.mini_say("chess: stopped, can't read the board")
+                break
             resync("my piece isn't where I think")
+            resyncs_in_row += 1
             continue
         T.mini_say("playing " + san)
         p.click_sq(m.from_square)
