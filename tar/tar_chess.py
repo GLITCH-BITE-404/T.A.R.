@@ -291,8 +291,17 @@ class Player:
         _IMG_CACHE.clear()
         w = self.box[2] - self.box[0]
         o = occupancy(self.shot, (0, 0, w, w), (0, 0))
+        self.raw = o
         return {_sq(r, c, self.white_bottom): is_w for (r, c), is_w in o.items()
                 if _sq(r, c, self.white_bottom) not in self.junk}
+
+    def last_mover(self):
+        """Who moved last according to the screen's highlight (from the last occ() grab)."""
+        w = self.box[2] - self.box[0]
+        try:
+            return last_mover(self.shot, (0, 0, w, w), (0, 0), self.raw)
+        except Exception:
+            return None
 
     def expect(self, board=None):
         """{square: is_white} our copy of the game says should be there."""
@@ -410,6 +419,59 @@ def occupancy(png, box, mon_off):
             if light + dark >= 10:
                 out[(row, col)] = dark < 45            # True = white piece
     return out
+
+
+def last_mover(png, box, mon_off, occ):
+    """Who moved last, read from the last-move highlight: (True=white / False=black
+    / None if no clear highlight). The highlight tints the from- and to-square the
+    same way; exactly one of them holds a piece -- the one that just moved."""
+    import statistics as st
+    from PIL import Image
+    im = Image.open(png).convert("RGB")
+    px = im.load()
+    x1, y1 = box[0] - mon_off[0], box[1] - mon_off[1]
+    side = (box[2] - box[0]) / 8.0
+    cols = {}
+    for row in range(8):
+        for col in range(8):
+            X0, Y0 = x1 + col * side, y1 + row * side
+            # top-right + bottom-left corners: clear of the rank/file labels
+            pts = [px[int(X0 + 0.86 * side), int(Y0 + 0.14 * side)],
+                   px[int(X0 + 0.14 * side), int(Y0 + 0.86 * side)]]
+            cols[(row, col)] = tuple((pts[0][i] + pts[1][i]) / 2 for i in range(3))
+    delta = {}
+    for parity in (0, 1):
+        sq = [k for k in cols if (k[0] + k[1]) % 2 == parity]
+        med = tuple(st.median(cols[k][i] for k in sq) for i in range(3))
+        for k in sq:
+            d = tuple(cols[k][i] - med[i] for i in range(3))
+            mag = sum(abs(v) for v in d)
+            red_check = d[0] > 25 and d[0] > d[1] + 25          # the red "in check" mark
+            if mag > 45 and not red_check:
+                delta[k] = d
+    best = None
+    keys = sorted(delta)
+    for i in range(len(keys)):
+        for j in range(i + 1, len(keys)):
+            a, b = keys[i], keys[j]
+            occ_a, occ_b = a in occ, b in occ
+            if occ_a == occ_b:
+                continue                 # one square empty (from), one occupied (to)
+            da, db = delta[a], delta[b]
+            # the two highlight squares are tinted the SAME way (a check marker
+            # darkens a square differently): compare tint directions
+            dot = sum(x * y for x, y in zip(da, db))
+            na = sum(x * x for x in da) ** 0.5
+            nb = sum(y * y for y in db) ** 0.5
+            cos = dot / (na * nb) if na and nb else 0
+            if cos < 0.8:
+                continue
+            score = (sum(abs(v) for v in da) + sum(abs(v) for v in db)) * cos
+            if not best or score > best[0]:
+                best = (score, b if occ_b else a)
+    if not best or best[0] < 120:
+        return None
+    return occ[best[1]]
 
 
 def _sq(row, col, white_bottom):
@@ -594,7 +656,8 @@ def _position(png, box, mon, wb, moves, guess_side):
             continue                    # pawns never stand there: screen junk
         board.set_piece_at(sq, chess.Piece(pt, chess.WHITE if is_w else chess.BLACK))
     me = chess.WHITE if wb else chess.BLACK
-    board.turn = me                      # asked to play now = our move (checked on the first click)
+    lm = last_mover(png, box, (mx, my), occ)
+    board.turn = me if lm is None else (not lm)   # whoever didn't move last
     rights = ""
     if board.piece_at(chess.E1) == chess.Piece(chess.KING, chess.WHITE):
         if board.piece_at(chess.H1) == chess.Piece(chess.ROOK, chess.WHITE): rights += "K"
@@ -625,7 +688,7 @@ def play(minutes=30):
     T.loop_update(status="playing", last="found the board, playing %s with %s" % (
         "white" if me else "black", "Stockfish" if stockfish() else "the built-in engine"))
     p.park()
-    rnd, misses, lost = 0, 0, 0
+    rnd, misses, lost, not_ours, stuck, quiet, checked_at = 0, 0, 0, 0, 0, 0, -1
     until = time.time() + minutes * 60
 
     def resync(why):
@@ -635,7 +698,10 @@ def play(minutes=30):
         T.loop_update(last="re-reading the board (%s)" % why)
         q, e2 = setup()
         if q:
-            q.board.turn = me
+            q.white_bottom = (me == chess.WHITE)     # our colour never changes mid-game
+            q.occ()
+            lm2 = q.last_mover()
+            q.board.turn = me if lm2 is None else (not lm2)
             p = q
             p.park()
             return True
@@ -680,7 +746,7 @@ def play(minutes=30):
             found = p.find_move(seen2, plies=2)
             if found:
                 apply(found, "they")
-                lost = 0
+                lost = quiet = 0
                 continue
             lost += 1
             if lost >= 3:
@@ -690,15 +756,53 @@ def play(minutes=30):
             continue
         lost = 0
         if p.board.turn != me:
+            # waiting for them -- unless the screen says it's really OUR move
+            # (they already moved last, or a fresh game where we're white):
+            # waiting would hang both sides forever
+            lm = p.last_mover()
+            ours = (lm is not None and lm != me) or (
+                lm is None and me == chess.WHITE and p.board.board_fen() == chess.STARTING_BOARD_FEN)
+            if ours:
+                stuck += 1
+                if stuck >= 8:           # ~5 s: our copy has the turn wrong
+                    resync("it's my move on the screen")
+                    stuck = 0
+            else:
+                stuck = 0
+                quiet += 1
+                # no clue on screen and nothing moved for ~30 s: check ONCE per
+                # position (a person may think for minutes -- don't keep calling the AI)
+                if quiet >= 50 and lm is None and checked_at != len(p.board.move_stack):
+                    checked_at = len(p.board.move_stack)
+                    resync("nothing happened for a while")
+                    quiet = 0
             T.loop_update(status="waiting for them")
             time.sleep(0.6)
             continue
+        # the screen must agree it's our turn: the piece on the last-move
+        # highlight is the side that just moved
+        lm = p.last_mover()
+        if lm is not None and lm == me:
+            not_ours += 1
+            T.loop_update(status="waiting for them")
+            if not_ours >= 10:           # ~6 s of disagreement: our copy is off
+                resync("the screen says I moved last")
+                not_ours = 0
+            time.sleep(0.6)
+            continue
+        not_ours = 0
         # our move
         rnd += 1
         T.loop_update(status="thinking", round=rnd)
         T.mini_say("thinking…")
         m = best_move(p.board)
         san = p.board.san(m)
+        if seen.get(m.from_square) != (me == chess.WHITE):
+            # never touch a piece that isn't ours on the REAL board
+            T.loop_update(last="the screen doesn't show my piece on %s -- re-reading"
+                          % chess.square_name(m.from_square))
+            resync("my piece isn't where I think")
+            continue
         T.mini_say("playing " + san)
         p.click_sq(m.from_square)
         time.sleep(0.25)
@@ -724,11 +828,8 @@ def play(minutes=30):
         misses += 1
         T.loop_update(last="tried %s but the board didn't change -- retrying" % san)
         if misses >= 2:
-            if not p.board.move_stack:
-                p.board.turn = not p.board.turn      # it was really THEIR move
-                T.mini_say("your move first, watching")
-            else:
-                resync("my move didn't register")
+            # never guess whose turn it is: read the board (and the turn) again
+            resync("my move didn't register")
             misses = 0
         time.sleep(1.0)
     try:
