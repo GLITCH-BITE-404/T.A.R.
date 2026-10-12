@@ -892,10 +892,24 @@ def play(minutes=30):
             misses = 0
             continue
         p.board.pop()                    # the move didn't happen on screen
+        # Was it really our turn? Only then is it the MOVE's fault. If the
+        # screen says we moved last (or can't tell), it's a turn mix-up: wait
+        # / re-read -- never mark a good move as unplayable or give up over it.
+        lm_now = p.last_mover() if after else None
+        if lm_now is None or lm_now == me:
+            log("move %s didn't land but the screen %s -- not blaming the move" % (
+                san, "says I moved last" if lm_now == me else "doesn't show whose turn it is"))
+            misses += 1
+            if misses >= 2:
+                resync("not sure whose turn it is")
+                misses = 0
+            time.sleep(1.0)
+            continue
         key = (p.board.board_fen(), m)
         failed[key] = failed.get(key, 0) + 1
         fails_total += 1
-        log("move failed:", san, "x%d" % failed[key], "| total fails", fails_total)
+        log("move failed:", san, "x%d" % failed[key], "| total fails", fails_total,
+            "| screen confirms it was my turn")
         if fails_total >= 6:
             # never drag the user's mouse around forever
             why = "my moves aren't landing on the board (tried %s) -- stopped. Is the game over or the board covered?" % san
