@@ -316,6 +316,7 @@ class Player:
         self.shot = os.path.join(T.DATA, "chess-board.png")
         self.junk = set(junk)           # squares an overlay covers: never compared
         self.covered = False
+        self.tries = {}                 # square -> failed clicks (moves the click point)
 
     def occ(self):
         """{square: is_white} of what's REALLY on the board right now (pixels)."""
@@ -431,6 +432,10 @@ class Player:
             "| screen:", {True: "white", False: "black", None: "empty"}[self.last_seen.get(sq)]
             if hasattr(self, "last_seen") else "?")
         x, y = self.center(sq)
+        # retries click elsewhere in the square: something drawn over the board
+        # (the rice's desktop cat at the bottom edge) swallowed centre clicks
+        dx, dy = ((0, 0), (0, -0.3), (-0.28, -0.3), (0.28, -0.3))[self.tries.get(sq, 0) % 4]
+        x, y = x + dx * self.side, y + dy * self.side
         T.sh(["hyprctl", "dispatch", "movecursor", str(int(x)), str(int(y))])
         time.sleep(0.08)
         T.sh([T._wlrctl(), "pointer", "click", "left"])
@@ -745,6 +750,7 @@ def play(minutes=30):
     p.park()
     rnd, misses, lost, not_ours, stuck, quiet, checked_at = 0, 0, 0, 0, 0, 0, -1
     failed, fails_total = {}, 0          # moves that didn't work on screen
+    resyncs_in_row, just_resynced = 0, False
     until = time.time() + minutes * 60
 
     def resync(why):
@@ -755,6 +761,8 @@ def play(minutes=30):
         log("resync because:", why)
         q, e2 = setup()
         if q:
+            q.tries = dict(p.tries)                 # keep where clicks failed...
+            q.junk |= p.junk                        # ...and which squares are covered
             q.white_bottom = (me == chess.WHITE)     # our colour never changes mid-game
             q.occ()
             lm2 = q.last_mover()
@@ -807,11 +815,30 @@ def play(minutes=30):
             found = p.find_move(seen2, plies=2)
             if found:
                 apply(found, "they")
-                lost = quiet = 0
+                lost = quiet = resyncs_in_row = 0
+                just_resynced = False
                 continue
             lost += 1
             if lost >= 3:
-                resync("the board doesn't match any legal move")
+                diff = {sq for sq in set(seen2) | set(p.expect()) if seen2.get(sq) != p.expect().get(sq)}
+                if just_resynced and diff and len(diff) <= 4:
+                    # a FRESH read still disagrees on the same few squares: something
+                    # is drawn over them (the desktop cat once) -- ignore those squares
+                    p.junk |= diff
+                    log("ignoring covered squares:", ", ".join(sorted(chess.square_name(q) for q in diff)))
+                    T.loop_update(last="ignoring squares something covers: %s" % ", ".join(
+                        sorted(chess.square_name(q) for q in diff)))
+                    just_resynced = False
+                elif resyncs_in_row >= 3:
+                    why = "the board keeps disagreeing with every legal move -- stopped (is something covering the board?)"
+                    log("giving up:", why)
+                    T.loop_update(status="failed", last=why)
+                    T.mini_say("chess: stopped, can't read the board")
+                    break
+                else:
+                    resync("the board doesn't match any legal move")
+                    resyncs_in_row += 1
+                    just_resynced = True
                 lost = 0
             time.sleep(0.6)
             continue
@@ -856,7 +883,7 @@ def play(minutes=30):
         rnd += 1
         T.loop_update(status="thinking", round=rnd)
         T.mini_say("thinking…")
-        avoid = {mv for (fen, mv), n in failed.items() if fen == p.board.board_fen() and n >= 2}
+        avoid = {mv for (fen, mv), n in failed.items() if fen == p.board.board_fen() and n >= 4}
         m = best_move(p.board, avoid=avoid)
         san = p.board.san(m)
         if seen.get(m.from_square) != (me == chess.WHITE):
@@ -883,7 +910,8 @@ def play(minutes=30):
         p.board.push(m)
         if after == p.expect():
             T.loop_update(round=rnd, clicks=rnd, last="played %s" % san, status="waiting for them")
-            misses = fails_total = 0
+            misses = fails_total = resyncs_in_row = 0
+            p.tries.clear()
             continue
         reply = p.find_move(after) if after else None
         if reply:                        # the bot answered instantly
@@ -908,6 +936,8 @@ def play(minutes=30):
         key = (p.board.board_fen(), m)
         failed[key] = failed.get(key, 0) + 1
         fails_total += 1
+        for sq_ in (m.from_square, m.to_square):
+            p.tries[sq_] = p.tries.get(sq_, 0) + 1
         log("move failed:", san, "x%d" % failed[key], "| total fails", fails_total,
             "| screen confirms it was my turn")
         if fails_total >= 6:
