@@ -701,6 +701,9 @@ def setup():
             break
     if not w:
         return None, "no chess game open in the browser -- open one (chess.com / lichess) first"
+    if not re.search(r"computer|\bbots?\b|stockfish|\bai\b|engine", w.get("title") or "", re.I):
+        return None, ("that's a game against a real person -- I only play against bots "
+                      "(engine help vs people is cheating)")
     T.sh(["hyprctl", "dispatch", "focuswindow", "address:" + w["address"]])
     # wait until the game is REALLY in front: a fixed 0.5 s once screenshotted
     # the terminal workspace and the AI (rightly) saw no chessboard
