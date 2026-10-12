@@ -283,6 +283,7 @@ class Player:
         self.side = (box[2] - box[0]) / 8.0
         self.shot = os.path.join(T.DATA, "chess-board.png")
         self.junk = set(junk)           # squares an overlay covers: never compared
+        self.covered = False
 
     def occ(self):
         """{square: is_white} of what's REALLY on the board right now (pixels)."""
@@ -290,6 +291,11 @@ class Player:
             return None
         _IMG_CACHE.clear()
         w = self.box[2] - self.box[0]
+        # is that really the board? A terminal dragged over it was once read
+        # as "pieces" -> fake moves -> clicks into whatever was on top
+        self.covered = _pattern_score(self.shot, (0, 0, w, w), (0, 0)) < 8
+        if self.covered:
+            return None
         o = occupancy(self.shot, (0, 0, w, w), (0, 0))
         self.raw = o
         return {_sq(r, c, self.white_bottom): is_w for (r, c), is_w in o.items()
@@ -735,6 +741,9 @@ def play(minutes=30):
             break
         seen = p.occ()
         if seen is None:
+            if p.covered:
+                T.loop_update(status="board covered", last="the board is covered by another window -- waiting")
+                T.mini_say("chess: board is covered, waiting")
             time.sleep(1)
             continue
         if seen != p.expect():
@@ -813,6 +822,11 @@ def play(minutes=30):
         p.park()
         time.sleep(0.9)
         after = p.occ()
+        if after is None and p.covered:
+            # covered right after our clicks: once the board shows again, the
+            # normal check works out whether our move (and a reply) happened
+            time.sleep(1)
+            continue
         p.board.push(m)
         if after == p.expect():
             T.loop_update(round=rnd, clicks=rnd, last="played %s" % san, status="waiting for them")
