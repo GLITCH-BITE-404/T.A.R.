@@ -430,7 +430,18 @@ def setup():
     if not w:
         return None, "no chess game open in the browser -- open one (chess.com / lichess) first"
     T.sh(["hyprctl", "dispatch", "focuswindow", "address:" + w["address"]])
-    time.sleep(0.5)
+    # wait until the game is REALLY in front: a fixed 0.5 s once screenshotted
+    # the terminal workspace and the AI (rightly) saw no chessboard
+    for _ in range(30):
+        time.sleep(0.1)
+        act = T._active_window() or {}
+        cur = next((c for c in T._clients() if c.get("address") == w["address"]), None)
+        if act.get("address") == w["address"] and cur and T.window_on_screen(cur)[0]:
+            w = cur
+            break
+    else:
+        return None, "couldn't bring the chess window to the front"
+    time.sleep(0.25)                    # let the workspace animation finish
     mon = T._monitor()
     mx, my = mon.get("x", 0), mon.get("y", 0)
     shot = os.path.join(T.DATA, "chess-setup.jpg")
@@ -446,7 +457,13 @@ def setup():
         if r[0]:
             return r
     T.mini_say("finding the board…")
-    txt, err = T._gemini_image(shot, (
+    # only the browser window goes to the AI (no terminal / T.A.R. to confuse it);
+    # its answer is mapped back to screen coordinates below
+    wx, wy = (w.get("at") or [mx, my])
+    ww, wh = (w.get("size") or [mon.get("width", 1920), mon.get("height", 1080)])
+    wshot = os.path.join(T.DATA, "chess-window.jpg")
+    Image.open(png).crop((wx - mx, wy - my, wx - mx + ww, wy - my + wh)).convert("RGB").save(wshot)
+    txt, err = T._gemini_image(wshot, (
         "This screenshot shows a chess game in a browser. Reply with ONLY JSON: "
         "{\"box_2d\": [ymin, xmin, ymax, xmax], \"white_at_bottom\": true, "
         "\"moves\": \"1. e4 e5 2. Nf3\"} -- box_2d = the 8x8 squares only (NOT the coordinate "
@@ -464,10 +481,9 @@ def setup():
     bx = d.get("box_2d") or d.get("board")
     if not bx or len(bx) != 4:
         return None, "no chessboard visible on screen"
-    W, H = mon.get("width", 1920), mon.get("height", 1080)
-
     def to_box(x1, y1, x2, y2):
-        b = [mx + x1 / 1000 * W, my + y1 / 1000 * H, mx + x2 / 1000 * W, my + y2 / 1000 * H]
+        # 0-1000 of the WINDOW crop -> screen pixels
+        b = [wx + x1 / 1000 * ww, wy + y1 / 1000 * wh, wx + x2 / 1000 * ww, wy + y2 / 1000 * wh]
         side = ((b[2] - b[0]) + (b[3] - b[1])) / 2              # it's a square
         cx, cy = (b[0] + b[2]) / 2, (b[1] + b[3]) / 2
         return (int(cx - side / 2), int(cy - side / 2), int(cx + side / 2), int(cy + side / 2))
