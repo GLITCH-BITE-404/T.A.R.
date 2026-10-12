@@ -301,6 +301,39 @@ class Player:
         T.sh(["hyprctl", "dispatch", "movecursor", str(int(self.box[2] + 60)), str(int(self.box[1] + 20))])
 
 
+def occupancy(png, box, mon_off):
+    """{square: True(white)/False(black)} for every occupied square, from pixels.
+    A piece shows up as many pixels far from the square's own corner colour;
+    black pieces are mostly dark pixels, white ones mostly outline."""
+    import chess
+    import statistics as st
+    from PIL import Image
+    im = Image.open(png).convert("L")
+    px = im.load()
+    x1, y1 = box[0] - mon_off[0], box[1] - mon_off[1]
+    side = (box[2] - box[0]) / 8.0
+    out = {}
+    for row in range(8):
+        for col in range(8):
+            X0, Y0 = x1 + col * side, y1 + row * side
+            base = st.mean(px[int(X0 + dx * side), int(Y0 + dy * side)]
+                           for dx in (0.08, 0.92) for dy in (0.08, 0.92))
+            pts = [px[int(X0 + (0.3 + 0.4 * i / 9) * side), int(Y0 + (0.25 + 0.6 * j / 9) * side)]
+                   for i in range(10) for j in range(10)]
+            light = sum(1 for v in pts if v > base + 45)
+            dark = sum(1 for v in pts if v < base - 45)
+            if light + dark >= 10:
+                out[(row, col)] = dark < 45            # True = white piece
+    return out
+
+
+def _sq(row, col, white_bottom):
+    import chess
+    f = col if white_bottom else 7 - col
+    r = 7 - row if white_bottom else row
+    return chess.square(f, r)
+
+
 def setup():
     """Find the board + game state. -> (Player, None) or (None, why)."""
     import chess
@@ -319,43 +352,101 @@ def setup():
     with T._TarHidden():
         if not T._shot(shot):
             return None, "couldn't take a screenshot"
+    png = shot[:-4] + ".png"
+    from PIL import Image
+    Image.open(shot).save(png)
+    T.mini_say("finding the board…")
     txt, err = T._gemini_image(shot, (
         "This screenshot shows a chess game in a browser. Reply with ONLY JSON: "
-        "{\"board\": [x1, y1, x2, y2], \"white_at_bottom\": true, \"moves\": \"1. e4 e5 2. Nf3\"} "
-        "board = the 8x8 squares only (NOT the coordinate letters around it), normalized 0-1000 "
-        "of the screenshot width/height. white_at_bottom = are the WHITE pieces' home ranks at "
-        "the bottom. moves = the move list shown next to the board in standard algebraic "
-        "notation (write piece letters K Q R B N even if icons are shown), or \"\" if no moves "
-        "were played yet. If there is no chessboard: {\"board\": null}."), max_tokens=600)
+        "{\"box_2d\": [ymin, xmin, ymax, xmax], \"white_at_bottom\": true, "
+        "\"moves\": \"1. e4 e5 2. Nf3\"} -- box_2d = the 8x8 squares only (NOT the coordinate "
+        "letters around them), normalized 0-1000. white_at_bottom = are the white pieces' home "
+        "ranks at the bottom (rank 1 at the bottom). moves = the FULL move list if it is all "
+        "visible, in algebraic notation (write K Q R B N even if icons are shown); \"\" if no moves "
+        "were played or the list is cut off. If there is no chessboard: {\"box_2d\": null}."),
+        max_tokens=800)
     if err:
         return None, err
     try:
         d = json.loads(re.search(r"\{.*\}", txt, re.S).group(0))
     except (AttributeError, ValueError):
         return None, "couldn't read the board"
-    if not d.get("board"):
+    bx = d.get("box_2d") or d.get("board")
+    if not bx or len(bx) != 4:
         return None, "no chessboard visible on screen"
     W, H = mon.get("width", 1920), mon.get("height", 1080)
-    x1, y1, x2, y2 = d["board"]
-    box = [mx + x1 / 1000 * W, my + y1 / 1000 * H, mx + x2 / 1000 * W, my + y2 / 1000 * H]
-    side = ((box[2] - box[0]) + (box[3] - box[1])) / 2        # it's a square
-    cx, cy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
-    box = (int(cx - side / 2), int(cy - side / 2), int(cx + side / 2), int(cy + side / 2))
-    from PIL import Image
-    Image.open(shot).save(shot[:-4] + ".png")
-    box, score = snap_board(shot[:-4] + ".png", box, (mx, my))
+
+    def to_box(x1, y1, x2, y2):
+        b = [mx + x1 / 1000 * W, my + y1 / 1000 * H, mx + x2 / 1000 * W, my + y2 / 1000 * H]
+        side = ((b[2] - b[0]) + (b[3] - b[1])) / 2              # it's a square
+        cx, cy = (b[0] + b[2]) / 2, (b[1] + b[3]) / 2
+        return (int(cx - side / 2), int(cy - side / 2), int(cx + side / 2), int(cy + side / 2))
+    # models disagree on [y,x] vs [x,y] order: keep whichever fits the 8x8 pattern
+    best = max(((snap_board(png, to_box(*o), (mx, my))) for o in
+                ((bx[1], bx[0], bx[3], bx[2]), (bx[0], bx[1], bx[2], bx[3]))), key=lambda r: r[1])
+    box, score = best
     if score < 8:
         return None, "couldn't line up the board's squares (score %.1f) -- is the whole board visible?" % score
+    wb = bool(d.get("white_at_bottom", True))
+    occ = occupancy(png, box, (mx, my))              # (row, col) -> is_white
+    want = {_sq(r, c, wb): is_w for (r, c), is_w in occ.items()}
+
+    def matches(b):
+        have = {sq: p.color == chess.WHITE for sq, p in b.piece_map().items()}
+        return have == want
+
+    # 1) the move list, if it replays to exactly what's on the board (keeps castling/turn)
     board = chess.Board()
-    sans = [t for t in re.split(r"\s+", re.sub(r"\d+\.(\.\.)?", " ", d.get("moves") or "")) if t
-            and not re.match(r"^(1-0|0-1|1/2-1/2|\*)$", t)]
-    for san in sans:
+    ok = True
+    for san in [t for t in re.split(r"\s+", re.sub(r"\d+\.(\.\.)?", " ", d.get("moves") or ""))
+                if t and not re.match(r"^(1-0|0-1|1/2-1/2|\*)$", t)]:
         try:
             board.push_san(san.replace("0-0-0", "O-O-O").replace("0-0", "O-O"))
         except ValueError:
-            return None, ("couldn't follow the move list at %r -- start a new game and say "
-                          "'play chess' right away" % san)
-    return Player(box, bool(d.get("white_at_bottom", True)), board, mon), None
+            ok = False
+            break
+    if ok and matches(board):
+        return Player(box, wb, board, mon), None
+    # 2) read the position off the board: pixels say WHERE and which colour,
+    #    the model only names the piece type on each occupied square
+    crop = os.path.join(T.DATA, "chess-crop.jpg")
+    Image.open(png).crop((box[0] - mx, box[1] - my, box[2] - mx, box[3] - my)).convert("RGB").save(crop)
+    names = {sq: chess.square_name(sq) for sq in want}
+    T.mini_say("reading the position…")
+    txt, err = T._gemini_image(crop, (
+        "This is a chessboard%s. These squares have pieces: %s. For EACH of them say which "
+        "piece it is. Reply with ONLY JSON like {\"e1\": \"K\", \"d8\": \"q\"} -- uppercase = "
+        "white, lowercase = black, letters K Q R B N P." % (
+            " (white at the bottom: a1 bottom-left)" if wb else " (black at the bottom: h1 bottom-left)",
+            ", ".join("%s %s" % (names[sq], "white" if is_w else "black") for sq, is_w in sorted(want.items()))
+        )), max_tokens=600)
+    if err:
+        return None, err
+    try:
+        labels = json.loads(re.search(r"\{.*\}", txt, re.S).group(0))
+    except (AttributeError, ValueError):
+        return None, "couldn't read which pieces are where"
+    board = chess.Board(None)
+    for sq, is_w in want.items():
+        t = str(labels.get(names[sq], "P"))[:1].upper()
+        pt = {"K": chess.KING, "Q": chess.QUEEN, "R": chess.ROOK, "B": chess.BISHOP,
+              "N": chess.KNIGHT}.get(t, chess.PAWN)
+        board.set_piece_at(sq, chess.Piece(pt, chess.WHITE if is_w else chess.BLACK))
+    me = chess.WHITE if wb else chess.BLACK
+    board.turn = me                      # asked to play now = our move (checked on the first click)
+    rights = ""
+    if board.piece_at(chess.E1) == chess.Piece(chess.KING, chess.WHITE):
+        if board.piece_at(chess.H1) == chess.Piece(chess.ROOK, chess.WHITE): rights += "K"
+        if board.piece_at(chess.A1) == chess.Piece(chess.ROOK, chess.WHITE): rights += "Q"
+    if board.piece_at(chess.E8) == chess.Piece(chess.KING, chess.BLACK):
+        if board.piece_at(chess.H8) == chess.Piece(chess.ROOK, chess.BLACK): rights += "k"
+        if board.piece_at(chess.A8) == chess.Piece(chess.ROOK, chess.BLACK): rights += "q"
+    board.set_castling_fen(rights or "-")
+    if not board.is_valid():
+        # one more look decides the doubtful kings/pawns
+        return None, ("read a position that isn't legal (%s) -- start a new game and say 'play "
+                      "chess' right away" % board.status())
+    return Player(box, wb, board, mon), None
 
 
 def play(minutes=30):
@@ -377,6 +468,8 @@ def play(minutes=30):
     base = p.cells()
     ignore = set()                      # our last move's squares (their highlight fades)
     rnd = 0
+    misses = 0
+    lost = 0
     until = time.time() + minutes * 60
     while T.loop_running() and time.time() < until:
         d = T.loop_running() or {}
@@ -414,10 +507,16 @@ def play(minutes=30):
             after = p.cells()
             moved = p.changed(before, after) if before and after else set()
             if not (Player.touched(p.board, m) <= moved):
-                # didn't take: maybe a popup, maybe it's not our turn on the page
+                # didn't take: a popup, or it's really THEIR move (joined mid-game)
+                misses += 1
                 T.loop_update(last="tried %s but the board didn't change -- retrying" % san)
+                if misses >= 2 and not p.board.move_stack:
+                    p.board.turn = not p.board.turn      # their turn after all: wait for them
+                    T.mini_say("your move first, watching")
+                    misses = 0
                 time.sleep(1.5)
                 continue
+            misses = 0
             ignore = Player.touched(p.board, m)
             p.board.push(m)
             base = after
@@ -436,8 +535,23 @@ def play(minutes=30):
             ch = p.changed(base, now2)
             m = p.explain(ch, ignore)
             if not m:
+                lost += 1
                 T.loop_update(last="couldn't tell their move (changed %d squares) -- watching" % len(ch))
+                if lost >= 3:
+                    # our copy of the game is off (a misread piece): read it again
+                    T.mini_say("re-reading the board…")
+                    q, err2 = setup()
+                    if q:
+                        q.board.turn = me
+                        p = q
+                        p.park()
+                        time.sleep(0.3)
+                        base = p.cells()
+                        ignore = set()
+                        T.loop_update(last="re-read the position from the screen", status="playing")
+                    lost = 0
                 continue
+            lost = 0
             san = p.board.san(m)
             p.board.push(m)
             base = now2
