@@ -359,11 +359,11 @@ def setup():
 
 
 def play(minutes=30):
-    import chess
-    err = ensure_chess()
+    err = ensure_chess()                # BEFORE importing it: first run installs it
     if err:
         T.loop_update(status="failed", last=err)
         return 1
+    import chess
     p, err = setup()
     if not p:
         T.loop_update(status="failed", last=err)
@@ -456,5 +456,14 @@ if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "play":
         mins = int(sys.argv[sys.argv.index("--minutes") + 1]) if "--minutes" in sys.argv else 30
         T.MINI_HOLD = 90
-        sys.exit(play(mins))
+        try:
+            rc = play(mins)
+        except Exception as e:
+            # never die silently: the card / chat must say what broke
+            import traceback
+            traceback.print_exc()
+            T.loop_update(status="failed", last="chess crashed: %s" % e)
+            T.mini_say("chess crashed: " + T.short_say(str(e), 8))
+            rc = 1
+        sys.exit(rc)
     print(__doc__)

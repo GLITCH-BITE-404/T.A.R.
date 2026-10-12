@@ -2552,9 +2552,23 @@ def a_play_chess(args):
                    "round": 0, "status": "finding the board", "last": "", "paused": False,
                    "feed": [], "autoclick": "", "rate": 0, "clicks": 0,
                    "win": w["address"], "win_title": w.get("title", ""), "beat": time.time()}, f)
-    return ("playing chess for up to %d min: found the board once, then the engine moves and "
-            "T.A.R. watches the squares for the opponent's moves (say 'stop' to end) -- VERIFIED: "
-            "started" % minutes)
+    # report what REALLY happened: wait for the board to be found (or a failure)
+    for _ in range(80):                 # first run also installs the chess library
+        time.sleep(0.5)
+        try:
+            d = json.load(open(LOOP, encoding="utf-8"))
+        except (OSError, ValueError):
+            d = {}
+        st = d.get("status", "")
+        if st == "failed" or p.poll() is not None:
+            why = d.get("last") or "it stopped right away (see loop.log)"
+            return "NOT DONE: couldn't start playing chess -- %s" % why
+        if st not in ("finding the board", "starting", ""):
+            return ("playing chess for up to %d min -- VERIFIED: %s. The engine moves and T.A.R. "
+                    "watches the squares for the opponent's replies (say 'stop' to end)."
+                    % (minutes, d.get("last") or "board found"))
+    return ("started chess, still setting up (installing / finding the board) -- watch the orb; "
+            "say 'stop' to cancel")
 
 
 def a_play_game(args):
