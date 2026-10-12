@@ -266,17 +266,20 @@ def stockfish():
     return _SF or None
 
 
-def best_move(board, seconds=2.5):
+def best_move(board, seconds=2.5, avoid=()):
     """Stockfish if it's installed (~0.3 s, plays far above any bot), else the
-    small built-in alpha-beta below."""
+    small built-in alpha-beta below. avoid = moves that didn't work on screen."""
+    allowed = [m for m in board.legal_moves if m not in avoid] or list(board.legal_moves)
     sf = stockfish()
     if sf:
         try:
             import chess.engine
-            return sf.play(board, chess.engine.Limit(time=0.3)).move
+            return sf.play(board, chess.engine.Limit(time=0.3),
+                           root_moves=allowed if avoid else None).move
         except Exception:
             pass
-    return _own_best_move(board, seconds)
+    m = _own_best_move(board, seconds)
+    return m if m in allowed else allowed[0]
 
 
 def _own_best_move(board, seconds=2.5):
@@ -741,6 +744,7 @@ def play(minutes=30):
         "white" if me else "black", "Stockfish" if stockfish() else "the built-in engine"))
     p.park()
     rnd, misses, lost, not_ours, stuck, quiet, checked_at = 0, 0, 0, 0, 0, 0, -1
+    failed, fails_total = {}, 0          # moves that didn't work on screen
     until = time.time() + minutes * 60
 
     def resync(why):
@@ -769,8 +773,8 @@ def play(minutes=30):
             T.mini_say(("they played " if p.board.turn == me else "played ") + san)
             T.loop_update(last="%s %s" % ("they played" if p.board.turn == me else "played", san))
 
-    while T.loop_running() and time.time() < until:
-        d = T.loop_running() or {}
+    while T.loop_mine() and time.time() < until:
+        d = T.loop_mine() or {}
         if d.get("paused"):
             time.sleep(1)
             continue
@@ -852,7 +856,8 @@ def play(minutes=30):
         rnd += 1
         T.loop_update(status="thinking", round=rnd)
         T.mini_say("thinking…")
-        m = best_move(p.board)
+        avoid = {mv for (fen, mv), n in failed.items() if fen == p.board.board_fen() and n >= 2}
+        m = best_move(p.board, avoid=avoid)
         san = p.board.san(m)
         if seen.get(m.from_square) != (me == chess.WHITE):
             # never touch a piece that isn't ours on the REAL board
@@ -878,7 +883,7 @@ def play(minutes=30):
         p.board.push(m)
         if after == p.expect():
             T.loop_update(round=rnd, clicks=rnd, last="played %s" % san, status="waiting for them")
-            misses = 0
+            misses = fails_total = 0
             continue
         reply = p.find_move(after) if after else None
         if reply:                        # the bot answered instantly
@@ -887,6 +892,17 @@ def play(minutes=30):
             misses = 0
             continue
         p.board.pop()                    # the move didn't happen on screen
+        key = (p.board.board_fen(), m)
+        failed[key] = failed.get(key, 0) + 1
+        fails_total += 1
+        log("move failed:", san, "x%d" % failed[key], "| total fails", fails_total)
+        if fails_total >= 6:
+            # never drag the user's mouse around forever
+            why = "my moves aren't landing on the board (tried %s) -- stopped. Is the game over or the board covered?" % san
+            log("giving up:", why)
+            T.loop_update(status="failed", last=why)
+            T.mini_say("chess: stopped, my moves weren't landing")
+            break
         misses += 1
         T.loop_update(last="tried %s but the board didn't change -- retrying" % san)
         if misses >= 2:

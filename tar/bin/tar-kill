@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# tar-kill: stop EVERYTHING T.A.R. is running in the background -- chess,
+# background tasks (autoclickers included), screen effects. Finds them by
+# their command line, so nothing survives even if T.A.R.'s task file is gone.
+# T.A.R. runs the same thing on "stop", on the STOP button and when it closes.
+here="$(dirname "$(readlink -f "$0")")"
+exec python3 "$here/../tar_tools.py" run stop_task

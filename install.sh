@@ -77,7 +77,7 @@ for f in MatugenColors.qml Scaler.qml WindowRegistry.js; do
     fi
 done
 
-chmod +x "$DEST/tar/bin/tar-ai" "$DEST/tar/bin/aur-user-install" "$DEST"/tar/*.py "$DEST/tar/tar_say.sh"
+chmod +x "$DEST/tar/bin/tar-ai" "$DEST/tar/bin/tar-kill" "$DEST/tar/bin/aur-user-install" "$DEST"/tar/*.py "$DEST/tar/tar_say.sh"
 
 # mouse: T.A.R. clicks through wlrctl (AUR). Build it for this user -- no sudo.
 if command -v wlrctl >/dev/null || [[ -x "$BIN/wlrctl" ]]; then
@@ -90,6 +90,8 @@ else
 fi
 ln -sf "$DEST/tar/bin/tar-ai" "$BIN/tar-ai"
 ok "linked $BIN/tar-ai"
+ln -sf "$DEST/tar/bin/tar-kill" "$BIN/tar-kill"
+ok "linked $BIN/tar-kill (stops everything T.A.R. runs in the background)"
 
 case ":$PATH:" in
     *":$BIN:"*) ;;

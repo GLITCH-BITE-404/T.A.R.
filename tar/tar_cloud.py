@@ -1283,7 +1283,7 @@ def _autoclick_burst(target, rate, until_ts, push):
         T._move(x, y)
         T.mini_say("clicking " + T.short_say(target, 3))
         while time.time() < until_ts:
-            d = T.loop_running()
+            d = T.loop_mine()
             if not d or d.get("paused"):
                 break
             if n % 8 == 0:
@@ -1362,11 +1362,11 @@ def background_loop(task, every, minutes, autoclick="", rate=8):
     fails, n = 0, 0
 
     def until():
-        d = T.loop_running() or {}
+        d = T.loop_mine() or {}
         return float(d.get("until") or 0)
 
-    while T.loop_running() and time.time() < until():
-        d = T.loop_running() or {}
+    while T.loop_mine() and time.time() < until():
+        d = T.loop_mine() or {}
         if d.get("paused"):
             T.loop_update(status="paused", beat=time.time())
             time.sleep(1)
@@ -1375,7 +1375,7 @@ def background_loop(task, every, minutes, autoclick="", rate=8):
         if not ok:
             # never act on whatever happens to be on screen instead (and don't
             # spend a Gemini call looking at the wrong thing)
-            if (T.loop_running() or {}).get("status") != "waiting for the window":
+            if (T.loop_mine() or {}).get("status") != "waiting for the window":
                 T.loop_update(status="waiting for the window", last="paused: " + why)
             T.mini_say("waiting: " + why)
             if "closed" in why:
@@ -1394,7 +1394,7 @@ def background_loop(task, every, minutes, autoclick="", rate=8):
         def push(kind, text):
             if kind == "think":
                 T.mini_say("thinking…")        # the full thought is in the orb's card
-            d = T.loop_running() or {}
+            d = T.loop_mine() or {}
             feed = (d.get("feed") or []) + [{"r": n, "k": kind, "t": text[:220],
                                               "at": time.time()}]
             T.loop_update(feed=feed[-14:], beat=time.time())
@@ -1463,8 +1463,8 @@ def background_loop(task, every, minutes, autoclick="", rate=8):
             if done:
                 push("act", "autoclicked %s x%d \u2713" % (autoclick, done))
         T.loop_update(status="waiting", next_at=next_at)
-        while time.time() < next_at and T.loop_running():
-            if (T.loop_running() or {}).get("paused"):
+        while time.time() < next_at and T.loop_mine():
+            if (T.loop_mine() or {}).get("paused"):
                 break
             time.sleep(1)
             T.loop_update(beat=time.time())

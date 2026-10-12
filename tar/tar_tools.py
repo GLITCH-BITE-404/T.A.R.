@@ -3277,27 +3277,77 @@ def a_forget(args):
             if n else "no remembered fact matches %r" % what)
 
 
-def a_stop_task(_):
-    d = loop_running()
-    if not d:
+def _worker_pids():
+    """Every T.A.R. background worker alive right now, found by argv -- never
+    trust loop.json alone: older chess players kept running after it was
+    rewritten and fought over the mouse."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    marks = [os.path.join(here, "tar_chess.py").encode(), os.path.join(here, "fx", "host.qml").encode()]
+    cloud = os.path.join(here, "tar_cloud.py").encode()
+    me = os.getpid()
+    out = []
+    for d in os.listdir("/proc"):
+        if not d.isdigit() or int(d) == me:
+            continue
         try:
-            os.remove(LOOP)
+            argv = open("/proc/%s/cmdline" % d, "rb").read().split(b"\0")
         except OSError:
-            pass
-        return "nothing is running in the background"
-    try:
-        os.killpg(int(d["pid"]), 15)
-    except OSError:
-        try:
-            os.kill(int(d["pid"]), 15)
-        except OSError:
-            pass
+            continue
+        if any(m in argv for m in marks) or (cloud in argv and b"loop" in argv):
+            out.append(int(d))
+    return out
+
+
+def workers_running():
+    return bool(_worker_pids())
+
+
+def kill_workers():
+    """Kill every background worker, no holding back. -> how many died."""
+    pids = _worker_pids()
+    for pid in pids:
+        for kill in (lambda: os.killpg(pid, 15), lambda: os.kill(pid, 15)):
+            try:
+                kill()
+                break
+            except OSError:
+                pass
+    deadline = time.time() + 1.5
+    while time.time() < deadline and any(os.path.exists("/proc/%d" % p) for p in pids):
+        time.sleep(0.1)
+    for pid in pids:                    # still there? no mercy
+        if os.path.exists("/proc/%d" % pid):
+            for kill in (lambda: os.killpg(pid, 9), lambda: os.kill(pid, 9)):
+                try:
+                    kill()
+                    break
+                except OSError:
+                    pass
     try:
         os.remove(LOOP)
     except OSError:
         pass
-    mins = int((time.time() - d.get("started", time.time())) / 60)
-    return "stopped %r after %d min -- VERIFIED" % (d.get("task", "")[:60], mins)
+    mini(on=False, say="")              # the orb flies home
+    return len(pids)
+
+
+def a_stop_task(_):
+    d = loop_running() or {}
+    n = kill_workers()
+    if not n:
+        return "nothing is running in the background -- VERIFIED: no T.A.R. workers alive"
+    left = _worker_pids()
+    mins = int((time.time() - d.get("started", time.time())) / 60) if d else 0
+    return "stopped %s%s (%d process%s) -- %s" % (
+        repr(d.get("task", "")[:60]) if d else "everything T.A.R. was running",
+        " after %d min" % mins if d else "", n, "" if n == 1 else "es",
+        "VERIFIED: nothing left running" if not left else "NOT VERIFIED: %d still alive" % len(left))
+
+
+def loop_mine():
+    """For the worker itself: keep going ONLY while loop.json is still ours."""
+    d = loop_running()
+    return d if d and int(d.get("pid", -1)) == os.getpid() else None
 
 
 def a_coin(_):
@@ -6245,10 +6295,14 @@ _NOT_TARGETS = re.compile(r"^(?:me|myself|yourself|you|your \w+|my (?:eyes|mind|
 
 
 _STOP_RE = re.compile(r"^(?:stop|stop it|stop now|stop playing|stop that|ok stop|enough|"
-                      r"that'?s enough|you can stop|quit it|cancel (?:it|that|the task))$")
+                      r"that'?s enough|you can stop|quit it|cancel (?:it|that|the task)|"
+                      r"st|sto|stp|stopp+|stahp|s+top|stop+ ?it|stop (?:the |playing )?(?:chess|game|"
+                      r"task|tasks|everything|all)|kill (?:it|the task|everything)|halt|abort)$")
 
 
 def _match_one(low):
+    if workers_running() and _STOP_RE.match(low.strip(" .!")):
+        return "stop_task", {}          # kills EVERY worker: chess, tasks, effects
     if fx_running() and _STOP_RE.match(low):
         return "stop_fx", {}            # "stop" ends the effect on screen, not the music
     if loop_running():
