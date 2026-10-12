@@ -2555,24 +2555,12 @@ def a_install_chess(args):
             if _have_stockfish() else "NOT DONE: building Stockfish failed (%s)" % out)
 
 
-_CHESS_BOT = re.compile(r"computer|\bbots?\b|stockfish|\bai\b|engine", re.I)
-
-
 def a_play_chess(args):
-    """Play the chess game open in the browser, as a background task -- against
-    BOTS only: an engine playing a real person is cheating (and gets accounts
-    banned). The tab title tells them apart: chess.com bot games say 'Against
-    the Computer', live games say '2 Player Chess'."""
+    """Play the chess game open in the browser, as a background task."""
     w = _chess_window()
     if not w:
-        return ("don't know how to play chess without a game open -- open a game against a "
-                "bot (chess.com: Play > Play Bots, lichess: Play with the computer), then say "
-                "'play chess'")
-    if not _CHESS_BOT.search(w.get("title") or ""):
-        return ("NOT DONE: that looks like a game against a real person (%r) -- I only play "
-                "chess against bots. Using an engine against people is cheating and gets "
-                "accounts banned. Open a bot game (chess.com: Play > Play Bots) and say 'play "
-                "chess' again." % (w.get("title") or "")[:60])
+        return ("don't know how to play chess without a game open -- open one on chess.com or "
+                "lichess (vs a bot or a person), then say 'play chess'")
     if loop_running():
         a_stop_task({})
     minutes = max(1, min(120, _int(args.get("minutes"), 30)))
