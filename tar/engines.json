@@ -205,6 +205,23 @@
           "desc": "Tiny Wayland tool for a virtual mouse. Built for your user only -- no password needed."
         }
       }
+    },
+    "chess": {
+      "label": "Chess engine",
+      "blurb": "Lets T.A.R. play chess at full strength instead of with its small built-in engine.",
+      "icon": "♞",
+      "device_kind": null,
+      "engines": {
+        "stockfish": {
+          "bin": "stockfish",
+          "pkg": "stockfish",
+          "source": "aur-user",
+          "size_mb": 100,
+          "quality": "superhuman",
+          "recommended": true,
+          "desc": "Stockfish 19 -- the strongest chess engine there is (~3500 Elo, beats every chess.com bot). Built for your user from the AUR in ~3 min, no password."
+        }
+      }
     }
   },
   "voices": {

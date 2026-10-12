@@ -2533,6 +2533,28 @@ def _chess_window():
     return None
 
 
+def _have_stockfish():
+    return bool(shutil.which("stockfish") or os.access(os.path.expanduser("~/.local/bin/stockfish"), os.X_OK))
+
+
+_SF_OFFER = (" Tip: I'm playing with my small built-in engine (~1200 rating). I can install "
+             "Stockfish -- the strongest chess engine there is, free, ~3 min build, no password -- "
+             "to beat even the strongest bots. Say 'install stockfish'.")
+
+
+def a_install_chess(args):
+    """Build Stockfish for T.A.R.'s chess (asks first unless the user typed it)."""
+    if _have_stockfish():
+        return "Stockfish is already installed -- chess plays at full strength -- VERIFIED"
+    stop = needs_confirm("install_chess", args, "build Stockfish (strongest chess engine, free) "
+                         "from the AUR for your user -- ~3 min, ~100 MB, no password")
+    if stop:
+        return stop
+    out = a_install({"cap": "chess", "engine": "stockfish"})
+    return ("installed Stockfish -- T.A.R.'s chess now plays at full strength -- VERIFIED"
+            if _have_stockfish() else "NOT DONE: building Stockfish failed (%s)" % out)
+
+
 def a_play_chess(args):
     """Play the chess game open in the browser, as a background task."""
     w = _chess_window()
@@ -2565,8 +2587,9 @@ def a_play_chess(args):
             return "NOT DONE: couldn't start playing chess -- %s" % why
         if st not in ("finding the board", "starting", ""):
             return ("playing chess for up to %d min -- VERIFIED: %s. The engine moves and T.A.R. "
-                    "watches the squares for the opponent's replies (say 'stop' to end)."
-                    % (minutes, d.get("last") or "board found"))
+                    "watches the squares for the opponent's replies (say 'stop' to end).%s"
+                    % (minutes, d.get("last") or "board found",
+                       "" if _have_stockfish() else _SF_OFFER))
     return ("started chess, still setting up (installing / finding the board) -- watch the orb; "
             "say 'stop' to cancel")
 
@@ -5667,7 +5690,7 @@ ACTIONS = {
 
     # capabilities -- how T.A.R. unlocks its own missing engines
     "install":    (a_install, "install an engine for a capability "
-                              "(cap=tts|stt|vision|camera|wakeword engine=NAME)",
+                              "(cap=tts|stt|vision|camera|wakeword|mouse|chess engine=NAME)",
                    []),
     "connect":    (a_connect, "wire up an already-installed engine (cap=NAME)",
                    []),
@@ -5705,11 +5728,21 @@ ACTIONS = {
                     r"(?:viruses|a virus|virus|malware|ransomware)\??$"]),
     "play_chess": (a_play_chess, "play the chess game open in the browser (chess.com/lichess) "
                                  "on its own: a real chess engine + square watching, NOT clicking "
-                                 "by vision. minutes= (default 30). Use this for any chess request.",
+                                 "by vision. minutes= (default 30). Use this for any chess request. "
+                                 "Plays with Stockfish if installed, else a weaker built-in engine "
+                                 "-- then offer install_chess.",
                    [r"^(?:(?:can|could) you |please |go |now )?(?:play|keep playing|start playing|"
                     r"continue playing) (?:a |the |this )?chess(?: game)?(?: (?:against|vs\.?|with) "
                     r"(?:the |this )?(?:bot|computer|ai|him|her|them|[\w ]+?))?(?: for (?P<minutes>"
                     r"\d+) ?min(?:ute)?s?)?(?: for me)?$"]),
+    "install_chess": (a_install_chess, "install Stockfish, the strongest chess engine (free, "
+                                       "~3 min build, no password; asks the user first) so "
+                                       "play_chess beats even the strongest bots. Offer it when "
+                                       "the user wants T.A.R. to play chess better/stronger.",
+                   [r"^(?:please |can you |could you )?(?:install|get|set ?up|download|build|add) "
+                    r"(?:the |a )?(?:stockfish|(?:better |stronger |real |good )?chess engine)$",
+                    r"^(?:make|get) (?:yourself |tar |t\.a\.r\.? )?(?:better|stronger|smarter|good) "
+                    r"at chess$"]),
     "play_game":  (a_play_game, "play a web game T.A.R. knows (cookie clicker) on its own in the "
                                 "background: opens/finds it, autoclicks and buys upgrades. game=, "
                                 "minutes= (default 20). Use this instead of keep_doing for these.",
@@ -6198,7 +6231,7 @@ def match(text):
     return None, None
 
 
-_PRIORITY = ("screen_fx", "stop_fx", "remember", "forget", "play_chess", "play_game", "research", "find_file", "open_found", "organize", "undo_organize", "to_pdf", "virus_scan", "selfie", "evil", "missiles", "camera_live", "devices", "now_playing", "note", "stopwatch", "focus", "coin", "dice", "record", "remind", "wifi", "bluetooth", "dnd", "nightlight", "power",
+_PRIORITY = ("screen_fx", "stop_fx", "remember", "forget", "install_chess", "play_chess", "play_game", "research", "find_file", "open_found", "organize", "undo_organize", "to_pdf", "virus_scan", "selfie", "evil", "missiles", "camera_live", "devices", "now_playing", "note", "stopwatch", "focus", "coin", "dice", "record", "remind", "wifi", "bluetooth", "dnd", "nightlight", "power",
              "play", "weather", "datetime", "battery", "calc", "processes",
              "colorpick", "cliphist")
 
