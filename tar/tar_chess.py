@@ -691,7 +691,7 @@ def _sq(row, col, white_bottom):
     return chess.square(f, r)
 
 
-def setup():
+def setup(allow_resume=True):
     """Find the board + game state. -> (Player, None) or (None, why)."""
     import chess
     w = None
@@ -725,7 +725,8 @@ def setup():
     Image.open(shot).save(png)
     c = _cached_box(w)
     if c and _pattern_score(png, tuple(c["box"]), (mx, my)) >= 8:
-        r = _position(png, tuple(c["box"]), mon, c.get("white_bottom", True), "", guess_side=True)
+        r = _position(png, tuple(c["box"]), mon, c.get("white_bottom", True), "", guess_side=True,
+                      allow_resume=allow_resume)
         if r[0]:
             return r
     T.mini_say("finding the board…")
@@ -767,7 +768,8 @@ def setup():
         return None, "couldn't line up the board's squares (score %.1f) -- is the whole board visible?" % score
     wb = bool(d.get("white_at_bottom", True))
     _save_cache(w, box, wb)
-    return _position(png, box, mon, wb, d.get("moves") or "", guess_side=False)
+    return _position(png, box, mon, wb, d.get("moves") or "", guess_side=False,
+                     allow_resume=allow_resume)
 
 
 CACHE = os.path.join(T.DATA, "chess-board.json")
@@ -804,9 +806,11 @@ def save_game(board, wb):
         pass
 
 
-def _resume(want, wb):
+def _resume(want, wb, shapes=None):
     """The saved game, if the board on screen is it (or it plus 1-2 moves) --
-    a crash/restart mid-game then needs no reading at all."""
+    a crash/restart mid-game then needs no reading at all. Squares + colours
+    alone aren't enough: a misread game (pawns saved as bishops) once got
+    resumed, so the piece TYPES must agree with the learned shapes too."""
     import chess
     try:
         g = json.load(open(GAME))
@@ -815,6 +819,21 @@ def _resume(want, wb):
     if g.get("white_bottom") != wb or time.time() - g.get("at", 0) > 3 * 3600:
         return None
     b = chess.Board(g["fen"])
+    if not plausible(b):
+        return None
+    r = _resume_search(b, want)
+    if r is None:
+        return None
+    if shapes:
+        bad = [sq for sq, sym in shapes.items() if sym and r.piece_at(sq) and r.piece_at(sq).symbol() != sym]
+        if bad:
+            log("saved game disagrees with the piece shapes on", len(bad), "squares -- not resuming")
+            return None
+    return r
+
+
+def _resume_search(b, want):
+    import chess
     have = lambda bb: {sq: p.color == chess.WHITE for sq, p in bb.piece_map().items()}
     if have(b) == want:
         return b
@@ -831,7 +850,7 @@ def _resume(want, wb):
     return None
 
 
-def _position(png, box, mon, wb, moves, guess_side):
+def _position(png, box, mon, wb, moves, guess_side, allow_resume=True):
     """Board state from the pixels (+ the move list, + one labelling call only
     when joining a game that's already going)."""
     import chess
@@ -872,13 +891,14 @@ def _position(png, box, mon, wb, moves, guess_side):
             break
     if ok and matches(board):
         return Player(box, wb, board, mon), None
-    # 2) the game T.A.R. was already playing (saved after every move)
-    resumed = _resume(want, wb)
+    shapes = recognise(png, box, (mx, my), want, wb)
+    # 2) the game T.A.R. was already playing (saved after every move) -- not when
+    #    re-reading because moves failed: then the saved game is the suspect
+    resumed = _resume(want, wb, shapes) if allow_resume else None
     if resumed is not None:
         log("resumed the saved game:", resumed.fen())
         return Player(box, wb, resumed, mon), None
     # 3) learned piece shapes (no AI): accepted only if the position is plausible
-    shapes = recognise(png, box, (mx, my), want, wb)
     if shapes:
         b2 = chess.Board(None)
         for sq, sym in shapes.items():
@@ -985,7 +1005,7 @@ def play(minutes=30):
         T.mini_say("re-reading the board…")
         T.loop_update(last="re-reading the board (%s)" % why)
         log("resync because:", why)
-        q, e2 = setup()
+        q, e2 = setup(allow_resume=False)   # the saved game IS what disagreed
         if q:
             q.tries = dict(p.tries)                 # keep where clicks failed...
             q.junk |= p.junk                        # ...and which squares are covered
