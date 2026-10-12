@@ -214,7 +214,43 @@ def _search(board, depth, alpha, beta, deadline):
     return best
 
 
+_SF = None
+
+
+def stockfish():
+    """A running Stockfish (kept open for the whole game), or None."""
+    global _SF
+    if _SF is not None:
+        return _SF or None
+    import shutil
+    exe = shutil.which("stockfish") or next(
+        (p for p in (os.path.expanduser("~/.local/bin/stockfish"), "/usr/bin/stockfish")
+         if os.access(p, os.X_OK)), None)
+    _SF = False
+    if exe:
+        try:
+            import chess.engine
+            _SF = chess.engine.SimpleEngine.popen_uci(exe)
+            _SF.configure({"Threads": 2, "Hash": 64})
+        except Exception:
+            _SF = False
+    return _SF or None
+
+
 def best_move(board, seconds=2.5):
+    """Stockfish if it's installed (~0.3 s, plays far above any bot), else the
+    small built-in alpha-beta below."""
+    sf = stockfish()
+    if sf:
+        try:
+            import chess.engine
+            return sf.play(board, chess.engine.Limit(time=0.3)).move
+        except Exception:
+            pass
+    return _own_best_move(board, seconds)
+
+
+def _own_best_move(board, seconds=2.5):
     """Iterative deepening alpha-beta; returns the best move found in time."""
     deadline = time.time() + seconds
     moves = _ordered(board)
@@ -404,6 +440,11 @@ def setup():
     png = shot[:-4] + ".png"
     from PIL import Image
     Image.open(shot).save(png)
+    c = _cached_box(w)
+    if c and _pattern_score(png, tuple(c["box"]), (mx, my)) >= 8:
+        r = _position(png, tuple(c["box"]), mon, c.get("white_bottom", True), "", guess_side=True)
+        if r[0]:
+            return r
     T.mini_say("finding the board…")
     txt, err = T._gemini_image(shot, (
         "This screenshot shows a chess game in a browser. Reply with ONLY JSON: "
@@ -437,7 +478,54 @@ def setup():
     if score < 8:
         return None, "couldn't line up the board's squares (score %.1f) -- is the whole board visible?" % score
     wb = bool(d.get("white_at_bottom", True))
+    _save_cache(w, box, wb)
+    return _position(png, box, mon, wb, d.get("moves") or "", guess_side=False)
+
+
+CACHE = os.path.join(T.DATA, "chess-board.json")
+
+
+def _save_cache(w, box, wb):
+    try:
+        with open(CACHE, "w") as f:
+            json.dump({"addr": w["address"], "at": w.get("at"), "size": w.get("size"),
+                       "box": list(box), "white_bottom": wb, "t": time.time()}, f)
+    except OSError:
+        pass
+
+
+def _cached_box(w):
+    """The board box from last time, if the window hasn't moved or resized."""
+    try:
+        c = json.load(open(CACHE))
+    except (OSError, ValueError):
+        return None
+    if c.get("addr") == w["address"] and c.get("at") == w.get("at") and c.get("size") == w.get("size"):
+        return c
+    return None
+
+
+def _position(png, box, mon, wb, moves, guess_side):
+    """Board state from the pixels (+ the move list, + one labelling call only
+    when joining a game that's already going)."""
+    import chess
+    from PIL import Image
+    mx, my = mon.get("x", 0), mon.get("y", 0)
     occ = occupancy(png, box, (mx, my))              # (row, col) -> is_white
+    # a fresh game is recognised from the pixels alone: no AI call at all
+    start_rows = {r: occ_row for r in (0, 1, 6, 7) for occ_row in [
+        [occ.get((r, c)) for c in range(8)]]}
+    if len(occ) == 32 and all(v is not None for r in start_rows for v in start_rows[r]):
+        bottom_white = all(start_rows[7]) and all(start_rows[6]) and not any(start_rows[0])
+        top_white = all(start_rows[0]) and all(start_rows[1]) and not any(start_rows[7])
+        if bottom_white or top_white:
+            return Player(box, bottom_white, chess.Board(), mon), None
+    if guess_side:
+        # cached board, game in progress: which side is ours? white's pieces
+        # are mostly in the half nearest the white player
+        low = sum(1 for (r, c), w_ in occ.items() if w_ and r >= 4) - \
+            sum(1 for (r, c), w_ in occ.items() if w_ and r < 4)
+        wb = low >= 0
     want = {_sq(r, c, wb): is_w for (r, c), is_w in occ.items()}
 
     def matches(b):
@@ -447,7 +535,7 @@ def setup():
     # 1) the move list, if it replays to exactly what's on the board (keeps castling/turn)
     board = chess.Board()
     ok = True
-    for san in [t for t in re.split(r"\s+", re.sub(r"\d+\.(\.\.)?", " ", d.get("moves") or ""))
+    for san in [t for t in re.split(r"\s+", re.sub(r"\d+\.(\.\.)?", " ", moves))
                 if t and not re.match(r"^(1-0|0-1|1/2-1/2|\*)$", t)]:
         try:
             board.push_san(san.replace("0-0-0", "O-O-O").replace("0-0", "O-O"))
@@ -518,7 +606,8 @@ def play(minutes=30):
         T.mini_say("chess: " + T.short_say(err, 8))
         return 1
     me = chess.WHITE if p.white_bottom else chess.BLACK
-    T.loop_update(status="playing", last="found the board, playing %s" % ("white" if me else "black"))
+    T.loop_update(status="playing", last="found the board, playing %s with %s" % (
+        "white" if me else "black", "Stockfish" if stockfish() else "the built-in engine"))
     p.park()
     rnd, misses, lost = 0, 0, 0
     until = time.time() + minutes * 60
@@ -630,6 +719,11 @@ def play(minutes=30):
         os.remove(T.LOOP)
     except OSError:
         pass
+    if _SF:
+        try:
+            _SF.quit()
+        except Exception:
+            pass
     T.mini(on=False, say="")
     return 0
 
