@@ -60,6 +60,35 @@ def ensure_chess():
         return "couldn't install the chess library (pip exit %s)" % rc
 
 
+LOG = os.path.join(T.DATA, "chess.log")
+
+
+def log(*parts):
+    """One line per decision -- so a bad game can be explained afterwards."""
+    try:
+        with open(LOG, "a", encoding="utf-8") as f:
+            f.write(time.strftime("%H:%M:%S ") + " ".join(str(x) for x in parts) + "\n")
+    except OSError:
+        pass
+
+
+def _vision(path, prompt, max_tokens=800, limit=25):
+    """T._gemini_image with a hard time limit: a stalled API call once froze
+    setup for minutes."""
+    import threading
+    box = {}
+    th = threading.Thread(target=lambda: box.update(r=T._gemini_image(path, prompt, max_tokens=max_tokens)),
+                          daemon=True)
+    t0 = time.time()
+    th.start()
+    th.join(limit)
+    if th.is_alive():
+        log("vision call timed out after %ds" % limit)
+        return None, "the AI didn't answer within %ds (slow network or quota) -- try again" % limit
+    log("vision call %.1fs" % (time.time() - t0))
+    return box.get("r", (None, "vision failed"))
+
+
 # --------------------------------------------------------------------- screen
 def _grab(box, path):
     x1, y1, x2, y2 = box
@@ -298,8 +327,9 @@ class Player:
             return None
         o = occupancy(self.shot, (0, 0, w, w), (0, 0))
         self.raw = o
-        return {_sq(r, c, self.white_bottom): is_w for (r, c), is_w in o.items()
-                if _sq(r, c, self.white_bottom) not in self.junk}
+        self.last_seen = {_sq(r, c, self.white_bottom): is_w for (r, c), is_w in o.items()
+                          if _sq(r, c, self.white_bottom) not in self.junk}
+        return self.last_seen
 
     def last_mover(self):
         """Who moved last according to the screen's highlight (from the last occ() grab)."""
@@ -392,6 +422,11 @@ class Player:
         return None
 
     def click_sq(self, sq):
+        import chess
+        pc = self.board.piece_at(sq)
+        log("click", chess.square_name(sq), "| my copy:", pc.symbol() if pc else "empty",
+            "| screen:", {True: "white", False: "black", None: "empty"}[self.last_seen.get(sq)]
+            if hasattr(self, "last_seen") else "?")
         x, y = self.center(sq)
         T.sh(["hyprctl", "dispatch", "movecursor", str(int(x)), str(int(y))])
         time.sleep(0.08)
@@ -531,7 +566,7 @@ def setup():
     ww, wh = (w.get("size") or [mon.get("width", 1920), mon.get("height", 1080)])
     wshot = os.path.join(T.DATA, "chess-window.jpg")
     Image.open(png).crop((wx - mx, wy - my, wx - mx + ww, wy - my + wh)).convert("RGB").save(wshot)
-    txt, err = T._gemini_image(wshot, (
+    txt, err = _vision(wshot, (
         "This screenshot shows a chess game in a browser. Reply with ONLY JSON: "
         "{\"box_2d\": [ymin, xmin, ymax, xmax], \"white_at_bottom\": true, "
         "\"moves\": \"1. e4 e5 2. Nf3\"} -- box_2d = the 8x8 squares only (NOT the coordinate "
@@ -634,7 +669,7 @@ def _position(png, box, mon, wb, moves, guess_side):
     Image.open(png).crop((box[0] - mx, box[1] - my, box[2] - mx, box[3] - my)).convert("RGB").save(crop)
     names = {sq: chess.square_name(sq) for sq in want}
     T.mini_say("reading the position…")
-    txt, err = T._gemini_image(crop, (
+    txt, err = _vision(crop, (
         "This is a chessboard%s. These squares have pieces: %s. For EACH of them say which "
         "piece it is. Reply with ONLY JSON like {\"e1\": \"K\", \"d8\": \"q\"} -- uppercase = "
         "white, lowercase = black, letters K Q R B N P. If a listed square has NO chess piece "
@@ -685,12 +720,23 @@ def play(minutes=30):
         T.loop_update(status="failed", last=err)
         return 1
     import chess
+    log("=== new chess task")
     p, err = setup()
     if not p:
+        log("setup failed:", err)
         T.loop_update(status="failed", last=err)
         T.mini_say("chess: " + T.short_say(err, 8))
         return 1
     me = chess.WHITE if p.white_bottom else chess.BLACK
+    log("setup ok: me", "white" if me else "black", "| turn", "white" if p.board.turn else "black",
+        "| fen", p.board.fen(), "| box", p.box)
+    _upd = T.loop_update
+
+    def _logged_update(**k):
+        if k.get("last") or k.get("status"):
+            log("status:", k.get("status", ""), "|", k.get("last", ""))
+        return _upd(**k)
+    T.loop_update = _logged_update
     T.loop_update(status="playing", last="found the board, playing %s with %s" % (
         "white" if me else "black", "Stockfish" if stockfish() else "the built-in engine"))
     p.park()
@@ -702,6 +748,7 @@ def play(minutes=30):
         nonlocal p
         T.mini_say("re-reading the board…")
         T.loop_update(last="re-reading the board (%s)" % why)
+        log("resync because:", why)
         q, e2 = setup()
         if q:
             q.white_bottom = (me == chess.WHITE)     # our colour never changes mid-game
@@ -717,6 +764,7 @@ def play(minutes=30):
     def apply(moves, who):
         for m in moves:
             san = p.board.san(m)
+            log("read move from screen:", san, "| fen before", p.board.fen())
             p.board.push(m)
             T.mini_say(("they played " if p.board.turn == me else "played ") + san)
             T.loop_update(last="%s %s" % ("they played" if p.board.turn == me else "played", san))
