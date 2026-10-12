@@ -85,17 +85,29 @@ def _square_cells(img, n=8):
     return cells
 
 
+_IMG_CACHE = {}
+
+
+def _pixels(path):
+    """Decoded grayscale screenshot, loaded ONCE (snapping scores ~800 boxes;
+    re-decoding a 1080p PNG for each one took minutes)."""
+    key = (path, os.path.getmtime(path))
+    if key not in _IMG_CACHE:
+        from PIL import Image
+        im = Image.open(path).convert("L")
+        _IMG_CACHE.clear()
+        _IMG_CACHE[key] = (im.load(), im.size, im)
+    return _IMG_CACHE[key][:2]
+
+
 def _pattern_score(path, box, mon_off):
     """How well this box lines up with an 8x8 light/dark grid (higher = better).
     Uses square CORNERS (pieces sit in the middle)."""
-    from PIL import Image
-    im = Image.open(path).convert("L")
     x1, y1, x2, y2 = [v - o for v, o in zip(box, mon_off * 2)]
     side = (x2 - x1) / 8.0
     if side < 20:
         return -1
-    px = im.load()
-    W, H = im.size
+    px, (W, H) = _pixels(path)
     vals = []
     for r in range(8):
         for f in range(8):
