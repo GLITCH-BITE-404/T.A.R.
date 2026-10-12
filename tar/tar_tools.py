@@ -2435,6 +2435,10 @@ def a_keep_doing(args):
     if old:
         a_stop_task({})
     autoclick = (args.get("autoclick") or "").strip()
+    if autoclick and not re.search(r"click|cookie|tap|clicker|idle|incremental",
+                                   (task + " " + autoclick), re.I):
+        # the autoclicker hammers ONE spot -- it once ran 220 clicks into a chess board
+        autoclick = ""
     rate = max(1, min(15, _int(args.get("rate"), 8)))
     # with an autoclicker doing the repetitive part, the AI only needs to
     # check in now and then to make decisions
@@ -2522,10 +2526,45 @@ def _game_window(g):
     return None
 
 
+def _chess_window():
+    for w in _clients():
+        if _is_browser(w) and re.search(r"chess|lichess", w.get("title") or "", re.I):
+            return w
+    return None
+
+
+def a_play_chess(args):
+    """Play the chess game open in the browser, as a background task."""
+    w = _chess_window()
+    if not w:
+        return ("don't know how to play chess without a game open -- open one on chess.com or "
+                "lichess (vs a bot or a person), then say 'play chess'")
+    if loop_running():
+        a_stop_task({})
+    minutes = max(1, min(120, _int(args.get("minutes"), 30)))
+    log = open(os.path.join(DATA, "loop.log"), "a")
+    p = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                       "tar_chess.py"), "play", "--minutes", str(minutes)],
+                         stdout=log, stderr=log, start_new_session=True, env=dict(os.environ, TAR_DATA=DATA))
+    with open(LOOP, "w", encoding="utf-8") as f:
+        json.dump({"pid": p.pid, "task": "play chess in %r" % (w.get("title") or "")[:50],
+                   "started": time.time(), "until": time.time() + minutes * 60, "every": 1,
+                   "round": 0, "status": "finding the board", "last": "", "paused": False,
+                   "feed": [], "autoclick": "", "rate": 0, "clicks": 0,
+                   "win": w["address"], "win_title": w.get("title", ""), "beat": time.time()}, f)
+    return ("playing chess for up to %d min: found the board once, then the engine moves and "
+            "T.A.R. watches the squares for the opponent's moves (say 'stop' to end) -- VERIFIED: "
+            "started" % minutes)
+
+
 def a_play_game(args):
     """Open (or find) a known web game and start playing it in the background."""
     name = (args.get("game") or args.get("what") or "").strip().lower()
     name = _GAME_ALIASES.get(name, name)
+    if name in ("chess", "a chess game", "the chess game") or (
+            name in ("", "it", "this", "that", "the game") and _chess_window() and
+            not any(_game_window(g) for g in GAMES)):
+        return a_play_chess(args)
     if name in ("", "it", "this", "that", "the game"):
         open_games = [g for g in GAMES if _game_window(g)]
         if len(open_games) != 1:
@@ -5650,6 +5689,13 @@ ACTIONS = {
                     r"ransomware|dangerous|infected|malicious)\??$",
                     r"^(?:does|do) (?:the |my |this |that )?(?P<path>.+?) (?:contain|have) (?:any )?"
                     r"(?:viruses|a virus|virus|malware|ransomware)\??$"]),
+    "play_chess": (a_play_chess, "play the chess game open in the browser (chess.com/lichess) "
+                                 "on its own: a real chess engine + square watching, NOT clicking "
+                                 "by vision. minutes= (default 30). Use this for any chess request.",
+                   [r"^(?:(?:can|could) you |please |go |now )?(?:play|keep playing|start playing|"
+                    r"continue playing) (?:a |the |this )?chess(?: game)?(?: (?:against|vs\.?|with) "
+                    r"(?:the |this )?(?:bot|computer|ai|him|her|them|[\w ]+?))?(?: for (?P<minutes>"
+                    r"\d+) ?min(?:ute)?s?)?(?: for me)?$"]),
     "play_game":  (a_play_game, "play a web game T.A.R. knows (cookie clicker) on its own in the "
                                 "background: opens/finds it, autoclicks and buys upgrades. game=, "
                                 "minutes= (default 20). Use this instead of keep_doing for these.",
@@ -6138,7 +6184,7 @@ def match(text):
     return None, None
 
 
-_PRIORITY = ("screen_fx", "stop_fx", "remember", "forget", "play_game", "research", "find_file", "open_found", "organize", "undo_organize", "to_pdf", "virus_scan", "selfie", "evil", "missiles", "camera_live", "devices", "now_playing", "note", "stopwatch", "focus", "coin", "dice", "record", "remind", "wifi", "bluetooth", "dnd", "nightlight", "power",
+_PRIORITY = ("screen_fx", "stop_fx", "remember", "forget", "play_chess", "play_game", "research", "find_file", "open_found", "organize", "undo_organize", "to_pdf", "virus_scan", "selfie", "evil", "missiles", "camera_live", "devices", "now_playing", "note", "stopwatch", "focus", "coin", "dice", "record", "remind", "wifi", "bluetooth", "dnd", "nightlight", "power",
              "play", "weather", "datetime", "battery", "calc", "processes",
              "colorpick", "cliphist")
 
