@@ -317,7 +317,6 @@ def occupancy(png, box, mon_off):
     """{square: True(white)/False(black)} for every occupied square, from pixels.
     A piece shows up as many pixels far from the square's own corner colour;
     black pieces are mostly dark pixels, white ones mostly outline."""
-    import chess
     import statistics as st
     from PIL import Image
     im = Image.open(png).convert("L")
@@ -428,7 +427,8 @@ def setup():
     txt, err = T._gemini_image(crop, (
         "This is a chessboard%s. These squares have pieces: %s. For EACH of them say which "
         "piece it is. Reply with ONLY JSON like {\"e1\": \"K\", \"d8\": \"q\"} -- uppercase = "
-        "white, lowercase = black, letters K Q R B N P." % (
+        "white, lowercase = black, letters K Q R B N P. If a listed square has NO chess piece "
+        "(something else covers it, e.g. a bar or popup), answer \"-\" for it." % (
             " (white at the bottom: a1 bottom-left)" if wb else " (black at the bottom: h1 bottom-left)",
             ", ".join("%s %s" % (names[sq], "white" if is_w else "black") for sq, is_w in sorted(want.items()))
         )), max_tokens=600)
@@ -440,9 +440,13 @@ def setup():
         return None, "couldn't read which pieces are where"
     board = chess.Board(None)
     for sq, is_w in want.items():
-        t = str(labels.get(names[sq], "P"))[:1].upper()
+        t = str(labels.get(names[sq], "P")).strip()[:1].upper()
+        if t in ("-", ".", "", "0", "N/A"[:1]) and t != "N":
+            continue                    # an overlay (T.A.R.'s own voice bar once), not a piece
         pt = {"K": chess.KING, "Q": chess.QUEEN, "R": chess.ROOK, "B": chess.BISHOP,
               "N": chess.KNIGHT}.get(t, chess.PAWN)
+        if pt == chess.PAWN and chess.square_rank(sq) in (0, 7):
+            continue                    # pawns never stand there: screen junk
         board.set_piece_at(sq, chess.Piece(pt, chess.WHITE if is_w else chess.BLACK))
     me = chess.WHITE if wb else chess.BLACK
     board.turn = me                      # asked to play now = our move (checked on the first click)
@@ -544,7 +548,9 @@ def play(minutes=30):
                 continue
             time.sleep(0.5)                       # let the animation finish
             now2 = p.cells()
-            ch = p.changed(base, now2)
+            # squares still changing on their own (an overlay's moving meter, a
+            # hover effect) are noise, not a move
+            ch = p.changed(base, now2) - p.changed(now, now2)
             m = p.explain(ch, ignore)
             if not m:
                 lost += 1
