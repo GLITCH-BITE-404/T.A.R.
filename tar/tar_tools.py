@@ -3620,6 +3620,52 @@ def mini_rest(mon=None):
                 min(max(40, y), mon.get("height", 1080) - 40), mon)
 
 
+def _mini_rects():
+    """Screen rectangles the working orb + its bubble cover right now."""
+    d = _mini_read()
+    if not (d.get("on") and time.time() - d.get("at", 0) < d.get("hold", 6) and "x" in d):
+        return []
+    r = [(d["x"] - MINI_R - 4, d["y"] - MINI_R - 4, d["x"] + MINI_R + 4, d["y"] + MINI_R + 4)]
+    if d.get("say") and "bx" in d:
+        r.append((d["bx"] - 2, d["by"] - 2, d["bx"] + BUBBLE_W + 2, d["by"] + BUBBLE_H + 2))
+    return r
+
+
+def _shot_clean(path, mon):
+    """Screenshot with NOTHING hidden behind the mini orb: _shot blacks the orb
+    and its bubble out, which can swallow a question word. Shoot, glide the orb
+    to the opposite corner, shoot again, and patch the blacked-out spots from
+    the second shot."""
+    if not _shot(path):
+        return False
+    ra = _mini_rects()
+    if not ra:
+        return True
+    d = _mini_read()
+    w, h = mon.get("width", 1920), mon.get("height", 1080)
+    _mini_glide(70 if d.get("x", 0) > w / 2 else w - 70, 70 if d.get("y", 0) > h / 2 else h - 70, mon)
+    alt = path + ".alt.jpg"
+    if not _shot(alt):
+        return True
+    rb = _mini_rects()
+    hit = lambda a, b: a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
+    try:
+        from PIL import Image
+        im, other = Image.open(path).convert("RGB"), Image.open(alt).convert("RGB")
+        sx, sy = im.size[0] / w, im.size[1] / h
+        for r in ra:
+            if any(hit(r, b) for b in rb):
+                continue
+            box = tuple(int(v) for v in (max(0, r[0]) * sx, max(0, r[1]) * sy,
+                                         min(w, r[2]) * sx, min(h, r[3]) * sy))
+            if box[2] > box[0] and box[3] > box[1]:
+                im.paste(other.crop(box), box[:2])
+        im.save(path, quality=85)
+    except Exception:
+        pass
+    return True
+
+
 def _mini_mask(path):
     """Black out the orb + its bubble in a screenshot (monitor-local pixels)."""
     d = _mini_read()
@@ -4194,23 +4240,26 @@ _SHEET_PROMPT = (
     "a document, worksheet or text editor -- empty table cells, 'answer:' lines, blanks after a "
     "question.{extra}\n"
     "{context}"
-    "Use ONLY what is visible in this screenshot (plus the earlier text above, for reading "
+    "Use ONLY what is visible in this screenshot (plus the document text above, for reading "
     "comprehension). Never invent questions or tables that aren't there.\n"
     "Answer each one correctly and concisely, like a strong student, in the language the question "
     "is written in. Reply with ONLY JSON:\n"
     "{{\"found\": true, \"slots\": [{{\"question\": \"<the question as written>\", "
     "\"answer\": \"<your answer>\", \"box\": [ymin, xmin, ymax, xmax], "
-    "\"kind\": \"cell|line|inline|below\"}}]}}\n"
+    "\"kind\": \"cell|line|inline|below|after\"}}], \"needs_above\": false}}\n"
     "- box = WHERE THE ANSWER GOES, normalized 0-1000 on the whole screenshot.\n"
     "- kind: 'cell' = an empty table cell (box = the cell); 'line' = an 'answer:' line (box = the "
     "rest of that line after 'answer:'); 'inline' = a blank like ___ INSIDE a sentence (box = "
-    "exactly the ___); 'below' = the empty line under the question (box = that line).\n"
-    "- Skip anything already answered.\n"
-    "ALWAYS also include \"page_text\": a faithful transcription of the readable text on this screen "
-    "(the story / passage / instructions, up to ~2000 characters) -- it is passed on as context "
-    "when the document is scrolled and the questions about it come later.\n"
-    "If nothing on screen needs answering: {{\"found\": false, \"why\": \"<what you see instead>\", "
-    "\"page_text\": \"...\"}}")
+    "exactly the ___); 'below' = an EMPTY line under the question (box = that line); 'after' = the "
+    "question has NO space for its answer at all (the next line is already text or the next "
+    "question) -- box = the question's own LAST text line.\n"
+    "- Skip anything already answered, and a question cut off at the bottom edge (it comes "
+    "again on the next screen).\n"
+    "- \"needs_above\": true ONLY if these questions are about a story / passage whose BEGINNING "
+    "is in neither the screenshot nor the document text above (e.g. the screen starts in the "
+    "middle of a paragraph). Questions above that are already answered don't count. When "
+    "true, the text above is read first and you are asked again -- don't guess.\n"
+    "If nothing on screen needs answering: {{\"found\": false, \"why\": \"<what you see instead>\"}}")
 
 
 def _ocr_langs():
@@ -4224,27 +4273,34 @@ def _ocr_langs():
 
 def _vshift(prev_path, cur_path, max_shift=400):
     """How far the page moved vertically between two screenshots (pixels,
-    + = content moved UP). Row-brightness cross-correlation: milliseconds,
-    instead of a full OCR before every answer."""
+    + = content moved UP), or None when it can't tell (moved further than
+    max_shift, or no good match). Compares the whole picture at half size:
+    row brightness alone matched evenly spaced text lines one line-period
+    off and reported a 786 px jump as 372."""
     try:
         import numpy as np
         from PIL import Image
-        a = np.asarray(Image.open(prev_path).convert("L"), dtype=np.float32).mean(axis=1)
-        b = np.asarray(Image.open(cur_path).convert("L"), dtype=np.float32).mean(axis=1)
-        if a.shape != b.shape:
+        A = Image.open(prev_path).convert("L")
+        B = Image.open(cur_path).convert("L")
+        if A.size != B.size:
             return None
-        a -= a.mean(); b -= b.mean()
-        n = len(a)
-        best, best_err = 0, None
-        for d in range(-max_shift, max_shift + 1, 2):
-            if d >= 0:
-                x, y = a[d:], b[:n - d]
-            else:
-                x, y = a[:n + d], b[-d:]
-            err = float(np.mean(np.abs(x - y)))
-            if best_err is None or err < best_err:
-                best, best_err = d, err
-        return best
+        k = 2
+        a = np.asarray(A.resize((240, A.size[1] // k)), dtype=np.float32)
+        b = np.asarray(B.resize((240, B.size[1] // k)), dtype=np.float32)
+        n = a.shape[0]
+        ms = min(max_shift // k, n - 8)
+        best = None
+        for d in range(-ms, ms + 1):
+            x, y = (a[d:], b[:n - d]) if d >= 0 else (a[:n + d], b[-d:])
+            e = float(np.mean(np.abs(x - y)))
+            if best is None or e < best[0]:
+                best = (e, d)
+        e, d = best
+        x = a[d:] if d >= 0 else a[:n + d]
+        spread = float(np.mean(np.abs(x - x.mean())))
+        if spread > 1e-3 and e / spread > 0.07:
+            return None                     # nothing lines up: unsure
+        return d * k
     except Exception:
         return None
 
@@ -4329,13 +4385,13 @@ def _sheet_page(extra, mon, done, context=""):
     exact spots (OCR-snapped 'answer:' lines). Returns (slots, why, shot)."""
     shot = os.path.join(DATA, "sheet-look.jpg")
     with _TarHidden() as hid:
-        ok = _shot(shot)
+        ok = _shot_clean(shot, mon)
         rect = hid.rect
     if not ok:
         return None, "couldn't take a screenshot", None
     _mask(shot, rect, mon)
-    ctx = ("Text from EARLIER in this document (scrolled past -- use it to answer questions "
-           "about the passage):\n\"\"\"\n%s\n\"\"\"\n" % context[-6000:]) if context else ""
+    ctx = ("The document's text read so far by OCR (may have small OCR typos) -- use it to "
+           "answer questions about the story / passage, even parts not on this screen:\n\"\"\"\n%s\n\"\"\"\n" % context[:20000]) if context else ""
     txt, err = _gemini_image(shot, _SHEET_PROMPT.format(extra=(" The user says: " + extra) if extra else "",
                                                         context=ctx),
                              model=cfg().get("homework_model") or "gemini-3.5-flash", max_tokens=6000)
@@ -4355,6 +4411,8 @@ def _sheet_page(extra, mon, done, context=""):
     except Exception:
         iw, ih = mon["width"], mon["height"]
     olines = _ocr_lines(shot, mon["width"] / iw, mon["height"] / ih)
+    _sheet_page.lines = [t for t, _y, _r in olines]
+    _sheet_page.needs_above = bool(d.get("needs_above")) and bool(slots)
     for x in slots:
         if x.get("kind") == "line":
             spot = _answer_spot_below(x.get("question", ""), olines)
@@ -4371,7 +4429,6 @@ def _sheet_page(extra, mon, done, context=""):
         if best is not None and abs(labels[best][1] - y) < mon["height"] * 0.08:
             used.add(best)
             x["_at"] = (labels[best][0] + 12, labels[best][1])
-    _sheet_page.page_text = str(d.get("page_text") or "")
     return slots, d.get("why") or "", shot
 
 
@@ -4401,75 +4458,301 @@ def _sheet_log(**kw):
         pass
 
 
+def _shot_masked(path, mon):
+    """Screenshot with T.A.R. out of the way (tiled T.A.R. blacked out)."""
+    with _TarHidden() as hid:
+        ok = _shot(path)
+        rect = hid.rect
+    if ok:
+        _mask(path, rect, mon)
+    return ok
+
+
+def _img_scale(path, mon):
+    """(sx, sy) from screenshot pixels to monitor coordinates."""
+    try:
+        from PIL import Image
+        iw, ih = Image.open(path).size
+    except Exception:
+        iw, ih = mon["width"], mon["height"]
+    return mon["width"] / iw, mon["height"] / ih
+
+
+def _img_height(path, mon):
+    try:
+        from PIL import Image
+        return Image.open(path).size[1]
+    except Exception:
+        return mon["height"]
+
+
+# one scroll step must move LESS than half a screen, so every screen overlaps
+# the one before (a 1.5-screen jump answered page 2's questions without ever
+# having read page 2's story)
+_STEP_MAX, _STEP_AIM = 0.5, 0.4
+
+
+def _scroll_step(mon, doc_x, st, up=False):
+    """Scroll one measured step (down, or up). st["amt"] = wheel amount, adapted
+    so the page moves ~40% of a screen; a step that moved more than half (or
+    too far to measure) is backed up by half. Returns (moved, dy pixels)."""
+    before = os.path.join(DATA, "scroll-before.jpg")
+    after = os.path.join(DATA, "scroll-after.jpg")
+    # pointer (and the orb that follows it) parked BEFORE the first shot: an orb
+    # that moved between the shots looked like a scrolled page
+    with _TarHidden():
+        _move(doc_x, int(mon["height"] * 0.55), mon)
+    _shot_masked(before, mon)
+    ih = _img_height(before, mon)
+    sign = -1 if up else 1
+
+    def wheel(n):
+        with _TarHidden():
+            sh([_wlrctl(), "pointer", "scroll", str(int(n)), "0"])
+            time.sleep(0.6)
+        _shot_masked(after, mon)
+
+    def measure():
+        # moved = the page itself shifted (a blinking caret changes pixels too)
+        if not _page_moved(before, after)[0]:
+            return False, 0
+        v = _vshift(before, after, max_shift=int(ih * 0.6))
+        return v != 0, (None if v is None else sign * v)
+
+    wheel(sign * st["amt"])
+    moved, dy = measure()
+    how = "wheel"
+    if not moved:
+        # some editors ignore the mouse wheel: one arrow-key burst, then Page Up/Down
+        with _TarHidden():
+            wkeys(*(["-k", "Up" if up else "Down"] * 12))
+            time.sleep(0.6)
+        _shot_masked(after, mon)
+        moved, dy = measure()
+        how = "arrows"
+        if not moved:
+            with _TarHidden():
+                wkeys("-k", "Prior" if up else "Next")
+                time.sleep(0.6)
+            _shot_masked(after, mon)
+            moved, dy = measure()
+            how = "pagedown"
+    tries = 0
+    while how == "wheel" and moved and (dy is None or dy > ih * _STEP_MAX) and tries < 3:
+        back = max(1, int(st["amt"]) // 2)          # too far: undo half of it
+        wheel(-sign * back)
+        st["amt"] = max(1, int(st["amt"]) - back)
+        moved, dy = measure()
+        tries += 1
+    if how == "wheel" and dy and dy > 0:
+        # grow at most 1.5x a step: a step that moved <= 40% then stays inside
+        # what _vshift can measure (60%). A short step (the end of the document
+        # stopped it) says nothing about the wheel -- don't grow on it.
+        want = int(st["amt"] * ih * _STEP_AIM / dy)
+        if want < st["amt"] or dy >= ih * 0.15:
+            st["amt"] = max(1, min(want, int(st["amt"] * 1.5)))
+    _sheet_log(scroll=how, up=up, moved=moved, dy=dy, screen=ih, amt=st["amt"])
+    return moved, (dy if moved else 0)
+
+
+def _overlap_new(prev, lines):
+    """Lines of a screen that the previous (overlapping) screen didn't have."""
+    seen = set(prev or [])
+    last = max((i for i, t in enumerate(lines) if t in seen), default=-1)
+    return lines[last + 1:]
+
+
+def _read_up(mon, doc_x, st, max_screens=10):
+    """No AI: scroll UP in overlapping steps with local OCR until the passage
+    starts -- the previous questions (a line ending in '?') or the top of the
+    document -- then come back down to where we were. Returns the text above."""
+    cur = os.path.join(DATA, "sheet-read.jpg")
+    above, prev, went = [], None, 0          # went = pixels scrolled up
+    if _shot_clean(cur, mon):
+        prev = [t for t, _y, _r in _ocr_lines(cur, *_img_scale(cur, mon))]
+    for _ in range(max_screens):
+        moved, dy = _scroll_step(mon, doc_x, st, up=True)
+        if not moved:
+            break
+        went += dy or int(_img_height(cur, mon) * _STEP_AIM)
+        if not _shot_clean(cur, mon):
+            break
+        lines = [t for t, _y, _r in _ocr_lines(cur, *_img_scale(cur, mon))]
+        # going up, the overlap is at the BOTTOM of the new screen
+        seen = set(prev or [])
+        first = min((i for i, t in enumerate(lines) if t in seen), default=len(lines))
+        new = lines[:first]
+        q = max((i for i, t in enumerate(new) if t.rstrip().endswith("?")), default=None)
+        if q is not None:           # earlier questions: the passage starts below them
+            above = new[q + 1:] + above
+            break
+        above = new + above
+        prev = lines
+    # back down to the questions -- stop SHORT rather than overshoot: the
+    # answering loop goes on down from there anyway
+    ih = _img_height(cur, mon)
+    while went > ih * (_STEP_MAX - 0.05):
+        moved, dy = _scroll_step(mon, doc_x, st)
+        if not moved:
+            break
+        went -= dy or int(ih * _STEP_AIM)
+    _sheet_log(read_up_lines=len(above))
+    return "\n".join(above)
+
+
+def _question_end(question, lines):
+    """(x, y) just past the END of the question's own text -- its last line if
+    it wraps. lines = _ocr_lines() output."""
+    qw = set(re.findall(r"\w+", str(question).lower())) - {"the", "a", "an", "of", "is", "in"}
+    if not qw:
+        return None
+
+    def part(i):
+        lw = set(re.findall(r"\w+", lines[i][0])) - {"the", "a", "an", "of", "is", "in"}
+        return lw, (len(lw & qw) / len(lw) if lw else 0.0)
+
+    best, best_hit = None, 0
+    for i in range(len(lines)):
+        lw, frac = part(i)
+        if frac >= 0.6 and len(lw & qw) > best_hit:
+            best, best_hit = i, len(lw & qw)
+    if best is None:
+        return None
+    # the best line may be the middle of a wrapped question: walk up to its start
+    while best > 0:
+        lw, frac = part(best - 1)
+        if frac < 0.8 or not lw or lines[best - 1][0].rstrip().endswith(("?", ":")):
+            break
+        best -= 1
+    covered, last = set(), best
+    for i in range(best, len(lines)):
+        lw, frac = part(i)
+        if i > best and (frac < 0.8 or len(covered) >= 0.9 * len(qw)):
+            break
+        covered |= lw & qw
+        last = i
+        if lines[i][0].rstrip().endswith("?"):
+            break
+    if len(covered) < 0.5 * len(qw):
+        return None
+    return (int(lines[last][2]) + 4, int(lines[last][1]))
+
+
+_FILLER = {"the", "a", "an", "of", "in", "on", "to", "and", "is", "was", "it", "at", "by", "for"}
+
+
+def _answer_seen(pre, post, cy, ans, mon):
+    """Did the answer really appear? OCR a band around where it was typed,
+    before and after; the answer's words must show up NEW. Scripts tesseract
+    can't read here (no Hebrew data) fall back to 'the band changed'.
+    Returns (ok, how)."""
+    try:
+        from PIL import Image, ImageChops
+        a, b = Image.open(pre), Image.open(post)
+    except Exception:
+        return False, "no screenshot"
+    sx, sy = _img_scale(pre, mon)
+    ih = a.size[1]
+    dy = _vshift(pre, post) or 0                     # the editor may scroll while typing
+    y0 = max(0, int(cy / sy - ih * 0.03))
+    y1 = min(ih, int(cy / sy + ih * 0.12))
+    if y1 <= y0:
+        return False, "off screen"
+    ca = a.crop((0, y0, a.size[0], y1))
+    cb = b.crop((0, max(0, y0 - dy), b.size[0], max(1, min(ih, y1 - dy))))
+    words = re.findall(r"[a-z0-9]+", ans.lower())
+    # filler words also sit in the text around it (a line pushed out of the
+    # band took a 'the' with it and a typed answer read as missing)
+    words = [w for w in words if w not in _FILLER] or words
+    if not words:
+        if ca.size != cb.size:
+            return True, "changed"
+        diff = ImageChops.difference(ca.convert("L"), cb.convert("L")).point(lambda v: 255 if v > 40 else 0)
+        return diff.histogram()[255] > 30, "changed"
+    from collections import Counter
+    pa, pb = os.path.join(DATA, "sheet-band-a.png"), os.path.join(DATA, "sheet-band-b.png")
+    ca.save(pa)
+    cb.save(pb)
+    ta = Counter(re.findall(r"[a-z0-9]+", " ".join(t for t, _y, _r in _ocr_lines(pa, 1, 1))))
+    tb = Counter(re.findall(r"[a-z0-9]+", " ".join(t for t, _y, _r in _ocr_lines(pb, 1, 1))))
+    need = Counter(words)
+    new = sum(min(n, max(0, tb[w] - ta[w])) for w, n in need.items())
+    return new >= 0.6 * sum(need.values()), "read %d/%d words" % (new, sum(need.values()))
+
+
 def _type_slots(slots, mon):
-    """Type each answer TOP-DOWN. The answer lines are found by OCR ONCE; before
-    each answer a quick screenshot measures whether the page shifted (typing
-    near the bottom scrolls the editor) and the saved spots move with it."""
+    """Type each answer TOP-DOWN and CHECK it appeared (screenshot before and
+    after). Sets x["_ok"]. Answer lines are found by OCR once per screen and
+    again after every inserted line (that pushes everything below down)."""
     doc_x = mon["width"] // 2
+    pre = os.path.join(DATA, "sheet-live.jpg")
+    post = os.path.join(DATA, "sheet-post.jpg")
     base = os.path.join(DATA, "sheet-base.jpg")
-    live = os.path.join(DATA, "sheet-live.jpg")
-    olines = None
+    olines, sxy = None, (1, 1)
     if _shot(base):
-        try:
-            from PIL import Image
-            iw, ih = Image.open(base).size
-        except Exception:
-            iw, ih = mon["width"], mon["height"]
-        olines = _ocr_lines(base, mon["width"] / iw, mon["height"] / ih)
+        sxy = _img_scale(base, mon)
+        olines = _ocr_lines(base, *sxy)
     for x in sorted(slots, key=lambda x: x["box"][0]):
         y0, x0, y1, x1 = x["box"]
+        kind = x.get("kind")
         cy = int((y0 + y1) / 2 / 1000 * mon["height"])
-        if x.get("kind") == "line":
+        if not _shot_clean(pre, mon):
+            x["_ok"], x["_why"] = False, "no screenshot"
+            continue
+        if kind == "after":
+            # no answer space under the question: end of its own line + Enter
+            spot = _question_end(x.get("question", ""), _ocr_lines(pre, *_img_scale(pre, mon)))
+            cx, cy = spot or (int(x1 / 1000 * mon["width"]), cy)
+        elif kind == "line":
             cx = int((x0 + (x1 - x0) * 0.15) / 1000 * mon["width"])
             spot = _answer_spot_below(x.get("question", ""), olines) if olines else None
-            spot = spot or x.get("_at")
             if spot:
-                cx, cy = spot
-                if _shot(live):
-                    dy = _vshift(base, live)
-                    if dy:
-                        cy -= dy                      # the page moved up by dy
-            x["_typed_at"] = [cx, cy]
+                dy = _vshift(base, pre)
+                cx, cy = spot[0], spot[1] - int((dy or 0) * sxy[1])   # the page moved up by dy
+            elif x.get("_at"):
+                cx, cy = x["_at"]
         else:
             cx = int((x0 + x1) / 2 / 1000 * mon["width"])
+        x["_typed_at"] = [cx, cy]
         doc_x = cx
         _move(cx, cy, mon)
         time.sleep(0.08)
         ans = str(x["answer"])
-        if x.get("kind") == "inline":
+        if kind == "inline":
             # a ___ blank inside a sentence: double-click selects the blank,
             # typing replaces it (End would put the answer after the full stop)
             _click("left", True)
             time.sleep(0.15)
-            put_text(ans, timeout=30)
+            rc, _o = put_text(ans, timeout=30)
         else:
             _click("left", False)
             time.sleep(0.15)
             wkeys("-k", "End")
-            put_text((" " + ans) if x.get("kind") == "line" else ans, timeout=30)
-        time.sleep(0.2)
-    _sheet_log(typed=[[str(x.get("question", ""))[:30], x.get("_typed_at")] for x in slots])
+            if kind == "after":
+                wkeys("-k", "Return")
+                time.sleep(0.1)
+            rc, _o = put_text((" " + ans) if kind == "line" else ans, timeout=30)
+        time.sleep(0.4)
+        if rc != 0:
+            x["_ok"], x["_why"] = False, "paste failed"
+        elif not _shot_clean(post, mon):
+            x["_ok"], x["_why"] = False, "no screenshot after"
+        else:
+            x["_ok"], x["_why"] = _answer_seen(pre, post, cy, ans, mon)
+        if kind == "after" and olines is not None and _shot(base):
+            olines = _ocr_lines(base, *sxy)              # lines below moved down
+    _sheet_log(typed=[[str(x.get("question", ""))[:30], x.get("_typed_at"), x.get("_ok"), x.get("_why")]
+                      for x in slots])
     return doc_x
 
 
-def _empty_answer_lines(mon):
-    """OCR the screen: are there 'answer:' lines with nothing after them?"""
-    p = os.path.join(DATA, "sheet-sweep.jpg")
-    if not _shot(p):
-        return 0
-    try:
-        from PIL import Image
-        iw, ih = Image.open(p).size
-    except Exception:
-        iw, ih = mon["width"], mon["height"]
-    return sum(1 for t, _y, _r in _ocr_lines(p, mon["width"] / iw, mon["height"] / ih)
-               if re.match(r"^(?:answer|answers|ans|תשובה)\s*[:.]?\s*$", t))
-
-
 def a_fill_table(args):
-    """Homework / question sheets / tables, even LONGER than the screen:
-    answer what's visible, scroll down, repeat (skipping questions already
-    answered) until the page stops moving -- at most 8 screens."""
+    """Homework / question sheets / tables, even LONGER than the screen.
+    Starts WHERE THE USER IS (finished questions above are left alone):
+    answers this screen, then scrolls down in measured, overlapping steps,
+    collecting the text with local OCR as context. If the questions are about
+    a passage that starts above the screen, that part is read first (OCR, no
+    AI) instead of answering blindly. Every answer is checked on a screenshot."""
     if not shutil.which("wtype"):
         return "wtype isn't installed"
     extra = (args.get("q") or args.get("instructions") or "").strip()
@@ -4478,41 +4761,39 @@ def a_fill_table(args):
     if extra and extra.lower() not in (USER_SAID or "").lower() and not DIRECT:
         extra = ""
     mon = _monitor()
-    done, answered, pages, why, context = set(), [], 0, "", ""
     doc_x = mon["width"] // 2
-    # start from the TOP: the passage the questions are about is usually above them
-    for _ in range(6):
-        b0 = os.path.join(DATA, "scroll-before.jpg")
-        a0 = os.path.join(DATA, "scroll-after.jpg")
-        with _TarHidden() as hid:
-            _shot(b0)
-            _move(doc_x, int(mon["height"] * 0.55), mon)
-            sh([_wlrctl(), "pointer", "scroll", str(-int(mon["height"] * 1.5)), "0"])
-            time.sleep(0.5)
-            _shot(a0)
-            rect = hid.rect
-        _mask(b0, rect, mon)
-        _mask(a0, rect, mon)
-        if not _page_moved(b0, a0)[0]:
-            with _TarHidden():
-                wkeys("-M", "ctrl", "-k", "Home", "-m", "ctrl")   # top of the document
-                time.sleep(0.4)
-            break
-    for page in range(8):
-        _sheet_page.page_text = ""
-        slots, why, shot = _sheet_page(extra, mon, done, context)
-        if _sheet_page.page_text:
-            context += "\n" + _sheet_page.page_text
+    st = {"amt": max(1, int(mon["height"] * 0.1))}      # grows to ~40% of a screen
+    done, answered, pages, why, story, prev, read_up = set(), [], 0, "", [], None, False
+    low = []                                    # questions on the bottom edge, for the next screen
+    for page in range(25):
+        _sheet_page.lines, _sheet_page.needs_above = [], False
+        slots, why, shot = _sheet_page(extra, mon, done, "\n".join(story))
         if slots is None:
             if answered:
                 break
             return "NOT DONE: " + why
+        if _sheet_page.needs_above and not read_up:
+            # half a passage on screen: read where it starts before answering anything
+            read_up = True
+            mini_say("reading the start of the story first")
+            above = _read_up(mon, doc_x, st)
+            story = above.splitlines() + story
+            _sheet_log(page=page + 1, needs_above=True, read_up_chars=len(above))
+            slots, why, shot = _sheet_page(extra, mon, done, "\n".join(story))
+            if slots is None:
+                return "NOT DONE: " + why
+        story += _overlap_new(prev, _sheet_page.lines)
+        prev = _sheet_page.lines
         for x in slots:
             stop = _personal_guard(str(x["answer"]), "answer")
             if stop:
                 return stop
-        _sheet_log(page=page + 1, found=[str(x.get("question", ""))[:50] for x in (slots or [])],
-                   spots=[x.get("_at") or "vision" for x in (slots or [])], why=why)
+        # an answer typed on the bottom edge lands off screen (and can't be
+        # checked): the next, overlapping screen brings that question up
+        low = [x for x in slots if (x["box"][0] + x["box"][2]) / 2 > 850]
+        slots = [x for x in slots if x not in low]
+        _sheet_log(page=page + 1, found=[str(x.get("question", ""))[:50] for x in slots],
+                   kinds=[x.get("kind") for x in slots], later=len(low), why=why)
         if slots:
             pages += 1
             show_seen(shot, "screen", "page %d: %d question%s" % (page + 1, len(slots), "" if len(slots) == 1 else "s"))
@@ -4521,88 +4802,31 @@ def a_fill_table(args):
             for x in slots:
                 done.add(_qkey(x.get("question", "")))
                 answered.append(x)
-        # scroll on: if the page doesn't move, we've reached the end
-        before = os.path.join(DATA, "scroll-before.jpg")
-        after = os.path.join(DATA, "scroll-after.jpg")
-        with _TarHidden() as hid:
-            _shot(before)
-            _move(doc_x, int(mon["height"] * 0.55), mon)
-            sh([_wlrctl(), "pointer", "scroll", str(int(mon["height"] * 0.55)), "0"])
-            time.sleep(0.6)
-            _shot(after)
-            rect = hid.rect
-        _mask(before, rect, mon)
-        _mask(after, rect, mon)
-        moved, frac = _page_moved(before, after)
-        how = "wheel"
+        moved, _dy = _scroll_step(mon, doc_x, st)
         if not moved:
-            # some editors ignore the mouse wheel (it read "scrolled 0.0" and
-            # stopped after 8 of 11 questions): Page Down in the document
-            with _TarHidden() as hid:
-                wkeys("-k", "Next")
-                time.sleep(0.15)
-                wkeys("-k", "Next")
-                time.sleep(0.6)
-                _shot(after)
-                rect = hid.rect
-            _mask(after, rect, mon)
-            moved, frac = _page_moved(before, after)
-            how = "pagedown"
-        _sheet_log(page=page + 1, scrolled=round(frac, 4), moved=moved, how=how)
-        if not moved:
-            break                                   # really the bottom of the document
-    # reached the end: sweep back UP to make sure nothing was missed. OCR finds
-    # 'answer:' lines still empty; only those screens go back to the AI.
-    for sweep in range(8):
-        with _TarHidden() as hid:
-            empty = _empty_answer_lines(mon)
-            rect = hid.rect
-        _sheet_log(sweep=sweep + 1, empty_answer_lines=empty)
-        if empty:
-            slots, why2, shot = _sheet_page(extra, mon, done, context)
-            slots = [x for x in (slots or []) if _personal_guard(str(x["answer"]), "answer") is None]
-            if slots:
-                show_seen(shot, "screen", "missed on the way down: %d" % len(slots))
+            if low:                                 # the very end: no screen comes after
                 with _TarHidden():
-                    doc_x = _type_slots(slots, mon)
-                for x in slots:
-                    done.add(_qkey(x.get("question", "")))
-                    answered.append(x)
-        before = os.path.join(DATA, "scroll-before.jpg")
-        after = os.path.join(DATA, "scroll-after.jpg")
-        with _TarHidden() as hid:
-            _shot(before)
-            _move(doc_x, int(mon["height"] * 0.55), mon)
-            sh([_wlrctl(), "pointer", "scroll", str(-int(mon["height"] * 0.55)), "0"])
-            time.sleep(0.5)
-            _shot(after)
-            rect = hid.rect
-        _mask(before, rect, mon)
-        _mask(after, rect, mon)
-        moved, _f = _page_moved(before, after)
-        if not moved:
-            with _TarHidden() as hid:
-                wkeys("-k", "Prior")
-                time.sleep(0.15)
-                wkeys("-k", "Prior")
-                time.sleep(0.5)
-                _shot(after)
-                rect = hid.rect
-            _mask(after, rect, mon)
-            moved, _f = _page_moved(before, after)
-        if not moved:
-            break                                   # back at the top
+                    _type_slots(low, mon)
+                answered += low
+            break                                   # the bottom of the document
     if not answered:
         return "NOT DONE: nothing to answer on screen -- %s" % (why or "no questions found")
     final = os.path.join(DATA, "fill-after.jpg")
-    with _TarHidden() as hid:
-        _shot(final)
-        rect = hid.rect
-    _mask(final, rect, mon)
-    show_seen(final, "screen", "after answering %d" % len(answered))
-    lines = "\n".join("- %s -> %s" % (str(x.get("question", ""))[:60], x["answer"]) for x in answered)
-    return ("answered %d question(s) over %d screen(s), scrolled to the end -- VERIFIED by "
-            "screenshots:\n%s" % (len(answered), max(1, pages), lines))
+    if _shot_masked(final, mon):
+        show_seen(final, "screen", "after answering %d" % len(answered))
+    ok = [x for x in answered if x.get("_ok")]
+    bad = [x for x in answered if not x.get("_ok")]
+    pair = lambda x: "- %s -> %s" % (str(x.get("question", ""))[:80], x["answer"])
+    out = "%styped %d/%d answers over %d screen(s), from where you were down to the end%s; " \
+          "each one checked on a screenshot after typing." % (
+              "" if ok else "NOT DONE: ", len(ok), len(answered), max(1, pages),
+              " (read the start of the story above first)" if read_up else "")
+    if ok:
+        out += "\nTyped:\n" + "\n".join(pair(x) for x in ok)
+    if bad:
+        out += ("\nNOT TYPED (didn't show up on screen) -- paste these yourself:\n"
+                + "\n".join(pair(x) for x in bad))
+    return out
 
 
 def a_fill_cells(args):
@@ -5913,7 +6137,7 @@ ACTIONS = {
                                  "(table cells, 'answer:' lines, blanks), answers them in their language "
                                  "and types each answer in the right spot. q= ONLY the user's own extra "
                                  "instructions (or nothing). USE THIS for 'answer the questions'.",
-                   [r"^(?:fill in|fill out|fill|answer|complete|do|solve) (?:the |my )?(?:table|questions|question sheet|questions sheet|homework|worksheet|sheet)(?: (?:in|on) (?:the |my )?(?:doc|docs|document|screen|page))?(?P<q> in \w+)?$"]),
+                   [r"^(?:fill in|fill out|fill|answer|complete|finish|do|solve) (?:the |my )?(?:table|questions|question sheet|questions sheet|homework|worksheet|sheet)(?: (?:in|on) (?:the |my )?(?:doc|docs|document|screen|page))?(?P<q> in \w+)?$"]),
     "fill_cells": (a_fill_cells, "fill a TABLE or FORM: start=<first cell to fill> texts=<v1 || v2 || ...> "
                                  "(nav=tab default; Tab goes left->right then next row; '' skips a cell "
                                  "that already has text). Use this instead of clicking each cell.", []),
@@ -6295,7 +6519,7 @@ _SELF_CLOSE_ANY = re.compile(r"\b(?:close|quit|exit|kill|pkill|killall|shut ?dow
                              r"(?: -9| -15)? (?:yourself|tar|t\.?\s?a\.?\s?r\.?)(?:[.!?]|$|\s)")
 
 
-_SHEET_ASK = re.compile(r"\b(?:answer|do|solve|complete|fill(?: in| out)?)\b.{0,40}\b(?:questions?|exercises?|"
+_SHEET_ASK = re.compile(r"\b(?:answer|do|solve|complete|finish|fill(?: in| out)?)\b.{0,40}\b(?:questions?|exercises?|"
                         r"homework|worksheet|table)\b")
 _SHEET_WHERE = re.compile(r"\b(?:doc|docs|document|sheet|worksheet|page|screen|homework|table|file|"
                           r"under it|below|in it|on it|the questions|these questions|those questions)\b")
