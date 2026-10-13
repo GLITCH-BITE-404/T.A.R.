@@ -4271,12 +4271,14 @@ def _ocr_langs():
     return _ocr_langs.v
 
 
-def _vshift(prev_path, cur_path, max_shift=400):
+def _vshift(prev_path, cur_path, max_shift=400, ignore=()):
     """How far the page moved vertically between two screenshots (pixels,
     + = content moved UP), or None when it can't tell (moved further than
     max_shift, or no good match). Compares the whole picture at half size:
     row brightness alone matched evenly spaced text lines one line-period
-    off and reported a 786 px jump as 372."""
+    off and reported a 786 px jump as 372. ignore = (x1, y1, x2, y2) image
+    rects blacked out in both shots (orb, bubble, tiled T.A.R.) -- they stay
+    put while the page moves, so they'd make every real scroll look unsure."""
     try:
         import numpy as np
         from PIL import Image
@@ -4287,17 +4289,26 @@ def _vshift(prev_path, cur_path, max_shift=400):
         k = 2
         a = np.asarray(A.resize((240, A.size[1] // k)), dtype=np.float32)
         b = np.asarray(B.resize((240, B.size[1] // k)), dtype=np.float32)
+        ok = np.ones(a.shape, dtype=np.float32)          # 1 = real page pixel
+        fx, fy = 240 / A.size[0], 1 / k
+        for x1, y1, x2, y2 in ignore or ():
+            ok[max(0, int(y1 * fy) - 1):max(0, int(y2 * fy) + 2),
+               max(0, int(x1 * fx) - 1):max(0, int(x2 * fx) + 2)] = 0
         n = a.shape[0]
         ms = min(max_shift // k, n - 8)
         best = None
         for d in range(-ms, ms + 1):
-            x, y = (a[d:], b[:n - d]) if d >= 0 else (a[:n + d], b[-d:])
-            e = float(np.mean(np.abs(x - y)))
+            if d >= 0:
+                x, y, m = a[d:], b[:n - d], ok[d:] * ok[:n - d]
+            else:
+                x, y, m = a[:n + d], b[-d:], ok[:n + d] * ok[-d:]
+            e = float(np.sum(np.abs(x - y) * m) / max(float(m.sum()), 1.0))
             if best is None or e < best[0]:
                 best = (e, d)
         e, d = best
-        x = a[d:] if d >= 0 else a[:n + d]
-        spread = float(np.mean(np.abs(x - x.mean())))
+        x, m = (a[d:], ok[d:]) if d >= 0 else (a[:n + d], ok[:n + d])
+        mean = float(np.sum(x * m) / max(float(m.sum()), 1.0))
+        spread = float(np.sum(np.abs(x - mean) * m) / max(float(m.sum()), 1.0))
         if spread > 1e-3 and e / spread > 0.07:
             return None                     # nothing lines up: unsure
         return d * k
@@ -4459,12 +4470,19 @@ def _sheet_log(**kw):
 
 
 def _shot_masked(path, mon):
-    """Screenshot with T.A.R. out of the way (tiled T.A.R. blacked out)."""
+    """Screenshot with T.A.R. out of the way (tiled T.A.R. blacked out).
+    _shot_masked.rects = what got blacked out, in image pixels (for _vshift)."""
     with _TarHidden() as hid:
         ok = _shot(path)
         rect = hid.rect
+        orb = _mini_rects()
+    _shot_masked.rects = []
     if ok:
         _mask(path, rect, mon)
+        sx, sy = _img_scale(path, mon)
+        r = list(orb) + ([(rect[0] - mon.get("x", 0), rect[1] - mon.get("y", 0),
+                           rect[2] - mon.get("x", 0), rect[3] - mon.get("y", 0))] if rect else [])
+        _shot_masked.rects = [(x1 / sx, y1 / sy, x2 / sx, y2 / sy) for x1, y1, x2, y2 in r]
     return ok
 
 
@@ -4503,6 +4521,7 @@ def _scroll_step(mon, doc_x, st, up=False):
     with _TarHidden():
         _move(doc_x, int(mon["height"] * 0.55), mon)
     _shot_masked(before, mon)
+    masked = list(_shot_masked.rects)
     ih = _img_height(before, mon)
     sign = -1 if up else 1
 
@@ -4511,12 +4530,13 @@ def _scroll_step(mon, doc_x, st, up=False):
             sh([_wlrctl(), "pointer", "scroll", str(int(n)), "0"])
             time.sleep(0.6)
         _shot_masked(after, mon)
+        masked.extend(_shot_masked.rects)
 
     def measure():
         # moved = the page itself shifted (a blinking caret changes pixels too)
         if not _page_moved(before, after)[0]:
             return False, 0
-        v = _vshift(before, after, max_shift=int(ih * 0.6))
+        v = _vshift(before, after, max_shift=int(ih * 0.6), ignore=masked)
         return v != 0, (None if v is None else sign * v)
 
     wheel(sign * st["amt"])
@@ -4528,6 +4548,7 @@ def _scroll_step(mon, doc_x, st, up=False):
             wkeys(*(["-k", "Up" if up else "Down"] * 12))
             time.sleep(0.6)
         _shot_masked(after, mon)
+        masked.extend(_shot_masked.rects)
         moved, dy = measure()
         how = "arrows"
         if not moved:
@@ -4535,6 +4556,7 @@ def _scroll_step(mon, doc_x, st, up=False):
                 wkeys("-k", "Prior" if up else "Next")
                 time.sleep(0.6)
             _shot_masked(after, mon)
+            masked.extend(_shot_masked.rects)
             moved, dy = measure()
             how = "pagedown"
     tries = 0
