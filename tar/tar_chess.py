@@ -129,9 +129,10 @@ def _pixels(path):
     return _IMG_CACHE[key][:2]
 
 
-def _pattern_score(path, box, mon_off):
+def _pattern_score(path, box, mon_off, inset=0.12):
     """How well this box lines up with an 8x8 light/dark grid (higher = better).
-    Uses square CORNERS (pieces sit in the middle)."""
+    Uses square CORNERS (pieces sit in the middle); a small inset makes it
+    sensitive to a few pixels of size error."""
     x1, y1, x2, y2 = [v - o for v, o in zip(box, mon_off * 2)]
     side = (x2 - x1) / 8.0
     if side < 20:
@@ -142,7 +143,7 @@ def _pattern_score(path, box, mon_off):
         for f in range(8):
             s = 0.0
             n = 0
-            for dx, dy in ((0.12, 0.12), (0.88, 0.12), (0.12, 0.88), (0.88, 0.88)):
+            for dx, dy in ((inset, inset), (1 - inset, inset), (inset, 1 - inset), (1 - inset, 1 - inset)):
                 X = int(x1 + (f + dx) * side)
                 Y = int(y1 + (r + dy) * side)
                 if 0 <= X < W and 0 <= Y < H:
@@ -175,7 +176,10 @@ def board_edges(shot, box, mon_off, reach=40):
             d = (line(q + 3) - line(q - 3)) * (1 if rising else -1)
             if top is None or d > top[0]:
                 top = (d, q)
-        return top[1]
+        # then the exact pixel: the single biggest step near that spot
+        q0 = top[1]
+        step = max(range(q0 - 4, q0 + 4), key=lambda x: abs(line(x + 1) - line(x)))
+        return step + 1
     cx = lambda v: max(0, min(W - 1, v))
     cy = lambda v: max(0, min(H - 1, v))
     L = st.median(best(lambda x, y=y: px[cx(x), y], range(int(x1) - reach, int(x1) + reach), True) for y in rows)
@@ -191,10 +195,21 @@ def snap_board(shot, box, mon_off):
     edges. -> (box, score)"""
     box, score = _snap_grid(shot, box, mon_off)
     try:
+        # left/top edges are clean; right/bottom ones get fooled by coordinate
+        # labels drawn inside the squares (lichess) -- so the corner comes from
+        # the edges and the SIZE from where the light/dark pattern fits best
         e = board_edges(shot, box, mon_off)
-        es = _pattern_score(shot, e, mon_off)
-        if es >= 8 and abs(e[0] - box[0]) < 30 and abs(e[1] - box[1]) < 30:
-            return e, es
+        L, T_ = e[0], e[1]
+        if abs(L - box[0]) < 30 and abs(T_ - box[1]) < 30:
+            side0 = box[2] - box[0]
+            best = (-1e9, None)
+            for sd in range(int(side0 * 0.94), int(side0 * 1.06) + 1):
+                b = (L, T_, L + sd, T_ + sd)
+                sc = _pattern_score(shot, b, mon_off, inset=0.035)
+                if sc > best[0]:
+                    best = (sc, b)
+            if best[1] and _pattern_score(shot, best[1], mon_off) >= 8:
+                return best[1], _pattern_score(shot, best[1], mon_off)
     except Exception:
         pass
     return box, score
@@ -371,7 +386,7 @@ class Player:
         self.covered = _pattern_score(self.shot, (0, 0, w, w), (0, 0)) < 8
         if self.covered:
             return None
-        o = occupancy(self.shot, (0, 0, w, w), (0, 0))
+        o = colours_for(self.shot, (0, 0, w, w), (0, 0), occupancy(self.shot, (0, 0, w, w), (0, 0)))
         self.raw = o
         self.last_seen = {_sq(r, c, self.white_bottom): is_w for (r, c), is_w in o.items()
                           if _sq(r, c, self.white_bottom) not in self.junk}
@@ -566,6 +581,95 @@ def last_mover(png, box, mon_off, occ):
 
 
 TEMPLATES = os.path.join(T.DATA, "chess-pieces.json")
+
+
+def colour_feats(png, box, mon_off, squares):
+    """Per square: (parity, (dark, light, delta, p70)) -- how a piece changes its
+    square. No single rule works for every piece set (classic white pieces have
+    thick black outlines), so these are LEARNED per theme at the start."""
+    import statistics as st
+    px, _ = _pixels(png)
+    x1, y1 = box[0] - mon_off[0], box[1] - mon_off[1]
+    side = (box[2] - box[0]) / 8.0
+    out = {}
+    for (r, c) in squares:
+        X0, Y0 = x1 + c * side, y1 + r * side
+        base = st.median(px[int(X0 + dx * side), int(Y0 + dy * side)]
+                         for dx in (0.07, 0.93) for dy in (0.07, 0.93))
+        pts = [px[int(X0 + (0.2 + 0.6 * i / 11) * side), int(Y0 + (0.15 + 0.7 * j / 11) * side)]
+               for i in range(12) for j in range(12)]
+        n = len(pts)
+        dark = sum(v < base - 45 for v in pts) / n
+        light = sum(v > base + 25 for v in pts) / n
+        delta = (st.mean(pts) - base) / 100
+        pp = sorted(v for v in pts if abs(v - base) > 25)
+        p70 = ((pp[int(len(pp) * 0.7)] if pp else base) - base) / 100
+        out[(r, c)] = ((r + c) % 2, (dark, light, delta, p70))
+    return out
+
+
+def learn_colours(feats, white_rc):
+    """Centroids of white/black pieces on light/dark squares, from the start."""
+    import statistics as st
+    occ = list(feats)
+    cent = {}
+    for par in (0, 1):
+        for w in (True, False):
+            vs = [feats[rc][1] for rc in occ if feats[rc][0] == par and (rc in white_rc) == w]
+            if not vs:
+                return None
+            cent["%d%d" % (par, w)] = [st.mean(v[i] for v in vs) for i in range(4)]
+    sd = [st.pstdev([feats[rc][1][i] for rc in occ]) or 1 for i in range(4)]
+    # every learned piece kept too: a detailed piece (the classic queen) sits
+    # between the two averages but right next to its own learned example
+    samples = [[feats[rc][0], list(feats[rc][1]), rc in white_rc] for rc in occ]
+    return {"cent": cent, "sd": sd, "samples": samples}
+
+
+def classify_colours(feats, model):
+    """{(r, c): is_white} by nearest learned centroid."""
+    cent, sd = model["cent"], model["sd"]
+    samples = model.get("samples")
+    out = {}
+    for rc, (par, v) in feats.items():
+        if samples:
+            # nearest learned piece on the same square colour decides
+            same = [smp for smp in samples if smp[0] == par] or samples
+            near = min(same, key=lambda smp: sum(((v[i] - smp[1][i]) / sd[i]) ** 2 for i in range(4)))
+            out[rc] = bool(near[2])
+            continue
+        dw = sum(((v[i] - cent["%d1" % par][i]) / sd[i]) ** 2 for i in range(4))
+        db = sum(((v[i] - cent["%d0" % par][i]) / sd[i]) ** 2 for i in range(4))
+        out[rc] = dw < db
+    return out
+
+
+def is_start(occ_rc):
+    """Fresh-game layout from WHERE the pieces are (no colours needed)."""
+    return len(occ_rc) == 32 and all((r, c) in occ_rc for r in (0, 1, 6, 7) for c in range(8))
+
+
+def start_side(feats):
+    """Which side's 16 pieces are white at the start: the brighter group."""
+    import statistics as st
+    top = st.mean(feats[(r, c)][1][2] for r in (0, 1) for c in range(8))
+    bot = st.mean(feats[(r, c)][1][2] for r in (6, 7) for c in range(8))
+    return bot > top                    # True = white at the bottom
+
+
+def _theme(box):
+    """Learned shapes + colours for a board this size, or None."""
+    try:
+        t = json.load(open(TEMPLATES))
+    except (OSError, ValueError):
+        return None
+    sizes = t.get("sizes") or ({str(t["side"]): {"pieces": t["pieces"]}} if "side" in t else {})
+    side = box[2] - box[0]
+    near = [k for k in sizes if abs(int(k) - side) <= 6]
+    if not near:
+        return None
+    th = sizes[min(near, key=lambda k: abs(int(k) - side))]
+    return th if isinstance(th, dict) else {"pieces": th}
 _MASK = 20                              # piece silhouette grid (20x20)
 
 
@@ -595,7 +699,8 @@ def piece_masks(png, box, mon_off):
 
 
 def learn_pieces(png, box, mon_off, wb):
-    """Fresh game = every piece on a known square: remember what each looks like."""
+    """Fresh game = every piece on a known square: remember what each looks like
+    (shape) and what each side's colour looks like in this theme."""
     import chess
     masks = piece_masks(png, box, mon_off)
     start = chess.Board()
@@ -604,12 +709,15 @@ def learn_pieces(png, box, mon_off, wb):
         pc = start.piece_at(_sq(row, col, wb))
         if pc:
             tpl.append([pc.symbol(), bits])
+    occ_rc = [(r, c) for r in (0, 1, 6, 7) for c in range(8)]
+    white_rc = {(r, c) for r in ((6, 7) if wb else (0, 1)) for c in range(8)}
+    colours = learn_colours(colour_feats(png, box, mon_off, occ_rc), white_rc)
     try:
         try:
             allsz = json.load(open(TEMPLATES)).get("sizes", {})
         except (OSError, ValueError):
             allsz = {}
-        allsz[str(int(box[2] - box[0]))] = tpl        # every board size seen is kept
+        allsz[str(int(box[2] - box[0]))] = {"pieces": tpl, "colours": colours}   # per board size
         with open(TEMPLATES, "w") as f:
             json.dump({"sizes": allsz}, f)
         log("learned", len(tpl), "piece shapes for a %d px board" % int(box[2] - box[0]))
@@ -620,16 +728,9 @@ def learn_pieces(png, box, mon_off, wb):
 def recognise(png, box, mon_off, want, wb):
     """{square: symbol} for every occupied square, from the learned shapes --
     None if there are no shapes for this board size."""
-    try:
-        t = json.load(open(TEMPLATES))
-    except (OSError, ValueError):
-        return None
-    sizes = t.get("sizes") or ({str(t["side"]): t["pieces"]} if "side" in t else {})
-    side = box[2] - box[0]
-    near = [k for k in sizes if abs(int(k) - side) <= 6]
-    if not near:
+    t = _theme(box)
+    if not t or not t.get("pieces"):
         return None                     # never seen a board this size: shapes don't apply
-    t = {"pieces": sizes[min(near, key=lambda k: abs(int(k) - side))]}
     masks = piece_masks(png, box, mon_off)
     ranked = {}                         # square -> [(score, symbol)] best first
     for (row, col), bits in masks.items():
@@ -793,22 +894,28 @@ def _cached_box(w):
     return None
 
 
+def colours_for(png, box, mon_off, occ):
+    """Replace the rule-of-thumb colours with the learned ones (when learned)."""
+    th = _theme(box)
+    if not th or not th.get("colours"):
+        return occ
+    return classify_colours(colour_feats(png, box, mon_off, list(occ)), th["colours"])
+
+
 def _position(png, box, mon, wb, moves, guess_side):
     """Board state from the pixels (+ the move list, + one labelling call only
     when joining a game that's already going)."""
     import chess
     from PIL import Image
     mx, my = mon.get("x", 0), mon.get("y", 0)
-    occ = occupancy(png, box, (mx, my))              # (row, col) -> is_white
-    # a fresh game is recognised from the pixels alone: no AI call at all
-    start_rows = {r: occ_row for r in (0, 1, 6, 7) for occ_row in [
-        [occ.get((r, c)) for c in range(8)]]}
-    if len(occ) == 32 and all(v is not None for r in start_rows for v in start_rows[r]):
-        bottom_white = all(start_rows[7]) and all(start_rows[6]) and not any(start_rows[0])
-        top_white = all(start_rows[0]) and all(start_rows[1]) and not any(start_rows[7])
-        if bottom_white or top_white:
-            learn_pieces(png, box, (mx, my), bottom_white)
-            return Player(box, bottom_white, chess.Board(), mon), None
+    occ = occupancy(png, box, (mx, my))              # (row, col) -> is_white (rule of thumb)
+    # a fresh game is recognised from WHERE the pieces are -- no colours, no AI;
+    # the brighter group of 16 is white, for any piece set
+    if is_start(set(occ)):
+        bottom_white = start_side(colour_feats(png, box, (mx, my), list(occ)))
+        learn_pieces(png, box, (mx, my), bottom_white)
+        return Player(box, bottom_white, chess.Board(), mon), None
+    occ = colours_for(png, box, (mx, my), occ)       # learned colours, if this theme was seen
     if guess_side:
         # cached board, game in progress: which side is ours? white's pieces
         # are mostly in the half nearest the white player
