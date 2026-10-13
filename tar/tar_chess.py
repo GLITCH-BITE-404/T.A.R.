@@ -1068,6 +1068,18 @@ def _castling_from_board(board):
     board.set_castling_fen(rights or "-")
 
 
+def _running(name):
+    """Is a process with this exact name running (lock screens)?"""
+    for d in os.listdir("/proc"):
+        if d.isdigit():
+            try:
+                if open("/proc/%s/comm" % d).read().strip() == name:
+                    return True
+            except OSError:
+                pass
+    return False
+
+
 def play(minutes=30):
     err = ensure_chess()                # BEFORE importing it: first run installs it
     if err:
@@ -1128,13 +1140,37 @@ def play(minutes=30):
             T.mini_say(("they played " if p.board.turn == me else "played ") + san)
             T.loop_update(last="%s %s" % ("they played" if p.board.turn == me else "played", san))
 
+    last_tick = time.time()
     while T.loop_mine() and time.time() < until:
         d = T.loop_mine() or {}
+        now = time.time()
+        gap, last_tick = now - last_tick, now
+        T.loop_update(beat=now)          # heartbeat: the orb can tell "frozen" from "waiting"
+        if gap > 20:
+            # the machine slept (lid closed / screen off): the board may have moved,
+            # a lock screen may still be up -- wait for a usable screen, then find
+            # the board fresh instead of trusting what we knew before
+            log("woke up after %ds -- re-finding the board" % gap)
+            T.loop_update(status="waking up", last="the screen was off for %d s -- finding the board again" % gap)
+            T.mini_say("chess: back, finding the board…")
+            until += gap                 # the time asleep doesn't count
+            for _ in range(60):          # up to ~1 min for the lock screen to go away
+                if not any(_running(n) for n in ("hyprlock", "swaylock", "gtklock")):
+                    break
+                time.sleep(1)
+            resync("the system was asleep")
+            continue
         if d.get("paused"):
             time.sleep(1)
             continue
         ok, why = T.task_window_ok()
         if not ok:
+            if "closed" in why:
+                # the game's tab/window is gone: nothing to wait for
+                log("stopping:", why)
+                T.loop_update(status="failed", last="stopped: the chess window was closed")
+                T.mini_say("chess: the game window is gone, stopped")
+                break
             T.loop_update(status="waiting for the window", last="paused: " + why)
             T.mini_say("chess: waiting, " + why)
             time.sleep(2)

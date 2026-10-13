@@ -438,13 +438,18 @@ Scope {
                         }
                         Text {
                             width: parent.width
-                            text: mini.task ? ((mini.task.paused ? "paused" : (mini.task.status || ""))
+                            // no heartbeat for 30 s = the task is stuck, not "waiting"
+                            readonly property bool frozen: !!(mini.task && mini.task.beat
+                                && Date.now() / 1000 - mini.task.beat > 30 && !mini.task.paused)
+                            color: frozen ? theme.red : theme.overlay1
+                            text: mini.task ? ((frozen ? "NOT RESPONDING (say stop, or run tar-kill)"
+                                               : mini.task.paused ? "paused" : (mini.task.status || ""))
                                   + "  ·  round " + (mini.task.round || 0)
                                   + (mini.task.clicks ? "  ·  " + mini.task.clicks + " clicks" : "")
                                   + (mini.task.until ? "  ·  " + Math.max(0, Math.round(
                                         (mini.task.until - Date.now() / 1000) / 60)) + " min left" : ""))
                                   : ""
-                            color: theme.overlay1; font.family: "JetBrains Mono"; font.pixelSize: 9
+                            font.family: "JetBrains Mono"; font.pixelSize: 9
                             wrapMode: Text.Wrap
                         }
                         Text {
