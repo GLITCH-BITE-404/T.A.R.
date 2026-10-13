@@ -2555,6 +2555,39 @@ def a_install_chess(args):
             if _have_stockfish() else "NOT DONE: building Stockfish failed (%s)" % out)
 
 
+_CHESS_BANDS = {"beginner": 2, "noob": 1, "newbie": 1, "easy": 2, "pro": 5, "hard": 5, "club": 4,
+                "master": 6, "grandmaster": 7, "gm": 7, "engine": 20, "stockfish": 20, "max": 20,
+                "full": 20, "impossible": 20}
+
+
+def _chess_level_arg(args):
+    raw = str(args.get("level") or "").strip().lower()
+    if raw.isdigit():
+        return max(1, min(20, int(raw)))
+    for word, lv in _CHESS_BANDS.items():
+        if word in raw:
+            return lv
+    return None
+
+
+def a_chess_level(args):
+    """Set the chess strength 1-20 (beginner 1-3, pro 4-5, grandmaster 6-8,
+    engine 9-20); a running game switches from its next move."""
+    lv = _chess_level_arg(args)
+    if not lv:
+        return "which level? 1-20 (beginner 1-3, pro 4-5, grandmaster 6-8, engine 9-20)"
+    import tar_brain as B
+    c = B.config()
+    c["chess_level"] = lv
+    B.save_config(c)
+    if loop_running():
+        loop_update(level=lv)
+    import tar_chess as CH
+    return "chess level %d (%s, ~%s) -- VERIFIED%s" % (
+        lv, CH.level_band(lv), CH.level_elo(lv) or "full strength",
+        ": the running game switches from its next move" if loop_running() else "")
+
+
 def a_play_chess(args):
     """Play the chess game open in the browser, as a background task."""
     w = _chess_window()
@@ -2564,6 +2597,10 @@ def a_play_chess(args):
     if loop_running():
         a_stop_task({})
     minutes = max(1, min(120, _int(args.get("minutes"), 30)))
+    if args.get("band") and not args.get("level"):
+        args = dict(args, level=args["band"])
+    if _chess_level_arg(args):
+        a_chess_level({"level": str(_chess_level_arg(args))})
     log = open(os.path.join(DATA, "loop.log"), "a")
     p = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                                        "tar_chess.py"), "play", "--minutes", str(minutes)],
@@ -2572,7 +2609,8 @@ def a_play_chess(args):
         json.dump({"pid": p.pid, "task": "play chess in %r" % (w.get("title") or "")[:50],
                    "started": time.time(), "until": time.time() + minutes * 60, "every": 1,
                    "round": 0, "status": "finding the board", "last": "", "paused": False,
-                   "feed": [], "autoclick": "", "rate": 0, "clicks": 0,
+                   "feed": [], "autoclick": "", "rate": 0, "clicks": 0, "chess": True,
+                   "level": cfg().get("chess_level") or 20,
                    "win": w["address"], "win_title": w.get("title", ""), "beat": time.time()}, f)
     # report what REALLY happened: wait for the board to be found (or a failure)
     for _ in range(80):                 # first run also installs the chess library
@@ -5783,8 +5821,16 @@ ACTIONS = {
                                  "-- then offer install_chess.",
                    [r"^(?:(?:can|could) you |please |go |now )?(?:play|keep playing|start playing|"
                     r"continue playing) (?:a |the |this )?chess(?: game)?(?: (?:against|vs\.?|with) "
-                    r"(?:the |this )?(?:bot|computer|ai|him|her|them|[\w ]+?))?(?: for (?P<minutes>"
-                    r"\d+) ?min(?:ute)?s?)?(?: for me)?$"]),
+                    r"(?:the |this )?(?:bot|computer|ai|him|her|them|[\w ]+?))?(?: (?:at|on) "
+                    r"(?:level |lvl )?(?P<level>\d{1,2})| like an? (?P<band>beginner|noob|pro|"
+                    r"grandmaster|gm|engine))?(?: for (?P<minutes>\d+) ?min(?:ute)?s?)?(?: for me)?$"]),
+    "chess_level": (a_chess_level, "set the chess strength: level= 1-20 or a band word (beginner "
+                                   "1-3, pro 4-5, grandmaster 6-8, engine 9-20); a running game "
+                                   "switches from its next move",
+                   [r"^(?:set |change |make )?(?:the )?chess (?:level|strength|difficulty)(?: to| =)? "
+                    r"(?P<level>\d{1,2}|beginner|pro|grandmaster|gm|engine|max)$",
+                    r"^(?:play |be )?(?:at )?level (?P<level>\d{1,2})(?: in chess)?$",
+                    r"^(?:play )?like an? (?P<level>beginner|noob|pro|grandmaster|gm|engine)$"]),
     "install_chess": (a_install_chess, "install Stockfish, the strongest chess engine (free, "
                                        "~3 min build, no password; asks the user first) so "
                                        "play_chess beats even the strongest bots. Offer it when "
@@ -6281,7 +6327,7 @@ def match(text):
     return None, None
 
 
-_PRIORITY = ("screen_fx", "stop_fx", "remember", "forget", "install_chess", "play_chess", "play_game", "research", "find_file", "open_found", "organize", "undo_organize", "to_pdf", "virus_scan", "selfie", "evil", "missiles", "camera_live", "devices", "now_playing", "note", "stopwatch", "focus", "coin", "dice", "record", "remind", "wifi", "bluetooth", "dnd", "nightlight", "power",
+_PRIORITY = ("screen_fx", "stop_fx", "remember", "forget", "install_chess", "chess_level", "play_chess", "play_game", "research", "find_file", "open_found", "organize", "undo_organize", "to_pdf", "virus_scan", "selfie", "evil", "missiles", "camera_live", "devices", "now_playing", "note", "stopwatch", "focus", "coin", "dice", "record", "remind", "wifi", "bluetooth", "dnd", "nightlight", "power",
              "play", "weather", "datetime", "battery", "calc", "processes",
              "colorpick", "cliphist")
 

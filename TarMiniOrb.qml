@@ -51,8 +51,15 @@ Scope {
             if (all[i].name === name) return all[i];
         return all.length ? all[0] : null;
     }
-    function act(name) {
-        Quickshell.execDetached(["python3", mini.tools, "run", name]);
+    function act(name, kv) {
+        Quickshell.execDetached(["python3", mini.tools, "run", name].concat(kv ? [kv] : []));
+    }
+    // chess strength bands: beginner 1-3 · pro 4-5 · grandmaster 6-8 · engine 9-20
+    function levelBand(lv) {
+        return lv <= 3 ? "BEGINNER" : lv <= 5 ? "PRO" : lv <= 8 ? "GRANDMASTER" : "ENGINE";
+    }
+    function levelColor(lv) {
+        return lv <= 3 ? theme.green : lv <= 5 ? theme.blue : lv <= 8 ? theme.mauve : theme.red;
     }
 
     // ---- working-mode feed from Python
@@ -446,6 +453,51 @@ Scope {
                             text: "last: " + ((mini.task && mini.task.last) || "")
                             color: theme.overlay1; font.family: "JetBrains Mono"; font.pixelSize: 9
                             wrapMode: Text.Wrap; maximumLineCount: 2; elide: Text.ElideRight
+                        }
+                        // chess strength meter: 20 segments, click one to change the
+                        // level -- the game switches from its next move
+                        Column {
+                            id: levelMeter
+                            visible: !!(mini.task && mini.task.chess)
+                            width: parent.width
+                            spacing: 4
+                            readonly property int lv: (mini.task && mini.task.level) ? mini.task.level : 20
+                            property int hoverLv: 0
+                            readonly property int showLv: hoverLv || lv
+                            Text {
+                                text: "LEVEL " + levelMeter.showLv + "  ·  " + mini.levelBand(levelMeter.showLv)
+                                      + (levelMeter.hoverLv ? "   (click to set)" : "")
+                                color: mini.levelColor(levelMeter.showLv)
+                                font.family: "JetBrains Mono"; font.pixelSize: 9; font.bold: true
+                            }
+                            Row {
+                                spacing: 2
+                                Repeater {
+                                    model: 20
+                                    delegate: Rectangle {
+                                        required property int index
+                                        readonly property int segLv: index + 1
+                                        width: (levelMeter.width - 19 * 2) / 20
+                                        height: 10
+                                        radius: 2
+                                        color: segLv <= levelMeter.showLv ? mini.levelColor(segLv)
+                                             : Qt.rgba(theme.overlay1.r, theme.overlay1.g, theme.overlay1.b, 0.25)
+                                        opacity: segLv <= levelMeter.showLv ? 1 : 0.6
+                                        MouseArea {
+                                            anchors.fill: parent
+                                            hoverEnabled: true
+                                            cursorShape: Qt.PointingHandCursor
+                                            onEntered: levelMeter.hoverLv = segLv
+                                            onExited: if (levelMeter.hoverLv === segLv) levelMeter.hoverLv = 0
+                                            onClicked: { mini.act("chess_level", "level=" + segLv); loopFile.reload(); }
+                                        }
+                                    }
+                                }
+                            }
+                            Text {
+                                text: "beginner 1-3 · pro 4-5 · grandmaster 6-8 · engine 9-20"
+                                color: theme.overlay1; font.family: "JetBrains Mono"; font.pixelSize: 8
+                            }
                         }
                         Row {
                             spacing: 8

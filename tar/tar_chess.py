@@ -323,19 +323,76 @@ def stockfish():
     return _SF or None
 
 
-def best_move(board, seconds=2.5, avoid=()):
-    """Stockfish if it's installed (~0.3 s, plays far above any bot), else the
-    small built-in alpha-beta below. avoid = moves that didn't work on screen."""
+# ---- strength levels 1-20 ------------------------------------------------------
+# Beginner 1-3 · Pro 4-5 · Grandmaster 6-8 · Engine 9-20. Stockfish's own rating
+# limiter covers 1320-3190; below that, weakest settings + some random moves.
+def level_band(lv):
+    return "beginner" if lv <= 3 else "pro" if lv <= 5 else "grandmaster" if lv <= 8 else "engine"
+
+
+def level_elo(lv):
+    """Roughly how strong a level plays (None = no limit at all)."""
+    table = {1: 400, 2: 700, 3: 1000, 4: 1400, 5: 1800, 6: 2300, 7: 2500, 8: 2700}
+    if lv in table:
+        return table[lv]
+    return None if lv >= 20 else 2800 + (lv - 9) * 39      # 9 -> 2800 ... 19 -> 3190
+
+
+_RANDOM = {1: 0.60, 2: 0.35, 3: 0.15}                       # beginner blunders
+_SF_LEVEL = [None]
+
+
+def current_level():
+    """The level right now: the running task's (changed live from the orb card),
+    else the saved setting, else full strength."""
+    for src in (lambda: (T.loop_running() or {}).get("level"),
+                lambda: T.cfg().get("chess_level")):
+        try:
+            lv = src()
+            if lv:
+                return max(1, min(20, int(lv)))
+        except (TypeError, ValueError):
+            pass
+    return 20
+
+
+def _configure(sf, lv):
+    if _SF_LEVEL[0] == lv:
+        return
+    elo = level_elo(lv)
+    try:
+        if lv <= 3:
+            sf.configure({"UCI_LimitStrength": False, "Skill Level": 0})
+        elif elo:
+            sf.configure({"Skill Level": 20, "UCI_LimitStrength": True,
+                          "UCI_Elo": max(1320, min(3190, elo))})
+        else:
+            sf.configure({"UCI_LimitStrength": False, "Skill Level": 20})
+        _SF_LEVEL[0] = lv
+        log("strength: level %d (%s, ~%s)" % (lv, level_band(lv), elo or "full strength"))
+    except Exception as e:
+        log("couldn't set the level:", e)
+
+
+def best_move(board, seconds=2.5, avoid=(), level=None):
+    """Stockfish if it's installed (plays far above any bot), else the small
+    built-in alpha-beta below -- at the chosen level. avoid = moves that didn't
+    work on screen."""
+    import random
+    lv = level or current_level()
     allowed = [m for m in board.legal_moves if m not in avoid] or list(board.legal_moves)
+    if random.random() < _RANDOM.get(lv, 0):
+        return random.choice(allowed)
     sf = stockfish()
     if sf:
         try:
             import chess.engine
-            return sf.play(board, chess.engine.Limit(time=0.3),
+            _configure(sf, lv)
+            return sf.play(board, chess.engine.Limit(time=0.5 if lv >= 20 else 0.3),
                            root_moves=allowed if avoid else None).move
         except Exception:
             pass
-    m = _own_best_move(board, seconds)
+    m = _own_best_move(board, min(seconds, 0.3 + lv * 0.11))
     return m if m in allowed else allowed[0]
 
 
@@ -1034,8 +1091,9 @@ def play(minutes=30):
             log("status:", k.get("status", ""), "|", k.get("last", ""))
         return _upd(**k)
     T.loop_update = _logged_update
-    T.loop_update(status="playing", last="found the board, playing %s with %s" % (
-        "white" if me else "black", "Stockfish" if stockfish() else "the built-in engine"))
+    lv0 = current_level()
+    T.loop_update(status="playing", level=lv0, last="found the board, playing %s with %s at level %d (%s)" % (
+        "white" if me else "black", "Stockfish" if stockfish() else "the built-in engine", lv0, level_band(lv0)))
     p.park()
     rnd, misses, lost, not_ours, stuck, quiet, checked_at = 0, 0, 0, 0, 0, 0, -1
     failed, fails_total = {}, 0          # moves that didn't work on screen
