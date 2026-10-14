@@ -703,10 +703,26 @@ def gemini_call(key, model, body, fallback=True):
             emit("info", v="%s is out of free requests for today -- switching to %s" % (
                 m, next((x for x in chain[chain.index(m) + 1:] if x not in gone), "nothing")))
             last = e
+        except _Overloaded as e:
+            nxt = next((x for x in chain[chain.index(m) + 1:] if x not in gone), None)
+            emit("info", v="%s is overloaded right now -- %s" % (
+                m, "switching to " + nxt if nxt else "no other Gemini model left"))
+            last = e
     if last and not fallback:
         raise last                      # llm_call moves on to another provider
+    if isinstance(last, _Overloaded):
+        raise RuntimeError("every Gemini model is overloaded right now (Google's servers are "
+                           "busy) -- try again in a minute")
     raise RuntimeError("every Gemini model is out of free requests for today -- try again "
                        "later (quota resets daily)" if last else "no Gemini model available")
+
+
+class _Overloaded(Exception):
+    """Google answered 5xx twice ('high demand'): skip this model for THIS request
+    (not remembered -- it's usually over in minutes)."""
+    def __init__(self, model, detail=""):
+        Exception.__init__(self, "%s is overloaded right now (%s)" % (model, detail))
+        self.model = model
 
 
 class _DailyQuota(Exception):
@@ -748,6 +764,8 @@ def _gemini_call_one(key, model, body):
                 detail = json.loads(detail)["error"]["message"]
             except (ValueError, KeyError, TypeError):
                 pass
+            if e.code in (500, 502, 503, 504):
+                raise _Overloaded(model, detail[:200])     # another model can take it
             raise RuntimeError("HTTP %d: %s" % (e.code, detail[:300]))
         except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
             # wifi blip / DNS hiccup: one quick retry before giving up
@@ -815,11 +833,13 @@ def llm_call(key, model, body, fallback=True):
         except _DailyQuota as e:
             _mark_exhausted(m, e.retry_s)
             last = e
+        except _Overloaded as e:
+            last = e                     # busy right now: the next model takes this request
         except RuntimeError as e:
             # out of quota / rate limited -> next provider; anything else (bad
             # key, broken request) is reported, not hidden behind a fallback
-            if not ("out of free requests" in str(e) or "rate limit" in str(e).lower()) \
-                    or i == len(chain) - 1:
+            if not ("out of free requests" in str(e) or "rate limit" in str(e).lower()
+                    or "overloaded" in str(e)) or i == len(chain) - 1:
                 raise
             last = e
         nxt = next((x for x in chain[i + 1:] if x not in gone and api_key(provider_of(x))), None)
@@ -945,6 +965,8 @@ def openai_call(key, model, body):
                 raise RuntimeError("%s rejected the API key (401) -- check it with /key" % prov["name"])
             if e.code == 429:
                 raise RuntimeError("%s rate limit: %s" % (prov["name"], str(detail)[:200]))
+            if e.code in (500, 502, 503, 504):
+                raise _Overloaded(model, str(detail)[:200])
             raise RuntimeError("%s HTTP %d: %s" % (prov["name"], e.code, str(detail)[:300]))
         except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
             if attempt == 0:
