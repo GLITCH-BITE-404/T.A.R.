@@ -900,7 +900,7 @@ def setup():
         r = _position(png, tuple(c["box"]), mon, c.get("white_bottom", True), "", guess_side=True)
         if r[0]:
             return r
-    T.mini_say("finding the board…")
+    step("finding the board…")
     # only the browser window goes to the AI (no terminal / T.A.R. to confuse it);
     # its answer is mapped back to screen coordinates below
     wx, wy = (w.get("at") or [mx, my])
@@ -936,7 +936,8 @@ def setup():
                 ((bx[1], bx[0], bx[3], bx[2]), (bx[0], bx[1], bx[2], bx[3]))), key=lambda r: r[1])
     box, score = best
     if score < 8:
-        return None, "couldn't line up the board's squares (score %.1f) -- is the whole board visible?" % score
+        return None, ("couldn't see a whole chessboard (score %.1f) -- is a popup covering it "
+                      "(like chess.com's Coach / Start box) or is it scrolled off? Close it and try again" % score)
     wb = bool(d.get("white_at_bottom", True))
     _save_cache(w, box, wb)
     return _position(png, box, mon, wb, d.get("moves") or "", guess_side=False)
@@ -984,6 +985,7 @@ def _position(png, box, mon, wb, moves, guess_side):
     # the brighter group of 16 is white, for any piece set
     if is_start(set(occ)):
         bottom_white = start_side(colour_feats(png, box, (mx, my), list(occ)))
+        step("fresh game -- learning what the pieces look like…")
         learn_pieces(png, box, (mx, my), bottom_white)
         return Player(box, bottom_white, chess.Board(), mon), None
     occ = colours_for(png, box, (mx, my), occ)       # learned colours, if this theme was seen
@@ -1012,6 +1014,8 @@ def _position(png, box, mon, wb, moves, guess_side):
     if ok and matches(board):
         return Player(box, wb, board, mon), None
     shapes = recognise(png, box, (mx, my), want, wb)
+    if shapes:
+        step("reading the position with the pieces I learned…")
     # 2) learned piece shapes (no AI): accepted only if the position is plausible
     if shapes:
         b2 = chess.Board(None)
@@ -1032,7 +1036,7 @@ def _position(png, box, mon, wb, moves, guess_side):
     crop = os.path.join(T.DATA, "chess-crop.jpg")
     Image.open(png).crop((box[0] - mx, box[1] - my, box[2] - mx, box[3] - my)).convert("RGB").save(crop)
     names = {sq: chess.square_name(sq) for sq in want}
-    T.mini_say("reading the position…")
+    step("reading the pieces with the AI…")
     txt, err = _vision(crop, (
         "This is a chessboard%s. These squares have pieces: %s. For EACH of them say which "
         "piece it is. Reply with ONLY JSON like {\"e1\": \"K\", \"d8\": \"q\"} -- uppercase = "
@@ -1082,6 +1086,21 @@ def _castling_from_board(board):
     board.set_castling_fen(rights or "-")
 
 
+def step(text):
+    """Say what's happening right now: orb bubble + task card + log."""
+    log("step:", text)
+    T.mini_say("chess: " + text)
+    T.loop_update(last=text, beat=time.time())
+
+
+def _end(reason):
+    """A game never just disappears: say why it ended (orb, card, notification)."""
+    log("ended:", reason)
+    T.loop_update(status="ended", last=reason)
+    T.mini_say("chess: " + reason)
+    T.sh(["notify-send", "-a", "T.A.R.", "T.A.R. chess", reason])
+
+
 def _running(name):
     """Is a process with this exact name running (lock screens)?"""
     for d in os.listdir("/proc"):
@@ -1094,18 +1113,18 @@ def _running(name):
     return False
 
 
-def play(minutes=30):
+def play(minutes=120):
     err = ensure_chess()                # BEFORE importing it: first run installs it
     if err:
-        T.loop_update(status="failed", last=err)
+        _end("couldn't start: " + err)
         return 1
     import chess
     log("=== new chess task")
     p, err = setup()
     if not p:
         log("setup failed:", err)
-        T.loop_update(status="failed", last=err)
-        T.mini_say("chess: " + T.short_say(err, 8))
+        _end("couldn't start: " + err)
+        time.sleep(4)
         return 1
     me = chess.WHITE if p.white_bottom else chess.BLACK
     log("setup ok: me", "white" if me else "black", "| turn", "white" if p.board.turn else "black",
@@ -1122,6 +1141,7 @@ def play(minutes=30):
         "white" if me else "black", "Stockfish" if stockfish() else "the built-in engine", lv0, level_band(lv0)))
     p.park()
     rnd, misses, lost, not_ours, stuck, quiet, checked_at = 0, 0, 0, 0, 0, 0, -1
+    ended = False
     failed, fails_total = {}, 0          # moves that didn't work on screen
     resyncs_in_row, just_resynced = 0, False
     until = time.time() + minutes * 60
@@ -1182,8 +1202,8 @@ def play(minutes=30):
             if "closed" in why:
                 # the game's tab/window is gone: nothing to wait for
                 log("stopping:", why)
-                T.loop_update(status="failed", last="stopped: the chess window was closed")
-                T.mini_say("chess: the game window is gone, stopped")
+                _end("stopped: the chess window/tab was closed")
+                ended = True
                 break
             T.loop_update(status="waiting for the window", last="paused: " + why)
             T.mini_say("chess: waiting, " + why)
@@ -1192,8 +1212,8 @@ def play(minutes=30):
         if p.board.is_game_over():
             res = p.board.result()
             won = (res == "1-0" and me) or (res == "0-1" and not me)
-            T.loop_update(status="game over", last="game over: %s (%s)" % (
-                res, "T.A.R. won" if won else "draw" if res == "1/2-1/2" else "T.A.R. lost"))
+            _end("game over: %s -- %s" % (res, "T.A.R. won!" if won else "draw" if res == "1/2-1/2" else "T.A.R. lost"))
+            ended = True
             T.mini_say("checkmate! " + ("I won" if won else "draw" if res == "1/2-1/2" else "I lost"))
             break
         seen = p.occ()
@@ -1229,8 +1249,8 @@ def play(minutes=30):
                 elif resyncs_in_row >= 3:
                     why = "the board keeps disagreeing with every legal move -- stopped (is something covering the board?)"
                     log("giving up:", why)
-                    T.loop_update(status="failed", last=why)
-                    T.mini_say("chess: stopped, can't read the board")
+                    _end(why)
+                    ended = True
                     break
                 else:
                     resync("the board doesn't match any legal move")
@@ -1291,8 +1311,8 @@ def play(minutes=30):
             if resyncs_in_row >= 3:
                 why = "my copy of the game keeps disagreeing with the board -- stopped"
                 log("giving up:", why)
-                T.loop_update(status="failed", last=why)
-                T.mini_say("chess: stopped, can't read the board")
+                _end(why)
+                ended = True
                 break
             resync("my piece isn't where I think")
             resyncs_in_row += 1
@@ -1349,8 +1369,8 @@ def play(minutes=30):
             # never drag the user's mouse around forever
             why = "my moves aren't landing on the board (tried %s) -- stopped. Is the game over or the board covered?" % san
             log("giving up:", why)
-            T.loop_update(status="failed", last=why)
-            T.mini_say("chess: stopped, my moves weren't landing")
+            _end(why)
+            ended = True
             break
         misses += 1
         T.loop_update(last="tried %s but the board didn't change -- retrying" % san)
@@ -1359,6 +1379,10 @@ def play(minutes=30):
             resync("my move didn't register")
             misses = 0
         time.sleep(1.0)
+    if not ended:
+        _end("stopped: time limit reached (%d min)" % minutes if time.time() >= until
+             else "stopped: another task took over")
+    time.sleep(4)                        # leave the reason readable on the card
     try:
         os.remove(T.LOOP)
     except OSError:
@@ -1374,7 +1398,7 @@ def play(minutes=30):
 
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "play":
-        mins = int(sys.argv[sys.argv.index("--minutes") + 1]) if "--minutes" in sys.argv else 30
+        mins = int(sys.argv[sys.argv.index("--minutes") + 1]) if "--minutes" in sys.argv else 120
         T.MINI_HOLD = 90
         try:
             rc = play(mins)
@@ -1382,8 +1406,7 @@ if __name__ == "__main__":
             # never die silently: the card / chat must say what broke
             import traceback
             traceback.print_exc()
-            T.loop_update(status="failed", last="chess crashed: %s" % e)
-            T.mini_say("chess crashed: " + T.short_say(str(e), 8))
+            _end("chess crashed: %s" % e)
             rc = 1
         sys.exit(rc)
     print(__doc__)

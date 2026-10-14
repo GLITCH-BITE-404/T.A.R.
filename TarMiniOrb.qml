@@ -168,6 +168,10 @@ Scope {
                 width: card.visible ? card.width : 0; height: card.visible ? card.height : 0
             }
             Region {
+                x: home.x + orbStop.x; y: home.y + orbStop.y
+                width: orbStop.visible ? orbStop.width : 0; height: orbStop.visible ? orbStop.height : 0
+            }
+            Region {
                 x: home.x + homeBubble.x; y: home.y + homeBubble.y
                 width: homeBubble.opacity > 0.05 ? homeBubble.width : 0
                 height: homeBubble.opacity > 0.05 ? homeBubble.height : 0
@@ -206,14 +210,42 @@ Scope {
         }
         Timer { id: replyTimer; interval: 9000; onTriggered: dock.showReply = false }
 
+        // messages typed while T.A.R. is still busy wait here and go out as soon as
+        // it's free (they used to be dropped silently -- Enter "did nothing")
+        property var queue: []
+        readonly property string live: (mini.host && mini.host.liveLine) ? mini.host.liveLine : ""
         function send() {
             var t = input.text.trim();
             if (t === "" || !mini.host) return;
+            input.text = "";
+            if (mini.host.busy) {
+                dock.queue = dock.queue.concat([t]);
+                return;
+            }
+            dock.deliver(t);
+        }
+        function deliver(t) {
             dock.asked = t;
             dock.reply = "";
             dock.showReply = false;
             mini.host.submit(t);
-            input.text = "";
+        }
+        function stopAll() {
+            // stop the answer being written AND every background task
+            dock.queue = [];
+            if (mini.host && mini.host.stopGeneration) mini.host.stopGeneration();
+            mini.act("stop_task");
+            loopFile.reload();
+        }
+        Timer {
+            // free again? send the next queued message
+            interval: 400; repeat: true
+            running: dock.queue.length > 0
+            onTriggered: if (mini.host && !mini.host.busy && dock.queue.length) {
+                var next = dock.queue[0];
+                dock.queue = dock.queue.slice(1);
+                dock.deliver(next);
+            }
         }
 
         // ---- masking box (screen coords) -- re-published when anything moves
@@ -343,6 +375,21 @@ Scope {
                 }
             }
         }
+        // ■ on the orb itself: stop thinking + every task, one click
+        Rectangle {
+            id: orbStop
+            visible: dock.busy || dock.taskOn || mini.on || dock.queue.length > 0
+            width: 22; height: 22; radius: 11
+            anchors.right: homeOrb.left
+            anchors.rightMargin: 4
+            anchors.verticalCenter: homeOrb.verticalCenter
+            color: orbStopArea.containsMouse ? theme.red : Qt.rgba(theme.base.r, theme.base.g, theme.base.b, 0.9)
+            border.width: 1; border.color: theme.red
+            Rectangle { anchors.centerIn: parent; width: 8; height: 8; radius: 1
+                        color: orbStopArea.containsMouse ? theme.base : theme.red }
+            MouseArea { id: orbStopArea; anchors.fill: parent; hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor; onClicked: dock.stopAll() }
+        }
         Timer { id: focusLater; interval: 60; onTriggered: input.forceActiveFocus() }
 
         // ---- the card: full reply, what it's doing, tasks, and a text box
@@ -369,13 +416,46 @@ Scope {
                 spacing: 10
 
                 // header
-                Row {
-                    spacing: 8
-                    Text { text: "T.A.R."; color: theme.mauve; font.family: "JetBrains Mono"
-                           font.pixelSize: 11; font.bold: true; font.letterSpacing: 2 }
-                    Text { text: dock.busy ? "· thinking…" : (mini.on ? "· working" : "· ready")
-                           color: theme.overlay1; font.family: "JetBrains Mono"; font.pixelSize: 10
-                           anchors.verticalCenter: parent.verticalCenter }
+                Item {
+                    width: parent.width
+                    height: 22
+                    Row {
+                        spacing: 8
+                        anchors.verticalCenter: parent.verticalCenter
+                        Text { text: "T.A.R."; color: theme.mauve; font.family: "JetBrains Mono"
+                               font.pixelSize: 11; font.bold: true; font.letterSpacing: 2 }
+                        Text { text: dock.busy ? "· thinking" : (mini.on || dock.taskOn ? "· working" : "· ready")
+                               color: theme.overlay1; font.family: "JetBrains Mono"; font.pixelSize: 10
+                               anchors.verticalCenter: parent.verticalCenter }
+                    }
+                    // STOP: the answer being written + every background task
+                    Rectangle {
+                        visible: dock.busy || dock.taskOn || mini.on || dock.queue.length > 0
+                        anchors.right: parent.right
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: stopLbl.implicitWidth + 18; height: 22; radius: 11
+                        color: stopArea.containsMouse ? Qt.rgba(theme.red.r, theme.red.g, theme.red.b, 0.3) : "transparent"
+                        border.width: 1; border.color: theme.red
+                        Text { id: stopLbl; anchors.centerIn: parent; text: "■ STOP"
+                               color: theme.red; font.family: "JetBrains Mono"; font.pixelSize: 9; font.bold: true }
+                        MouseArea { id: stopArea; anchors.fill: parent; hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor; onClicked: dock.stopAll() }
+                    }
+                }
+                // live: what T.A.R. is doing right now
+                Text {
+                    visible: dock.busy && dock.live !== ""
+                    width: parent.width
+                    text: "● " + dock.live
+                    color: theme.mauve; font.family: "JetBrains Mono"; font.pixelSize: 10
+                    wrapMode: Text.Wrap; maximumLineCount: 2; elide: Text.ElideRight
+                }
+                Text {
+                    visible: dock.queue.length > 0
+                    width: parent.width
+                    text: "queued (sends when T.A.R. is free): " + dock.queue.join("  |  ")
+                    color: theme.yellow; font.family: "JetBrains Mono"; font.pixelSize: 9
+                    wrapMode: Text.Wrap; maximumLineCount: 2; elide: Text.ElideRight
                 }
 
                 // doing right now (worker orb's line)
@@ -553,7 +633,7 @@ Scope {
                         Text {
                             anchors.verticalCenter: parent.verticalCenter
                             visible: input.text === ""
-                            text: dock.busy ? "thinking…" : "ask T.A.R.…"
+                            text: dock.busy ? "busy -- type anyway, it'll queue" : "ask T.A.R.…"
                             color: theme.overlay1
                             font: input.font
                         }
@@ -585,7 +665,7 @@ Scope {
                 anchors.centerIn: parent
                 width: Math.min(implicitWidth, 274)
                 // short: the full reply is one click away in the card
-                text: dock.busy ? "thinking…" : dock.shortReply(dock.reply)
+                text: dock.busy ? (dock.live || "thinking…") : dock.shortReply(dock.reply)
                 color: theme.text
                 font.family: "JetBrains Mono"
                 font.pixelSize: 11

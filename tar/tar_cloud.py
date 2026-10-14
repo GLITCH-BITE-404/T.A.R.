@@ -366,6 +366,10 @@ def run_tool(name, payload):
         return ("not allowed: the user said exec, and %r only animates T.A.R.'s OWN window. Do it "
                 "for real on their screen/system: screen_fx / make_fx for visual effects, or the "
                 "real action that does it." % action)
+    # live narration: what's about to happen (the orb shows it while it runs)
+    emit("doing", v="%s %s" % (action.replace("_", " "),
+                              str(args.get("target") or args.get("q") or args.get("what")
+                                  or args.get("path") or args.get("game") or "")[:50]))
     if action in _MINI_LABELS:
         what = "" if action in ("look", "scroll") else (args.get("target") or args.get("what") or "")
         T.mini_say(_MINI_LABELS[action] + (" " + T.short_say(what, 3) if what else ""))

@@ -46,6 +46,8 @@ Item {
     property string viewMode: "orb"     // "orb" (jarvis) | "chat" (llm window)
     property string lastUser: ""
     property string lastReply: ""
+    // what T.A.R. is doing RIGHT NOW, in a few words (the mini orb shows it live)
+    property string liveLine: ""
     property bool micEnabled: false
     property bool speakReplies: false
     property real ttsVolume: 0.7
@@ -932,6 +934,9 @@ Item {
         try { d = JSON.parse(line); } catch (e) { return; }
 
         if (d.t === "state") {
+            if (d.v === "thinking") window.liveLine = "thinking…";
+            else if (d.v === "speaking") window.liveLine = "answering…";
+            else if (d.v === "idle") window.liveLine = "";
             if (d.v === "thinking") {
                 window.mode = "thinking"; window.statusNote = "thinking";
                 if (d.model) { window.activeModel = d.model;
@@ -976,7 +981,10 @@ Item {
             window.statusNote = "fetching  " + (d.pct !== undefined ? d.pct + "%" : "");
         } else if (d.t === "mem") {
             say("sys", "committed to memory: " + d.v);
+        } else if (d.t === "doing") {
+            window.liveLine = "→ " + String(d.v || "").trim() + "…";
         } else if (d.t === "info") {
+            if (d.v) window.liveLine = String(d.v).substring(0, 90);
             // Engine bookkeeping ("speed: reusing loaded ...", "unloaded X to
             // free RAM") is diagnostics, not conversation. It belongs in the
             // status line, not interleaved with what you and T.A.R. said.
@@ -1027,6 +1035,7 @@ Item {
             // Long results (a whole screen description, a file listing) are
             // for the model; the transcript only needs the gist.
             var actTxt = String(d.v || d.action);
+            window.liveLine = "✓ " + String(d.action || "") + ": " + actTxt.split(" -- ")[0].substring(0, 70);
             if (actTxt.length > 280)
                 actTxt = actTxt.substring(0, 280).replace(/\s+\S*$/, "") + " \u2026";
             window.say("act", actTxt);

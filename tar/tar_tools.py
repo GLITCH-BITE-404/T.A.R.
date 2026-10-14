@@ -2596,7 +2596,7 @@ def a_play_chess(args):
                 "lichess (vs a bot or a person), then say 'play chess'")
     if loop_running():
         a_stop_task({})
-    minutes = max(1, min(120, _int(args.get("minutes"), 30)))
+    minutes = max(1, min(240, _int(args.get("minutes"), 120)))
     if args.get("band") and not args.get("level"):
         args = dict(args, level=args["band"])
     if _chess_level_arg(args):
