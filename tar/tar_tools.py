@@ -1808,6 +1808,165 @@ def a_battery(_):
     return "; ".join(keep)
 
 
+# -- the highlighted text --------------------------------------------------------
+# "translate this" / "explain this" / "fix this" in ANY app, on whatever the
+# user highlighted. Wayland's PRIMARY selection already holds it, so there's
+# no Ctrl+C (that's SIGINT in a terminal, and it clobbers the clipboard).
+_SEL_OPS = {
+    "translate": "Translate it to {to}. Reply with ONLY the translation.",
+    "explain":   "Explain what it means, simply and briefly.",
+    "fix":       "Fix its spelling, grammar and punctuation. Keep its language, meaning and "
+                 "tone. Reply with ONLY the fixed text.",
+    "shorten":   "Make it shorter, keeping the meaning and the language. Reply with ONLY the "
+                 "new text.",
+    "summarize": "Summarize it in a few short sentences, in its own language.",
+    "rewrite":   "Rewrite it {how}. Keep its language. Reply with ONLY the new text.",
+    "answer":    "It is a question (or questions): answer it correctly and concisely, in its "
+                 "own language.",
+}
+_SEL_ALIAS = {"translation": "translate", "summarise": "summarize", "summary": "summarize",
+              "tldr": "summarize", "correct": "fix", "proofread": "fix", "shorter": "shorten",
+              "simplify": "rewrite", "solve": "answer", "what": "explain", "meaning": "explain",
+              "mean": "explain", "תרגם": "translate", "תתרגם": "translate", "תסביר": "explain",
+              "הסבר": "explain", "תקן": "fix", "תתקן": "fix", "תקצר": "shorten", "קצר": "shorten",
+              "תסכם": "summarize", "סכם": "summarize", "תענה על": "answer", "ענה על": "answer",
+              "תפתור": "answer", "פתור": "answer"}
+_HEB = re.compile(r"[֐-׿]")
+
+
+def _selection_text():
+    """What's highlighted right now, in whichever app ('' if nothing)."""
+    if not shutil.which("wl-paste"):
+        return ""
+    try:
+        r = subprocess.run(["wl-paste", "--primary", "--no-newline"], capture_output=True,
+                           text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return r.stdout if r.returncode == 0 else ""
+
+
+def _llm_text(prompt, max_tokens=3000):
+    """One text-only cloud call -> (text, error). Lite by default: these are
+    quick jobs, and the bigger model sat on 503 retries for over a minute."""
+    try:
+        import tar_cloud as C
+    except ImportError:
+        return None, "this needs the cloud backend"
+    model = cfg().get("selection_model") or "gemini-flash-lite-latest"
+    if not C.api_key(C.provider_of(model)):
+        model = "gemini-flash-lite-latest"
+    key = C.api_key(C.provider_of(model))
+    if not key:
+        return None, "this needs a cloud key -- type /key"
+    try:
+        r = C.llm_call(key, model, {"contents": [{"role": "user", "parts": [{"text": prompt}]}],
+                                    "generationConfig": {"maxOutputTokens": max_tokens,
+                                                         "temperature": 0.2}})
+    except Exception as e:
+        return None, "the model call failed (%s)" % e
+    parts = ((r.get("candidates") or [{}])[0].get("content") or {}).get("parts") or []
+    txt = "".join(p.get("text", "") for p in parts if not p.get("thought")).strip()
+    return (txt, None) if txt else (None, "the model returned nothing")
+
+
+def a_selection(args):
+    """Do something with the text the user highlighted in any app: show the
+    result, or (replace=yes) paste it over the highlight and check the screen."""
+    global REPLY_TEXT
+    op = (args.get("op") or args.get("action") or "").strip().lower()
+    op = _SEL_ALIAS.get(op, op)
+    q = (args.get("q") or "").strip()
+    if op not in _SEL_OPS and not q:
+        op = "explain"
+    text = _selection_text().strip()
+    if not text and op in ("explain", "answer", "summarize", "translate") and not args.get("replace"):
+        # "explain this" with nothing highlighted means the thing on screen
+        return a_look({"q": _SEL_OPS[op].format(to=(args.get("to") or "English").strip(), how="")
+                       .replace("It is a question", "The screen shows a question")
+                       .replace(" it ", " what's on the screen ").replace(" it.", " what's on the screen.")})
+    if not text:
+        return ("NOT DONE: nothing is highlighted -- select the text in any app first "
+                "(just drag over it), then ask again")
+    text = text[:12000]
+    to = (args.get("to") or "").strip() or ("English" if _HEB.search(text) else "Hebrew")
+    if op in _SEL_OPS:
+        task = _SEL_OPS[op].format(to=to, how=(args.get("how") or "more clearly").strip())
+        if q:
+            task += " The user adds: " + q
+    else:
+        op, task = "do", "Do what the user asks with it: " + q
+    prompt = ("Today is %s.\nThe user highlighted this text:\n\"\"\"\n%s\n\"\"\"\n%s\n"
+              "No intro, no markdown." % (time.strftime("%A %d %B %Y"), text, task))
+    out, err = _llm_text(prompt)
+    if err:
+        return "NOT DONE: " + err
+    if str(args.get("replace") or "").lower() not in ("1", "true", "yes", "on"):
+        REPLY_TEXT = out
+        return "%s the highlighted text (%d chars) -- VERIFIED: the result is shown" % (op, len(text))
+    err = _away_from_tar(args)
+    if err:
+        REPLY_TEXT = out
+        return err + " -- shown the result instead of replacing"
+    if _selection_text().strip() != text:
+        REPLY_TEXT = out
+        return ("NOT DONE: the highlight changed while I worked, so pasting could land in the "
+                "wrong place -- shown the result instead")
+    mon = _monitor()
+    pre, post = os.path.join(DATA, "sel-before.jpg"), os.path.join(DATA, "sel-after.jpg")
+    have = _shot(pre)
+    rc, o = put_text(out)               # Ctrl+V over a live highlight replaces it
+    if rc != 0:
+        REPLY_TEXT = out
+        return "NOT DONE: pasting failed (%s) -- shown the result instead" % o
+    time.sleep(0.3)
+    ch = _screen_change(pre, post, mon["width"] // 2, mon["height"] // 2) \
+        if have and _shot(post) else None
+    if ch is None:
+        return "replaced the highlighted text with the %s (couldn't check the screen)" % op
+    if ch[1] < 0.002:
+        REPLY_TEXT = out
+        return ("NOT VERIFIED: pasted, but nothing on screen changed -- the highlight was "
+                "probably gone. The result is shown so you can paste it yourself")
+    return "replaced the highlighted text with the %s -- VERIFIED: the screen changed" % op
+
+
+def _dictating():
+    here = os.path.dirname(os.path.abspath(__file__)).encode()
+    mark = os.path.join(here, b"tar_dictate.py")
+    for pid in _worker_pids():
+        try:
+            if mark in open("/proc/%d/cmdline" % pid, "rb").read().split(b"\0"):
+                return pid
+        except OSError:
+            pass
+    return None
+
+
+def a_dictate(args):
+    """Type what the user says into an app until they say stop (tar_dictate.py)."""
+    if _dictating():
+        return "already dictating -- say 'stop dictation' (or tell me 'stop') to end it"
+    err = _away_from_tar(args)
+    if err:
+        return err
+    act = _active_window() or {}
+    minutes = max(1, min(120, _int(args.get("minutes"), 20)))
+    here = os.path.dirname(os.path.abspath(__file__))
+    log = open(os.path.join(DATA, "dictate.log"), "a")
+    p = subprocess.Popen([sys.executable, os.path.join(here, "tar_dictate.py"),
+                          "--win", act["address"], "--minutes", str(minutes)],
+                         stdout=log, stderr=log, start_new_session=True,
+                         env=dict(os.environ, TAR_DATA=DATA))
+    time.sleep(0.6)
+    if p.poll() is not None:
+        return "NOT DONE: the dictation listener quit right away (see dictate.log)"
+    return ("dictating into %s %r -- speak and it types; pauses split sentences. Say 'new "
+            "line', 'delete that', or 'stop dictation' to end (stops by itself after 90s of "
+            "silence or %d min). VERIFIED: listener running" % (
+                _label(act), (act.get("title") or "")[:40], minutes))
+
+
 # -- research ------------------------------------------------------------------
 # "look up X": search, read the top pages, answer briefly WITH the links. One
 # Gemini call per question (search is DuckDuckGo's key-less HTML page), and
@@ -3320,7 +3479,8 @@ def _worker_pids():
     trust loop.json alone: older chess players kept running after it was
     rewritten and fought over the mouse."""
     here = os.path.dirname(os.path.abspath(__file__))
-    marks = [os.path.join(here, "tar_chess.py").encode(), os.path.join(here, "fx", "host.qml").encode()]
+    marks = [os.path.join(here, "tar_chess.py").encode(), os.path.join(here, "fx", "host.qml").encode(),
+             os.path.join(here, "tar_dictate.py").encode()]
     cloud = os.path.join(here, "tar_cloud.py").encode()
     me = os.getpid()
     out = []
@@ -4401,7 +4561,9 @@ def _sheet_page(extra, mon, done, context=""):
     if not ok:
         return None, "couldn't take a screenshot", None
     _mask(shot, rect, mon)
-    ctx = ("The document's text read so far by OCR (may have small OCR typos) -- use it to "
+    # without it the model guesses its training year for "what's the date?"
+    ctx = "Today is %s.\n" % time.strftime("%A %d %B %Y")
+    ctx += ("The document's text read so far by OCR (may have small OCR typos) -- use it to "
            "answer questions about the story / passage, even parts not on this screen:\n\"\"\"\n%s\n\"\"\"\n" % context[:20000]) if context else ""
     txt, err = _gemini_image(shot, _SHEET_PROMPT.format(extra=(" The user says: " + extra) if extra else "",
                                                         context=ctx),
@@ -4714,7 +4876,15 @@ def _type_slots(slots, mon):
     if _shot(base):
         sxy = _img_scale(base, mon)
         olines = _ocr_lines(base, *sxy)
-    for x in sorted(slots, key=lambda x: x["box"][0]):
+    # 'after' answers each INSERT a line, pushing every question below them
+    # down. Typed top-down, the next click lands on the line just inserted
+    # whenever _question_end can't OCR the question (Hebrew without tessdata
+    # -heb) and falls back to the model's box from the untouched screenshot --
+    # every answer then stacked under question 1. Bottom-up, nothing still to
+    # type ever moves. The rest insert no lines and stay top-down, first.
+    rest = sorted((x for x in slots if x.get("kind") != "after"), key=lambda x: x["box"][0])
+    after = sorted((x for x in slots if x.get("kind") == "after"), key=lambda x: -x["box"][0])
+    for x in rest + after:
         y0, x0, y1, x1 = x["box"]
         kind = x.get("kind")
         cy = int((y0 + y1) / 2 / 1000 * mon["height"])
@@ -6338,6 +6508,24 @@ ACTIONS = {
     "screen_read": (a_screen_read, "OCR what is on screen",
                    [r"^(?:read|what'?s on) (?:my |the )?screen$",
                     r"^what do you see$", r"^read this screen$"]),
+    "selection":  (a_selection, "do something with the text the user HIGHLIGHTED in any app "
+                                "(\"this\", \"the selected text\"): op=translate|explain|fix|"
+                                "shorten|summarize|rewrite|answer, to=<language> for translate, "
+                                "how= for rewrite, q= for anything else; replace=yes pastes the "
+                                "result over the highlight (only when the user asks to change "
+                                "the text itself)",
+                   [r"^(?P<op>translate|explain|fix|correct|proofread|shorten|summari[sz]e|"
+                    r"simplify|answer|solve) (?:this|that|it|the selected text|the selection|"
+                    r"what i (?:selected|highlighted))(?: (?:to|into) (?P<to>[a-z]+))?$",
+                    r"^what does (?:this|that) (?P<op>mean)$",
+                    r"^(?P<op>tldr)(?: this)?$",
+                    r"^(?P<op>תרגם|תתרגם|תסביר|הסבר|תקן|תתקן|תקצר|קצר|תסכם|סכם|תענה על|ענה על|תפתור|פתור) "
+                    r"(?:את )?(?:זה|הטקסט הזה|מה שסימנתי)(?: (?:ל|לשפה )(?P<to>[\wא-ת]+))?$"]),
+    "dictate":    (a_dictate, "DICTATION: type everything the user SAYS into an app until they "
+                              "say stop (into=<app>, else the last used window; minutes=)",
+                   [r"^(?:start )?dictat(?:e|ion|ing)(?: (?:into|in|to) (?P<into>.+))?$",
+                    r"^(?:type|write) (?:down )?what i say(?: (?:into|in) (?P<into>.+))?$",
+                    r"^(?:תכתוב|כתוב|תקליד) (?:את )?מה שאני אומר$", r"^(?:הכתבה|תתחיל הכתבה)$"]),
     "clip_get":   (a_clip_get, "read the clipboard",
                    [r"^(?:what'?s|read) (?:in )?(?:the )?clipboard$",
                     r"^paste$"]),
@@ -6573,7 +6761,7 @@ def match(text):
     return None, None
 
 
-_PRIORITY = ("screen_fx", "stop_fx", "remember", "forget", "install_chess", "chess_level", "play_chess", "play_game", "research", "find_file", "open_found", "organize", "undo_organize", "to_pdf", "virus_scan", "selfie", "evil", "missiles", "camera_live", "devices", "now_playing", "note", "stopwatch", "focus", "coin", "dice", "record", "remind", "wifi", "bluetooth", "dnd", "nightlight", "power",
+_PRIORITY = ("dictate", "selection", "screen_fx", "stop_fx", "remember", "forget", "install_chess", "chess_level", "play_chess", "play_game", "research", "find_file", "open_found", "organize", "undo_organize", "to_pdf", "virus_scan", "selfie", "evil", "missiles", "camera_live", "devices", "now_playing", "note", "stopwatch", "focus", "coin", "dice", "record", "remind", "wifi", "bluetooth", "dnd", "nightlight", "power",
              "play", "weather", "datetime", "battery", "calc", "processes",
              "colorpick", "cliphist")
 
