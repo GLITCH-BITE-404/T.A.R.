@@ -216,19 +216,33 @@ def snap_board(shot, box, mon_off):
 
 
 def _snap_grid(shot, box, mon_off):
-    """Nudge the vision box until the 8x8 pattern fits best."""
-    best = (_pattern_score(shot, box, mon_off), box)
+    """Find the 8x8 pattern near the vision box: coarse search over a wide range
+    of sizes/positions (the AI's box can be ~15% off, and boards can be tiny),
+    then a fine search around the best."""
     x1, y1, x2, y2 = box
-    side = x2 - x1
-    for scale in (0.97, 0.985, 1.0, 1.015, 1.03):
-        s = side * scale
-        for dx in range(-12, 13, 3):
-            for dy in range(-12, 13, 3):
-                cx, cy = (x1 + x2) / 2 + dx, (y1 + y2) / 2 + dy
-                b = (int(cx - s / 2), int(cy - s / 2), int(cx + s / 2), int(cy + s / 2))
-                sc = _pattern_score(shot, b, mon_off)
-                if sc > best[0]:
-                    best = (sc, b)
+    cx0, cy0 = (x1 + x2) / 2, (y1 + y2) / 2
+    side0 = x2 - x1
+    best = (_pattern_score(shot, box, mon_off), tuple(box))
+
+    def search(cx, cy, side, scales, offs):
+        nonlocal best
+        for scale in scales:
+            s_ = side * scale
+            for dx in offs:
+                for dy in offs:
+                    b = (int(cx + dx - s_ / 2), int(cy + dy - s_ / 2),
+                         int(cx + dx + s_ / 2), int(cy + dy + s_ / 2))
+                    sc = _pattern_score(shot, b, mon_off)
+                    if sc > best[0]:
+                        best = (sc, b)
+    step = max(2, side0 / 40)
+    search(cx0, cy0, side0, [0.85 + 0.025 * i for i in range(13)],
+           [k * step for k in range(-6, 7)])
+    for _ in range(2):                  # refine around the best so far
+        b = best[1]
+        cx, cy, sd = (b[0] + b[2]) / 2, (b[1] + b[3]) / 2, b[2] - b[0]
+        step = max(1, step / 3)
+        search(cx, cy, sd, [0.985, 0.993, 1.0, 1.007, 1.015], [k * step for k in range(-3, 4)])
     return best[1], best[0]
 
 
