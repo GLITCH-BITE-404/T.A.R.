@@ -168,10 +168,6 @@ Scope {
                 width: card.visible ? card.width : 0; height: card.visible ? card.height : 0
             }
             Region {
-                x: home.x + orbStop.x; y: home.y + orbStop.y
-                width: orbStop.visible ? orbStop.width : 0; height: orbStop.visible ? orbStop.height : 0
-            }
-            Region {
                 x: home.x + homeBubble.x; y: home.y + homeBubble.y
                 width: homeBubble.opacity > 0.05 ? homeBubble.width : 0
                 height: homeBubble.opacity > 0.05 ? homeBubble.height : 0
@@ -374,21 +370,6 @@ Scope {
                     if (dock.cardOpen) { dock.showReply = false; focusLater.start(); }
                 }
             }
-        }
-        // ■ on the orb itself: stop thinking + every task, one click
-        Rectangle {
-            id: orbStop
-            visible: dock.busy || dock.taskOn || mini.on || dock.queue.length > 0
-            width: 22; height: 22; radius: 11
-            anchors.right: homeOrb.left
-            anchors.rightMargin: 4
-            anchors.verticalCenter: homeOrb.verticalCenter
-            color: orbStopArea.containsMouse ? theme.red : Qt.rgba(theme.base.r, theme.base.g, theme.base.b, 0.9)
-            border.width: 1; border.color: theme.red
-            Rectangle { anchors.centerIn: parent; width: 8; height: 8; radius: 1
-                        color: orbStopArea.containsMouse ? theme.base : theme.red }
-            MouseArea { id: orbStopArea; anchors.fill: parent; hoverEnabled: true
-                        cursorShape: Qt.PointingHandCursor; onClicked: dock.stopAll() }
         }
         Timer { id: focusLater; interval: 60; onTriggered: input.forceActiveFocus() }
 
