@@ -194,14 +194,15 @@ MODELS = [
      "blurb": "Google free tier. Best free Gemini at games and multi-step tasks.",
      "in_per_mtok": 0.0, "out_per_mtok": 0.0, "backup": 1},
     # ---- OpenAI-format providers (free tiers)
-    {"id": "groq/llama-3.3-70b-versatile", "name": "Llama 3.3 70B (Groq)",
-     "blurb": "Free, ~300 tokens/s. Strong all-rounder, 1,000 requests/day.",
-     "in_per_mtok": 0.0, "out_per_mtok": 0.0, "backup": 2},
+    # Groq retired its Llama models (Oct 2026) -- these are what a free key gets
     {"id": "groq/openai/gpt-oss-120b", "name": "gpt-oss 120B (Groq)",
-     "blurb": "Free. OpenAI's open model, good reasoning + tools, 1,000/day.",
+     "blurb": "Free, very fast. OpenAI's open model -- strong reasoning + tools.",
+     "in_per_mtok": 0.0, "out_per_mtok": 0.0, "backup": 2},
+    {"id": "groq/qwen/qwen3.8-27b", "name": "Qwen 3.8 27B (Groq)",
+     "blurb": "Free, fast. Good all-rounder, handles Hebrew well.",
      "in_per_mtok": 0.0, "out_per_mtok": 0.0, "backup": 3},
-    {"id": "groq/llama-3.1-8b-instant", "name": "Llama 3.1 8B (Groq)",
-     "blurb": "Free, instant, 14,400 requests/day. Fine for simple commands.",
+    {"id": "groq/openai/gpt-oss-20b", "name": "gpt-oss 20B (Groq)",
+     "blurb": "Free, near-instant. Fine for simple commands.",
      "in_per_mtok": 0.0, "out_per_mtok": 0.0, "backup": 9},
     {"id": "mistral/mistral-large-latest", "name": "Mistral Large",
      "blurb": "Free on the Experiment plan. Strong, big monthly quota.",
@@ -794,7 +795,11 @@ def backup_models(model, body=None):
     only image-capable ones when the request carries a screenshot."""
     imgs = _has_images(body or {})
     out = []
-    for m in sorted((m for m in MODELS if m.get("backup")), key=lambda m: m["backup"]):
+    # the same provider's other models first: each has its own per-minute budget
+    # and the conversation's tool calls stay in one format
+    mine = provider_of(model)
+    for m in sorted((m for m in MODELS if m.get("backup")),
+                    key=lambda m: (provider_of(m["id"]) != mine, m["backup"])):
         p = provider_of(m["id"])
         if m["id"] == model or not api_key(p) or PROVIDERS[p]["kind"] not in ("gemini", "openai"):
             continue
@@ -844,10 +849,43 @@ def llm_call(key, model, body, fallback=True):
             last = e
         nxt = next((x for x in chain[i + 1:] if x not in gone and api_key(provider_of(x))), None)
         if nxt:
-            emit("info", v="%s is out of requests -- switching to %s" % (m, nxt))
+            emit("info", v="%s is %s -- switching to %s" % (
+                m, "busy" if isinstance(last, _Overloaded) else "out of requests", nxt))
     raise RuntimeError("every model you have a key for is out of free requests today -- "
                        "add another provider with /key, or try later" if last else
                        "no cloud model available -- add a key with /key")
+
+
+# Free tiers with a small tokens-per-minute budget (Groq: 8,000/min) can't take
+# T.A.R.'s full prompt twice a minute: they get a compact action list and only
+# the last few messages.
+_SMALL_TPM = ("groq",)
+
+
+def _compact_actions(desc):
+    """Action list with each help text cut to its first few words."""
+    out = []
+    for line in desc.split("\n"):
+        if line.startswith("  ") and " — " in line:
+            name, help_ = line.strip().split(" — ", 1)
+            first = re.split(r"(?<=[.;])\s", help_)[0]   # keeps (arg=) hints
+            words = first.split()
+            out.append("  %s — %s" % (name, " ".join(words[:14]) + ("…" if len(words) > 14 else "")))
+        else:
+            out.append(line)
+    return "\n".join(out)
+
+
+def _trim_history(msgs, keep=6):
+    """System prompt + the last `keep` messages, never starting on a dangling tool result."""
+    sys_ = [m for m in msgs[:1] if m.get("role") == "system"]
+    rest = msgs[len(sys_):]
+    if len(rest) <= keep:
+        return msgs
+    rest = rest[-keep:]
+    while rest and (rest[0].get("role") == "tool" or rest[0].get("tool_calls")):
+        rest = rest[1:]
+    return sys_ + rest
 
 
 def _oa_id(i, j):
@@ -898,9 +936,13 @@ def _to_openai(model, body):
                 for d in imgs]})
         else:
             msgs.append({"role": "user", "content": "\n".join(texts)})
+    compact = provider_of(model) in _SMALL_TPM
+    if compact:
+        msgs = _trim_history(msgs, keep=6)
     out = {"model": model_name(model), "messages": msgs}
     tools = [{"type": "function", "function": {
-        "name": fd["name"], "description": fd.get("description", ""),
+        "name": fd["name"], "description": _compact_actions(fd.get("description", "")) if compact
+        else fd.get("description", ""),
         "parameters": fd.get("parametersJsonSchema") or fd.get("parameters")
         or {"type": "object", "properties": {}}}}
         for t in body.get("tools") or [] for fd in t.get("functionDeclarations", [])]
@@ -925,7 +967,10 @@ def _from_openai(r):
             args = json.loads(fn.get("arguments") or "{}")
         except ValueError:
             args = {}
-        parts.append({"functionCall": {"name": fn.get("name", ""), "args": args}})
+        # Gemini 3 demands a thoughtSignature on every past call; this documented
+        # placeholder lets a conversation continue there after another provider acted
+        parts.append({"functionCall": {"name": fn.get("name", ""), "args": args},
+                      "thoughtSignature": "skip_thought_signature_validator"})
     return {"candidates": [{"content": {"role": "model", "parts": parts}}]}
 
 
@@ -939,6 +984,9 @@ def openai_call(key, model, body):
     for attempt in range(2):
         req = urllib.request.Request(prov["base"] + "/chat/completions", data=data, headers={
             "Content-Type": "application/json", "Authorization": "Bearer " + key,
+            # Cloudflare (in front of Groq) blocks Python's default urllib agent: 403 / 1010
+            # Cloudflare (in front of Groq) blocks Python's default urllib agent: 403 / 1010
+            "User-Agent": "T.A.R./1.0 (BITE-OS assistant; +https://github.com/GLITCH-BITE-404/T.A.R.)",
             "HTTP-Referer": "https://github.com/GLITCH-BITE-404/T.A.R.", "X-Title": "T.A.R."})
         try:
             with urllib.request.urlopen(req, timeout=90) as r:
@@ -948,6 +996,8 @@ def openai_call(key, model, body):
             low = detail.lower()
             if e.code == 429 and re.search(r"per day|\brpd\b|daily|free-models-per-day|tokens per month", low):
                 raise _DailyQuota(3600)
+            if e.code == 429 and "tokens per minute" in low:
+                raise _Overloaded(model, "over its per-minute token limit")
             if e.code == 429 and attempt == 0:
                 wait = min(20, int(float(e.headers.get("retry-after") or 8)))
                 emit("info", v="%s rate limit -- waiting %ds" % (prov["name"], wait))
@@ -967,6 +1017,8 @@ def openai_call(key, model, body):
                 raise RuntimeError("%s rate limit: %s" % (prov["name"], str(detail)[:200]))
             if e.code in (500, 502, 503, 504):
                 raise _Overloaded(model, str(detail)[:200])
+            if e.code == 413 or "tokens per minute" in str(detail).lower():
+                raise _Overloaded(model, "over its per-minute token limit")
             raise RuntimeError("%s HTTP %d: %s" % (prov["name"], e.code, str(detail)[:300]))
         except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
             if attempt == 0:

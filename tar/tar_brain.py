@@ -1332,6 +1332,29 @@ def cloud_rows(cfg):
     return rows
 
 
+def resolve_cloud_model(name):
+    """'groq' / 'gemini' / 'mistral' -> that provider's best cloud model; a partial
+    name ('70b', 'gpt-oss') -> the one cloud model it matches. None otherwise."""
+    try:
+        sys.path.insert(0, HERE)
+        import tar_cloud
+    except Exception:
+        return None
+    n = (name or "").strip().lower()
+    if not n:
+        return None
+    if any(m["id"] == n for m in tar_cloud.MODELS):
+        return n
+    prov = {"gemini": "google", "google": "google", "groq": "groq", "mistral": "mistral",
+            "openrouter": "openrouter", "claude": "anthropic", "anthropic": "anthropic"}.get(n)
+    if prov:
+        mine = [m for m in tar_cloud.MODELS if tar_cloud.provider_of(m["id"]) == prov]
+        mine.sort(key=lambda m: m.get("backup") or (0 if m.get("default") else 99))
+        return mine[0]["id"] if mine else None
+    hits = [m["id"] for m in tar_cloud.MODELS if n in m["id"].lower() or n in m.get("name", "").lower()]
+    return hits[0] if len(hits) == 1 else None
+
+
 def is_cloud_model(name):
     try:
         sys.path.insert(0, HERE)
@@ -1711,6 +1734,9 @@ def main():
 
     elif a.cmd == "set-model":
         cfg = config()
+        resolved = resolve_cloud_model(a.model)
+        if resolved:
+            a.model = resolved              # "groq" -> groq/llama-3.3-70b-versatile
         if is_cloud_model(a.model):
             # picking a cloud model IS switching to the cloud brain
             cfg["cloud_model"] = a.model
@@ -1724,6 +1750,20 @@ def main():
                 emit("ok", v="cloud model set to %s, but %s"
                              % (a.model, tar_cloud.status()[1]))
         else:
+            # an unknown name used to switch the brain to LOCAL and try to download
+            # a model called e.g. "groq" -- only pin real local (ollama) models
+            try:
+                import tar_caps
+                local = {str(m.get("name") if isinstance(m, dict) else m) for m in (tar_caps.ollama_models() or [])}
+            except Exception:
+                local = set()
+            local |= installed()
+            if a.model not in local and ":" not in a.model and "/" not in a.model:
+                import tar_cloud
+                emit("error", v="don't know a model called %r -- cloud: %s; local: %s" % (
+                    a.model, ", ".join(m["id"] for m in tar_cloud.MODELS),
+                    ", ".join(sorted(local)) or "none installed"))
+                return
             cfg["model"] = a.model; cfg["autotier"] = False
             cfg["backend"] = "local"      # picking a local model leaves cloud
             save_config(cfg)
